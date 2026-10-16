@@ -110,6 +110,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
+import dev.streetsnap.camera.ExposureMode
 import dev.streetsnap.camera.FocalLength
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
@@ -135,13 +136,17 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
     val latestPhoto by model.latestPhoto.collectAsStateWithLifecycle()
     val lutLoading by model.lutLoading.collectAsStateWithLifecycle()
     val loaded by model.settingsLoaded.collectAsStateWithLifecycle()
+    val compositionState by model.composition.state.collectAsStateWithLifecycle()
+    val compositionSource by model.composition.source.collectAsStateWithLifecycle()
+    val compositionOverlay by model.composition.overlay.collectAsStateWithLifecycle()
     var permitted by remember { mutableStateOf(activity.hasCameraPermission()) }
     var denied by remember { mutableStateOf(false) }
     var adjustmentTab by remember { mutableStateOf<AdjustmentTab?>(null) }
     var showCapabilities by remember { mutableStateOf(false) }
+    var showMascotPicker by remember { mutableStateOf(false) }
     var retry by remember { mutableIntStateOf(0) }
     val snackbar = remember { SnackbarHostState() }
-    BackHandler(enabled = adjustmentTab != null && !showCapabilities) { adjustmentTab = null }
+    BackHandler(enabled = adjustmentTab != null && !showCapabilities && !showMascotPicker) { adjustmentTab = null }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
         permitted = it
         denied = !it
@@ -157,13 +162,28 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer) }
     }
+    DisposableEffect(lifecycle, model) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> model.onForegroundChanged(true)
+                Lifecycle.Event.ON_PAUSE -> model.onForegroundChanged(false)
+                else -> Unit
+            }
+        }
+        lifecycle.lifecycle.addObserver(observer)
+        model.onForegroundChanged(lifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+        onDispose { lifecycle.lifecycle.removeObserver(observer); model.onForegroundChanged(false) }
+    }
     LaunchedEffect(Unit) { if (!permitted) permission.launch(Manifest.permission.CAMERA) }
+    LaunchedEffect(activity, loaded, settings.captureOrientation) {
+        if (loaded) activity.applyCaptureOrientation(settings.captureOrientation)
+    }
     LaunchedEffect(model) {
         model.notices.collect { notice ->
             snackbar.showSnackbar(notice.text, duration = SnackbarDuration.Short)
         }
     }
-    val currentReady by rememberUpdatedState(permitted && state.isReady && !showCapabilities)
+    val currentReady by rememberUpdatedState(permitted && state.isReady && !showCapabilities && !showMascotPicker)
     DisposableEffect(activity, model) {
         activity.volumeShutter = { trigger ->
             if (currentReady) {
@@ -177,13 +197,12 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
             Column(Modifier.fillMaxSize()) {
-                Row(Modifier.fillMaxWidth().height(52.dp).padding(horizontal = 20.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text("途帧", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    Text(" / SNAP", Modifier.padding(start = 6.dp), fontFamily = FontFamily.Monospace,
-                        color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
-                    Spacer(Modifier.weight(1f))
-                    TextButton(onClick = { showCapabilities = true }) { Text("设备") }
+                CameraModel.fromId(settings.mascotCamera)?.let { mascot ->
+                    Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+                        CameraArtwork(mascot, Modifier.size(78.dp, 48.dp).clip(RoundedCornerShape(10.dp))
+                            .clickable(enabled = loaded, role = Role.Button) { showMascotPicker = true }
+                            .semantics { contentDescription = "相机摆件：${mascot.brand} ${mascot.model}，点按更换" })
+                    }
                 }
                 if (!permitted) {
                     PermissionPanel(denied, { permission.launch(Manifest.permission.CAMERA) }, activity::openAppSettings)
@@ -193,13 +212,15 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         if (landscape && maxWidth >= 600.dp) {
                             val sideWidth = minOf(356.dp, maxWidth * .48f)
                             Row(Modifier.fillMaxSize()) {
-                                Viewfinder(model, state, settings, retry, true,
+                                Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay,
                                     Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ })
                                 ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                     Modifier.width(sideWidth).fillMaxHeight(),
                                     adjustmentTab, { adjustmentTab = it }, sidePanel = true,
                                     panelHeight = 264.dp,
                                     importLut = { lutPicker.launch(arrayOf("*/*")) },
+                                    openMascotPicker = { showMascotPicker = true },
+                                    compositionState = compositionState,
                                     latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
                             }
                         } else {
@@ -209,13 +230,15 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                             // Tiny split-screen windows can scroll instead of losing their viewfinder.
                             Column(if (compact) Modifier.fillMaxSize().verticalScroll(rememberScrollState())
                                 else Modifier.fillMaxSize()) {
-                                Viewfinder(model, state, settings, retry, landscape,
+                                Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay,
                                     if (compact) Modifier.fillMaxWidth().height(previewHeight)
                                     else Modifier.weight(1f).fillMaxWidth(), onRetry = { retry++ })
                                 ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                     Modifier.fillMaxWidth(), adjustmentTab, { adjustmentTab = it },
                                     sidePanel = false, panelHeight = panelHeight,
                                     importLut = { lutPicker.launch(arrayOf("*/*")) },
+                                    openMascotPicker = { showMascotPicker = true },
+                                    compositionState = compositionState,
                                     latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
                             }
                         }
@@ -226,6 +249,9 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
         }
     }
     if (showCapabilities) CapabilitiesDialog(state.capabilities, state.error, { showCapabilities = false })
+    if (showMascotPicker) MascotPicker(settings.mascotCamera, settings.captureOrientation,
+        model::setMascotCamera, model::setCaptureOrientation,
+        onDiagnostics = { showCapabilities = true }, onDismiss = { showMascotPicker = false })
 }
 
 @Composable
@@ -248,6 +274,8 @@ private fun Viewfinder(
     settings: AppSettings,
     retry: Int,
     landscape: Boolean,
+    compositionSource: dev.streetsnap.camera.CompositionFrameSource?,
+    compositionOverlay: CompositionOverlay?,
     modifier: Modifier,
     onRetry: () -> Unit,
 ) {
@@ -301,7 +329,7 @@ private fun Viewfinder(
     }
     // The adjustment panel only changes the preview's size, not its 4:3 framing.
     // PreviewView handles those resizes without tearing down the camera session.
-    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape) {
+    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource) {
         if (!hasSize) return@LaunchedEffect
         model.onBindingStarted()
         bindingError = null
@@ -314,7 +342,8 @@ private fun Viewfinder(
             val ratio = if (landscape) android.util.Rational(4, 3) else android.util.Rational(3, 4)
             val viewPort = ViewPort.Builder(ratio, rotation)
                 .setScaleType(ViewPort.FILL_CENTER).build()
-            model.camera.bind(lifecycle, preview.surfaceProvider, model.colors.previewEffect(model::onPreviewError), viewPort, rotation)
+            model.camera.bind(lifecycle, preview.surfaceProvider, model.colors.previewEffect(model::onPreviewError), viewPort, rotation,
+                compositionFrames = compositionSource)
             model.onCameraBound()
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -376,6 +405,21 @@ private fun Viewfinder(
                     drawRect(color, Offset(x - radius, y - radius),
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
+                compositionOverlay?.let { overlay ->
+                    val suggestion = overlay.suggestion
+                    val left = (suggestion.left.coerceIn(0f, 1f) * size.width)
+                    val top = (suggestion.top.coerceIn(0f, 1f) * size.height)
+                    val right = (suggestion.right.coerceIn(0f, 1f) * size.width)
+                    val bottom = (suggestion.bottom.coerceIn(0f, 1f) * size.height)
+                    if (right > left && bottom > top) {
+                        drawRect(Color(0xFFE2FF79).copy(alpha = .86f), Offset(left, top),
+                            androidx.compose.ui.geometry.Size(right - left, bottom - top), style = Stroke(2.dp.toPx()))
+                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(size.width / 2f, top),
+                            Offset(size.width / 2f, bottom), 1.dp.toPx())
+                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(left, size.height / 2f),
+                            Offset(right, size.height / 2f), 1.dp.toPx())
+                    }
+                }
             }
             Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(state.settings.focalLength.label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
@@ -384,10 +428,18 @@ private fun Viewfinder(
                 if (settings.hdfEnabled) Text("HDF", color = MaterialTheme.colorScheme.primary,
                     fontFamily = FontFamily.Monospace, fontSize = 11.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = .45f), RoundedCornerShape(4.dp)).padding(5.dp))
-                TextButton(onClick = { focusPoint = null; model.autoFocus() },
-                    enabled = state.isReady && state.capabilities?.autoFocusMode != null,
+                TextButton(onClick = {
+                    focusPoint = null
+                    if (state.isFocusLocked) model.autoFocus() else model.toggleFocusMode()
+                }, enabled = state.isReady && (if (manualFocus) state.capabilities?.autoFocusMode != null
+                    else state.isFocusLocked || state.capabilities?.supportsManualFocus == true),
                     modifier = Modifier.heightIn(min = 48.dp).semantics {
-                        contentDescription = if (manualFocus) "切换自动对焦" else "解除对焦锁定"
+                        contentDescription = when {
+                            state.isFocusLocked -> "解除对焦锁定"
+                            manualFocus -> "切换自动对焦"
+                            state.capabilities?.supportsManualFocus == true -> "切换手动对焦"
+                            else -> "当前对焦模式"
+                        }
                     }) {
                     Text(when {
                         manualFocus -> "MF"
@@ -444,6 +496,8 @@ private fun ShootingControls(
     sidePanel: Boolean,
     panelHeight: Dp,
     importLut: () -> Unit,
+    openMascotPicker: () -> Unit,
+    compositionState: CompositionUiState,
     latestPhoto: Uri?,
     openPhoto: (Uri) -> Unit,
 ) {
@@ -452,11 +506,11 @@ private fun ShootingControls(
     val supportedFocalLengths = capabilities?.focalLengthOptions.orEmpty()
     val minimumFocalWidth = maxOf(48.dp, (48f * LocalDensity.current.fontScale).dp)
     val focalHint = when {
-        capabilities == null -> "焦段信息尚不可用 · 可在“设备”查看详情"
+        capabilities == null -> "焦段信息尚不可用"
         focalLengths.none { it in supportedFocalLengths } && state.settings.focalLength == FocalLength.NATIVE ->
             if (capabilities.nativeEquivalentFocalLengthMm == null) "焦段信息不可用 · 当前为原生视角"
             else "三档视角暂不可用 · 当前为原生视角"
-        focalLengths.any { it !in supportedFocalLengths } -> "灰色视角暂不可用 · 可在“设备”查看详情"
+        focalLengths.any { it !in supportedFocalLengths } -> "灰色视角暂不可用"
         else -> null
     }
     Column(modifier.background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp),
@@ -507,18 +561,24 @@ private fun ShootingControls(
         }
         if (focalHint != null) Text(focalHint, Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 4.dp),
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-            ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "胶片", settings.filmId != null,
-                enabled = loaded, onClick = { onTab(AdjustmentTab.FILM) })
-            ColorPreset.entries.filter { it != ColorPreset.CUSTOM || settings.lutName != null }.forEach { preset ->
-                ControlButton(preset.displayName, settings.filmId == null && settings.preset == preset.name,
-                    enabled = loaded, onClick = { model.setPreset(preset) })
+        if (adjustmentTab != AdjustmentTab.LOOK) {
+            Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "胶片", settings.filmId != null,
+                    enabled = loaded, onClick = { onTab(AdjustmentTab.FILM) })
+                val quickPresets = (listOf(ColorPreset.ORIGINAL, ColorPreset.POSITIVE, ColorPreset.NEGATIVE,
+                    ColorPreset.POWDER_BLUE, ColorPreset.MONO) +
+                    ColorPreset.entries.filter { it.name == settings.preset }).distinct()
+                quickPresets.forEach { preset ->
+                    ControlButton(preset.displayName, settings.filmId == null && settings.preset == preset.name,
+                        enabled = loaded, onClick = { model.setPreset(preset) })
+                }
             }
         }
         if (adjustmentTab != null) {
-            AdjustmentPanel(state, settings, importing, model, adjustmentTab, onTab, importLut,
-                if (sidePanel) Modifier.weight(1f).fillMaxWidth() else Modifier.fillMaxWidth().height(panelHeight))
+            AdjustmentPanel(state, settings, importing, model, adjustmentTab, onTab, importLut, openMascotPicker, compositionState,
+                if (sidePanel) Modifier.weight(1f).fillMaxWidth() else Modifier.fillMaxWidth()
+                    .height(panelHeight + if (adjustmentTab == AdjustmentTab.LOOK) 48.dp else 0.dp))
         } else if (sidePanel) Spacer(Modifier.weight(1f))
         Row(Modifier.fillMaxWidth().height(90.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceEvenly) {
@@ -544,7 +604,11 @@ private fun ShootingControls(
                     fontWeight = FontWeight.Bold,
                     color = if (adjustmentTab != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
                 val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
-                Text(if (state.settings.iso != null) "M · ISO ${state.settings.iso}" else "%+.1f EV".format(ev),
+                Text(when (state.settings.exposureMode) {
+                    ExposureMode.MANUAL -> "M · ISO ${state.settings.iso}"
+                    ExposureMode.SHUTTER_PRIORITY -> "S · ${shutterLabel(state.settings.exposureTimeNs ?: 8_000_000L)}"
+                    ExposureMode.PROGRAM -> "P · %+.1f EV".format(ev)
+                },
                     fontFamily = FontFamily.Monospace, fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -614,6 +678,8 @@ private fun AdjustmentPanel(
     tab: AdjustmentTab,
     onTab: (AdjustmentTab?) -> Unit,
     importLut: () -> Unit,
+    openMascotPicker: () -> Unit,
+    compositionState: CompositionUiState,
     modifier: Modifier,
 ) {
     val contentScroll = rememberScrollState()
@@ -630,7 +696,7 @@ private fun AdjustmentPanel(
                 AdjustmentTab.LOOK -> LookAdjustments(settings, importing, model, importLut)
                 AdjustmentTab.FILM -> FilmAdjustments(settings, model)
                 AdjustmentTab.WHITE_BALANCE -> WhiteBalanceAdjustments(state, settings, model)
-                AdjustmentTab.SHOOTING -> ShootingAdjustments(state, settings, model)
+                AdjustmentTab.SHOOTING -> ShootingAdjustments(state, settings, model, openMascotPicker, compositionState)
             }
         }
     }
@@ -638,6 +704,7 @@ private fun AdjustmentPanel(
 
 @Composable
 private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: CameraViewModel, importLut: () -> Unit) {
+    CameraLookPicker(settings, model::setPreset)
     var parameter by remember { mutableStateOf(LookParameter.SATURATION) }
     val look = settings.activeLook
     val value = when (parameter) {
@@ -842,19 +909,72 @@ private fun StepButton(text: String, description: String, enabled: Boolean, onCl
 }
 
 @Composable
-private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model: CameraViewModel) {
+private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model: CameraViewModel,
+    openMascotPicker: () -> Unit, compositionState: CompositionUiState) {
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
     val capabilities = state.capabilities
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text("拍摄参数", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
+        TextButton(onClick = model::resetShootingParameters, enabled = state.isReady,
+            modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "复位拍摄参数" }) { Text("复位", fontSize = 12.sp) }
+    }
+    Text("复位：自动曝光、EV 归零、恢复 AF；保留影调与白平衡。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (capabilities != null && controlsRestored) {
+        val exposureMode = state.settings.exposureMode
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            ControlButton("P", exposureMode == ExposureMode.PROGRAM, enabled = state.isReady,
+                onClick = { model.setExposureMode(ExposureMode.PROGRAM) })
+            ControlButton("A", false, enabled = false, onClick = {})
+            ControlButton("S", exposureMode == ExposureMode.SHUTTER_PRIORITY,
+                enabled = state.isReady && capabilities.supportsShutterPriority,
+                onClick = { model.setExposureMode(ExposureMode.SHUTTER_PRIORITY) })
+            ControlButton("M", exposureMode == ExposureMode.MANUAL,
+                enabled = state.isReady && capabilities.supportsManualExposure,
+                onClick = { model.setExposureMode(ExposureMode.MANUAL) })
+        }
+        Text(when (exposureMode) {
+            ExposureMode.PROGRAM -> "P · 快门、ISO 自动"
+            ExposureMode.SHUTTER_PRIORITY -> "S · 设定快门，ISO 自动"
+            ExposureMode.MANUAL -> "M · 手动设定快门、ISO"
+        }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        val fixedAperture = capabilities.fixedAperture
+        Text(if (fixedAperture != null) "固定光圈 f/${"%.1f".format(fixedAperture)} · A 档不可用"
+            else "当前镜头不支持光圈控制 · A 档不可用",
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val minimum = capabilities.exposureCompensationMin
         val maximum = capabilities.exposureCompensationMax
         if (minimum < maximum) {
             val ev = state.settings.exposureCompensationIndex * capabilities.exposureCompensationStepEv
             AdjustmentSlider("曝光补偿", "%+.1f EV".format(ev), state.settings.exposureCompensationIndex.toFloat(),
-                minimum.toFloat()..maximum.toFloat(), enabled = state.settings.iso == null,
+                minimum.toFloat()..maximum.toFloat(), enabled = exposureMode != ExposureMode.MANUAL,
                 steps = (maximum - minimum - 1).coerceAtLeast(0),
                 onChange = { model.setExposure(it.roundToInt()) })
         }
+        val isoMin = capabilities.isoMin
+        val isoMax = capabilities.isoMax
+        val timeMin = capabilities.exposureTimeMinNs
+        val timeMax = capabilities.exposureTimeMaxNs
+        if (exposureMode != ExposureMode.PROGRAM && timeMin != null && timeMax != null) {
+            val iso = state.settings.iso ?: 200
+            val shutter = state.settings.exposureTimeNs ?: 8_000_000L
+            if (exposureMode == ExposureMode.MANUAL && isoMin != null && isoMax != null) {
+                AdjustmentSlider("ISO", iso.toString(), iso.toFloat().coerceIn(isoMin.toFloat(), isoMax.toFloat()),
+                    isoMin.toFloat()..isoMax.toFloat(), onChange = { model.setManualExposure(it.roundToInt(), shutter) })
+            }
+            val minLog = kotlin.math.log10(timeMin.toDouble()).toFloat()
+            val maxLog = kotlin.math.log10(min(timeMax, 1_000_000_000L).toDouble()).toFloat()
+            if (minLog < maxLog) AdjustmentSlider("快门", shutterLabel(shutter),
+                kotlin.math.log10(shutter.toDouble()).toFloat().coerceIn(minLog, maxLog), minLog..maxLog,
+                onChange = {
+                    val exposure = Math.pow(10.0, it.toDouble()).toLong().coerceIn(timeMin, min(timeMax, 1_000_000_000L))
+                    if (exposureMode == ExposureMode.SHUTTER_PRIORITY) model.setShutterPriority(exposure)
+                    else model.setManualExposure(iso, exposure)
+                })
+        }
+        HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+        Text("对焦", style = MaterialTheme.typography.titleSmall)
         val manual = state.settings.focusDistanceDiopters != null
         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             ControlButton("AF 自动", !manual && capabilities.autoFocusMode != null,
@@ -873,36 +993,96 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
                     0f..capabilities.minimumFocusDistanceDiopters!!, onChange = model::setManualFocus)
             }
         }
-        val isoMin = capabilities.isoMin
-        val isoMax = capabilities.isoMax
-        val timeMin = capabilities.exposureTimeMinNs
-        val timeMax = capabilities.exposureTimeMaxNs
-        if (capabilities.supportsManualExposure && isoMin != null && isoMax != null && timeMin != null && timeMax != null) {
-            val manual = state.settings.iso != null
-            ToggleRow("手动曝光", manual) {
-                if (it) model.setManualExposure(200.coerceIn(isoMin, isoMax), 8_000_000L.coerceIn(timeMin, timeMax))
-                else model.setManualExposure(null, null)
-            }
-            if (manual) {
-                val iso = state.settings.iso ?: 200
-                val shutter = state.settings.exposureTimeNs ?: 8_000_000L
-                AdjustmentSlider("ISO", iso.toString(), iso.toFloat(), isoMin.toFloat()..isoMax.toFloat(),
-                    onChange = { model.setManualExposure(it.roundToInt(), shutter) })
-                val minLog = kotlin.math.log10(timeMin.toDouble()).toFloat()
-                val maxLog = kotlin.math.log10(min(timeMax, 1_000_000_000L).toDouble()).toFloat()
-                if (minLog < maxLog) AdjustmentSlider("快门", shutterLabel(shutter),
-                    kotlin.math.log10(shutter.toDouble()).toFloat().coerceIn(minLog, maxLog), minLog..maxLog,
-                    onChange = {
-                        val exposure = Math.pow(10.0, it.toDouble()).toLong().coerceIn(timeMin, min(timeMax, 1_000_000_000L))
-                        model.setManualExposure(iso, exposure)
-                    })
-            }
-        }
     }
     ToggleRow("三分网格", settings.grid) { model.toggleGrid() }
     ToggleRow("水平仪", settings.level) { model.toggleLevel() }
+    TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+        Text("相机设置", fontSize = 12.sp)
+    }
+    CompositionAssistantControls(compositionState, settings, model)
     Text("参数自动记忆。音量键可直接拍照。", Modifier.padding(vertical = 10.dp),
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun CompositionAssistantControls(state: CompositionUiState, settings: AppSettings, model: CameraViewModel) {
+    HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+    Text("构图辅助 · 实验性", style = MaterialTheme.typography.titleSmall)
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("本地模型建议", style = MaterialTheme.typography.bodyMedium)
+            Text(when (state.status) {
+                AssistStatus.OFF -> "关闭，不读取取景画面"
+                AssistStatus.UNINSTALLED -> "模型未安装"
+                AssistStatus.PAUSED -> "后台已暂停"
+                AssistStatus.LOADING -> "加载本地模型…"
+                AssistStatus.READY -> state.statusText ?: "等待构图建议"
+                AssistStatus.FAILED -> state.statusText ?: "本地推理失败"
+            }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Switch(settings.compositionEnabled, { model.setCompositionEnabled(it) },
+            modifier = Modifier.semantics { contentDescription = "构图辅助开关" })
+    }
+    val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
+    Text("模型：${modelEntry?.title ?: settings.compositionModel}",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        dev.streetsnap.app.edge.EdgeModelCatalog.models.forEach { entry ->
+            val chosen = entry.id == settings.compositionModel
+            TextButton(onClick = { model.setCompositionModel(entry.id) }, modifier = Modifier.heightIn(min = 48.dp)
+                .semantics { selected = chosen; contentDescription = "构图模型：${entry.title}" }) {
+                Text(entry.title, fontSize = 11.sp,
+                    color = if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+    when (state.install) {
+        ModelInstallStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
+        ModelInstallStatus.ABSENT -> TextButton(onClick = model.composition::prepareInstall,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看安装信息") }
+        ModelInstallStatus.PREPARING -> Text("读取官方模型清单…", style = MaterialTheme.typography.labelSmall)
+        ModelInstallStatus.AVAILABLE -> {
+            Text("下载量：${formatBytes(state.bytes ?: 0L)}", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = model.composition::install, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("明确安装 ${formatBytes(state.bytes ?: 0L)}")
+            }
+        }
+        ModelInstallStatus.DOWNLOADING -> {
+            val total = state.bytes ?: 1L
+            val progress = (state.downloadedBytes.toFloat() / total).coerceIn(0f, 1f)
+            androidx.compose.material3.LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("下载 ${formatBytes(state.downloadedBytes)} / ${formatBytes(total)}", Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall)
+                TextButton(onClick = model.composition::cancelInstall) { Text("取消") }
+            }
+        }
+        ModelInstallStatus.INSTALLED -> {
+            Text("已安装 · ${formatBytes(state.bytes ?: 0L)}", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = model.composition::removeModel, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("删除本地模型")
+            }
+        }
+        ModelInstallStatus.REMOVING -> Text("删除本地模型…", style = MaterialTheme.typography.labelSmall)
+        ModelInstallStatus.FAILED -> {
+            Text(state.installError ?: "模型操作失败", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            TextButton(onClick = model.composition::prepareInstall, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+        }
+    }
+    Text("构图建议只显示实时取景框，不会改变曝光或阻塞快门。模型仅在你安装并打开后运行。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 8.dp))
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
+    bytes >= 1024L -> "%.0f KB".format(bytes / 1024f)
+    else -> "$bytes B"
 }
 
 @Composable

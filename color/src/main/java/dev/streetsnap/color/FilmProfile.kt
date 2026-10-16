@@ -1,9 +1,9 @@
 package dev.streetsnap.color
 
 /**
- * A film card is an independently authored style recipe, not a copy of a film stock,
- * camera firmware, or another app's artwork. Numbers describe a film-inspired family;
- * they do not set the sensor's ISO. The swatches are only UI accents.
+ * Named after real photographic stocks; the rendering recipes are independently authored
+ * interpretations, not manufacturer scans or extracted camera data. Stock speed is
+ * descriptive and never changes the phone sensor ISO. IDs remain stable for upgrades.
  */
 data class FilmProfile(
     val id: String,
@@ -19,7 +19,7 @@ data class FilmProfile(
 object FilmRegistry {
     val entries: List<FilmProfile> = listOf(
         FilmProfile(
-            "DAY_01", "日光 250", "微暖日光，柔和反差与细颗粒",
+            "DAY_01", "VISION3 250D", "Kodak 5207 · 日光电影负片，微暖、柔和反差与细颗粒",
             ColorRecipe(
                 preset = ColorPreset.SUNNY, intensity = .8f, grain = .18f, vignette = .08f,
                 saturation = -.08f, contrast = -.12f, highlights = -.2f, shadows = .12f,
@@ -28,7 +28,7 @@ object FilmRegistry {
             0xFFF4C94D, 0xFFB28135,
         ),
         FilmProfile(
-            "NIGHT_01", "钨光 500", "冷影暖光，为夜街保留明暗层次",
+            "NIGHT_01", "VISION3 500T", "Kodak 5219 · 钨光电影负片，冷影暖光与较明显颗粒",
             ColorRecipe(
                 preset = ColorPreset.NEGATIVE, intensity = .92f, grain = .3f, vignette = .16f,
                 saturation = -.14f, hue = -.07f, contrast = .08f, brightness = -.04f,
@@ -37,7 +37,7 @@ object FilmRegistry {
             0xFF315E88, 0xFF14243A,
         ),
         FilmProfile(
-            "CHROME_01", "反转 100", "浓郁色彩，紧实暗部与清晰轮廓",
+            "CHROME_01", "EKTAR 100", "Kodak · 低感彩色负片，饱和色彩与清晰细节",
             ColorRecipe(
                 preset = ColorPreset.POSITIVE, intensity = .95f, grain = .08f, vignette = .1f,
                 saturation = .08f, contrast = .12f, highlights = -.1f, shadows = -.08f,
@@ -46,7 +46,7 @@ object FilmRegistry {
             0xFFD96932, 0xFFF4C748,
         ),
         FilmProfile(
-            "NEG_01", "日光 50", "明净暖色，低颗粒与利落的晴日层次",
+            "NEG_01", "VISION3 50D", "Kodak 5203 · 日光电影负片，细颗粒、明净暖色",
             ColorRecipe(
                 preset = ColorPreset.SUNNY, intensity = .65f, grain = .05f, vignette = .06f,
                 saturation = .03f, contrast = .06f, brightness = .02f, highlights = -.16f,
@@ -55,7 +55,7 @@ object FilmRegistry {
             0xFFEC913E, 0xFFDAAE70,
         ),
         FilmProfile(
-            "PASTEL_01", "柔彩 200", "轻淡青绿，舒展中间调与柔软细节",
+            "PASTEL_01", "FUJICOLOR C200", "Fujifilm · 日光彩色负片，清淡青绿与舒展中间调",
             ColorRecipe(
                 preset = ColorPreset.POWDER_BLUE, intensity = .72f, grain = .14f, vignette = .04f,
                 saturation = -.2f, hue = -.025f, contrast = -.16f, brightness = .04f,
@@ -64,7 +64,7 @@ object FilmRegistry {
             0xFF579B85, 0xFFDBE1CE,
         ),
         FilmProfile(
-            "MONO_01", "银盐 400", "粗颗粒黑白，深黑与留白之间",
+            "MONO_01", "TRI-X 400", "Kodak 400TX · 经典黑白负片，颗粒与深黑",
             ColorRecipe(
                 preset = ColorPreset.MONO, grain = .34f, vignette = .12f, contrast = .08f,
                 highlights = -.14f, shadows = .06f, sharpness = -.06f, clarity = .08f,
@@ -72,7 +72,7 @@ object FilmRegistry {
             0xFFD6B653, 0xFF496F58,
         ),
         FilmProfile(
-            "PORTRAIT_01", "人像 400", "柔暖肤色，低反差与舒缓高光",
+            "PORTRAIT_01", "PORTRA 400", "Kodak · 人像彩色负片，柔暖肤色与舒缓高光",
             ColorRecipe(
                 preset = ColorPreset.NEGATIVE, intensity = .7f, grain = .16f, vignette = .05f,
                 saturation = -.06f, hue = .02f, contrast = -.1f, brightness = .03f,

@@ -3,6 +3,7 @@ package dev.streetsnap.camera
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraManager
+import android.hardware.camera2.CaptureRequest
 import android.os.Build
 import androidx.annotation.OptIn
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -69,6 +70,12 @@ internal object CameraCapabilityReader {
         val manualSensor = CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in availableModes
         val isoRange = characteristics[CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE]
         val exposureRange = characteristics[CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE]
+        val requestKeys = characteristics.availableCaptureRequestKeys
+        val shutterPriority = Build.VERSION.SDK_INT >= 36 && exposureRange != null &&
+            CaptureRequest.CONTROL_AE_PRIORITY_MODE in requestKeys &&
+            CaptureRequest.SENSOR_EXPOSURE_TIME in requestKeys &&
+            CameraCharacteristics.CONTROL_AE_PRIORITY_MODE_SENSOR_EXPOSURE_TIME_PRIORITY in
+                (characteristics[CameraCharacteristics.CONTROL_AE_AVAILABLE_PRIORITY_MODES] ?: intArrayOf())
         val focusDistance = characteristics[CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE]
             ?.takeIf { it.isFinite() && it >= 0f }
         val afModes = characteristics[CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES] ?: intArrayOf()
@@ -79,8 +86,11 @@ internal object CameraCapabilityReader {
                 CameraCharacteristics.CONTROL_AF_MODE_AUTO
             else -> null
         }
-        val manualFocus = manualSensor && focusDistance != null && focusDistance > 0f &&
-            CameraCharacteristics.CONTROL_AF_MODE_OFF in afModes
+        val manualFocus = FocusModePolicy.supportsManualFocus(
+            maximumDiopters = focusDistance,
+            availableAfModes = afModes,
+            acceptsFocusDistance = CaptureRequest.LENS_FOCUS_DISTANCE in requestKeys,
+        )
         val focusCalibration = when (characteristics[CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION]) {
             CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_CALIBRATED -> "calibrated"
             CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION_APPROXIMATE -> "approximate"
@@ -107,6 +117,9 @@ internal object CameraCapabilityReader {
             isoMax = isoRange?.upper,
             exposureTimeMinNs = exposureRange?.lower,
             exposureTimeMaxNs = exposureRange?.upper,
+            supportsShutterPriority = shutterPriority,
+            fixedAperture = characteristics[CameraCharacteristics.LENS_INFO_AVAILABLE_APERTURES]
+                ?.filter { it.isFinite() && it > 0f }?.distinct()?.singleOrNull(),
             supportsManualFocus = manualFocus,
             minimumFocusDistanceDiopters = focusDistance,
             focusDistanceCalibration = focusCalibration,

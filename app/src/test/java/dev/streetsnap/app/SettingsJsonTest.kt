@@ -2,6 +2,7 @@ package dev.streetsnap.app
 
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
+import org.json.JSONObject
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -122,9 +123,9 @@ class SettingsJsonTest {
         assertEquals(setOf("SUNNY", "FILM:DAY_01", "FILM:NEG_01"), loaded.looks.keys)
     }
 
-    @Test fun resettingFilmRestoresItsRecipeAndPreservesOtherLooksAndFrameOptions() {
+    @Test fun resettingFilmRestoresItsRecipeAndPreservesOtherLooksAndCameraPreferences() {
         val film = FilmRegistry.find("DAY_01")!!
-        val settings = AppSettings(preset = "NEGATIVE", filmFrame = "WHITE", dateStamp = "DATE")
+        val settings = AppSettings(preset = "NEGATIVE", mascotCamera = "NIKON_F3", captureOrientation = "LANDSCAPE")
             .updateLook { it.copy(contrast = -.4f) }
             .copy(filmId = "PORTRAIT_01").updateLook { it.copy(saturation = .3f) }
             .copy(filmId = film.id).updateLook { it.copy(grain = 0f, sharpness = 1f) }
@@ -132,8 +133,8 @@ class SettingsJsonTest {
         assertEquals(film.defaults, settings.colorRecipe())
         assertEquals(-.4f, settings.copy(filmId = null).activeLook.contrast, 0f)
         assertEquals(.3f, settings.copy(filmId = "PORTRAIT_01").activeLook.saturation, 0f)
-        assertEquals("WHITE", settings.filmFrame)
-        assertEquals("DATE", settings.dateStamp)
+        assertEquals("NIKON_F3", settings.mascotCamera)
+        assertEquals("LANDSCAPE", settings.captureOrientation)
         assertEquals(settings, SettingsJson.decode(SettingsJson.encode(settings)))
     }
 
@@ -142,8 +143,6 @@ class SettingsJsonTest {
         assertNull(settings.filmId)
         assertEquals(ColorPreset.MONO, settings.colorRecipe().preset)
         assertEquals(.5f, settings.activeLook.contrast, 0f)
-        assertEquals("NONE", settings.filmFrame)
-        assertEquals("OFF", settings.dateStamp)
         assertEquals(setOf("MONO", "FILM:DAY_01"), settings.looks.keys)
     }
 
@@ -152,5 +151,55 @@ class SettingsJsonTest {
         val settings = SettingsJson.decode("""{"version":3,"preset":"ORIGINAL","filmId":"NIGHT_01","looks":{"FILM:NIGHT_01":{"grain":"NaN","sharpness":99,"saturation":-99,"brightness":0.1}}}""")
         assertEquals(defaults.copy(sharpness = 1f, saturation = -1f, brightness = .1f), settings.activeLook)
         settings.colorRecipe()
+    }
+
+    @Test fun upgradingVersionThreeDropsDecorationAndPreservesCaptureAndFilmEdits() {
+        val legacy = """{"version":3,"filmFrame":"WHITE","dateStamp":"DATE_TIME","preset":"NEGATIVE","filmId":"NIGHT_01","iso":640,"exposureTimeNs":16000000,"focalLength":50,"whiteBalance":"DAYLIGHT","looks":{"FILM:NIGHT_01":{"grain":0.6,"saturation":-0.3}}}"""
+        val loaded = SettingsJson.decode(legacy)
+        assertEquals("NIGHT_01", loaded.filmId)
+        assertEquals(.6f, loaded.activeLook.grain, 0f)
+        assertEquals(-.3f, loaded.activeLook.saturation, 0f)
+        assertEquals(640, loaded.iso)
+        assertEquals(16_000_000L, loaded.exposureTimeNs)
+        assertEquals(50, loaded.focalLength)
+        assertEquals("DAYLIGHT", loaded.whiteBalance)
+        assertEquals("RICOH_GR", loaded.mascotCamera)
+        assertEquals("AUTO", loaded.captureOrientation)
+
+        val saved = JSONObject(SettingsJson.encode(loaded))
+        assertEquals(4, saved.getInt("version"))
+        assertFalse(saved.has("filmFrame"))
+        assertFalse(saved.has("dateStamp"))
+        assertEquals(loaded, SettingsJson.decode(saved.toString()))
+    }
+
+    @Test fun everyCameraMascotAndCaptureDirectionSurviveRestart() {
+        val mascots = listOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3", null)
+        for (mascot in mascots) for (orientation in listOf("AUTO", "LANDSCAPE", "PORTRAIT")) {
+            val settings = AppSettings(mascotCamera = mascot, captureOrientation = orientation,
+                preset = "POWDER_BLUE", whiteBalanceAmber = 3)
+            assertEquals(settings, SettingsJson.decode(SettingsJson.encode(settings)))
+        }
+    }
+
+    @Test fun missingCameraPreferencesUseDefaultsButExplicitlyDisabledMascotStaysDisabled() {
+        val legacy = SettingsJson.decode("""{"version":2,"preset":"SUNNY"}""")
+        assertEquals("RICOH_GR", legacy.mascotCamera)
+        assertEquals("AUTO", legacy.captureOrientation)
+        val disabled = SettingsJson.decode("""{"version":4,"mascotCamera":null,"captureOrientation":"PORTRAIT"}""")
+        assertNull(disabled.mascotCamera)
+        assertEquals("PORTRAIT", disabled.captureOrientation)
+        assertEquals(disabled, SettingsJson.decode(SettingsJson.encode(disabled)))
+    }
+
+    @Test fun unknownCameraPreferencesRecoverWithoutDiscardingTheSelectedLook() {
+        val settings = SettingsJson.decode("""{"version":4,"mascotCamera":"REMOVED_CAMERA","captureOrientation":"SIDEWAYS","preset":"POSITIVE","looks":{"POSITIVE":{"contrast":0.5}}}""")
+        assertEquals("RICOH_GR", settings.mascotCamera)
+        assertEquals("AUTO", settings.captureOrientation)
+        assertEquals("POSITIVE", settings.preset)
+        assertEquals(.5f, settings.activeLook.contrast, 0f)
+        val encoded = SettingsJson.decode(SettingsJson.encode(AppSettings(mascotCamera = "UNKNOWN", captureOrientation = "UNKNOWN")))
+        assertEquals("RICOH_GR", encoded.mascotCamera)
+        assertEquals("AUTO", encoded.captureOrientation)
     }
 }

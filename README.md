@@ -5,7 +5,7 @@
 **street-snap: Open-source cross-platform documentary camera (iOS/Android), crafted for the serendipity of street capture.**
 
 [![Status: Development](https://img.shields.io/badge/status-development-f59e0b?style=flat-square)](#roadmap)
-[![Android: v0.2 dev](https://img.shields.io/badge/Android-v0.2%20dev-3DDC84?style=flat-square&logo=android&logoColor=white)](#安装与发布)
+[![Android: v0.3 dev](https://img.shields.io/badge/Android-v0.3%20dev-3DDC84?style=flat-square&logo=android&logoColor=white)](#安装与发布)
 [![iOS: Later](https://img.shields.io/badge/iOS-later-64748b?style=flat-square&logo=apple&logoColor=white)](#安装与发布)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)](LICENSE)
 
@@ -126,17 +126,17 @@ Rust 可作为后续共享模块的候选，用于 LUT 解析、配方校验或�
 
 ## Roadmap
 
-Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与设备验证，再推进 iOS。
+Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验与设备验证，再推进 iOS。
 
 - [x] **Design**：确认 Android 一期范围、最低系统版本与首测设备。
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
-- [x] **Android Preview**：[v0.2.0-dev · SNAP/02](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)，支持 Android 12 及以上版本。
+- [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
 - [ ] **iOS**：复用产品交互与配方规范，接入 iOS 原生相机和调色实现。
 
-当前源码还增加了 AF/MF 明确切换、点按对焦反馈，以及 7 套胶片配方、边框和日期打印，见 [胶片与对焦试拍说明](docs/film-and-focus.md)。这些变更尚未更新到上面的 Release；端侧多模态模型处于 [可行性评估](docs/edge-model-plan.md) 阶段。
+当前源码已增加 AF/MF 明确切换、点按对焦反馈、P/S/M 曝光档、7 套胶片配方与可选端侧构图辅助。边框和日期打印已移除，照片直接保存为带 EXIF 的 JPEG；实现记录见 [胶片与对焦说明](docs/film-and-focus.md)，模型边界见 [端侧模型说明](docs/edge-model-plan.md)。
 
 ## Interface
 
@@ -150,11 +150,11 @@ Android 15 模拟器中的实际 APK 截图，取景为内置测试场景。28 /
 
 **Android 版已可安装，最低支持 Android 12。**
 
-[下载 APK · v0.2.0-dev](https://github.com/bestksl/street-snap/releases/download/v0.2.0-dev/street-snap-v0.2.0-dev.apk) · [Release 说明 · SNAP/02](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)
+[获取 APK](#ci--apk) · [Android 构建说明](docs/android-development.md)
 
 下载后在手机上打开 APK，按系统提示允许本次安装。已安装同签名开发版时，直接覆盖安装可保留拍摄参数与影调设置，无需卸载。
 
-这是用于试拍与反馈的 **Preview 开发预览**：采用开发测试签名、非调试构建，启用 R8 与资源裁剪。机型兼容性、预览与成片一致性、折叠屏行为及性能仍需真机验证，详见 [v0.2 试拍说明](docs/android-v0.2-notes.md)。
+这是用于试拍与反馈的 **Preview 开发预览**：采用开发测试签名、非调试构建，启用 R8 与资源裁剪。v0.3 构建先通过 CI 或本地 Build 产出，真机验证后再创建 Release；机型兼容性、预览与成片一致性、折叠屏行为及性能仍需验证，详见 [Android 试拍说明](docs/android-v0.2-notes.md)。
 
 **iOS** 后续开发，TestFlight 入口将在可用时公布。
 

@@ -144,6 +144,12 @@ class ColorEngine : Closeable {
             ColorPreset.POWDER_BLUE -> BuiltInLuts.powderBlue
             ColorPreset.MONO -> BuiltInLuts.mono
             ColorPreset.SUNNY -> BuiltInLuts.sunny
+            ColorPreset.CLASSIC_CHROME -> BuiltInLuts.classicChrome
+            ColorPreset.CLASSIC_NEGATIVE -> BuiltInLuts.classicNegative
+            ColorPreset.NOSTALGIC_NEGATIVE -> BuiltInLuts.nostalgicNegative
+            ColorPreset.ACROS -> BuiltInLuts.acros
+            ColorPreset.LUMIX_NATURAL -> BuiltInLuts.lumixNatural
+            ColorPreset.LUMIX_MONO -> BuiltInLuts.lumixMono
             ColorPreset.CUSTOM -> requireNotNull(custom) { "请先导入有效的 .cube LUT" }
         },
     )

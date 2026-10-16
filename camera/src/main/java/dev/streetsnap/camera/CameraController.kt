@@ -2,6 +2,7 @@ package dev.streetsnap.camera
 
 import android.content.Context
 import android.hardware.camera2.CaptureRequest
+import android.os.Build
 import android.os.SystemClock
 import android.util.Rational
 import android.util.Size
@@ -18,6 +19,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.CameraState as CameraXState
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.MeteringPoint
 import androidx.camera.core.Preview
@@ -37,6 +39,10 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -68,6 +74,10 @@ class CameraController(context: Context) {
     private var camera: Camera? = null
     private var preview: Preview? = null
     private var imageCapture: ImageCapture? = null
+    private var imageAnalysis: ImageAnalysis? = null
+    private var compositionSource: CompositionFrameSource? = null
+    private var sessionGeneration = 0L
+    private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateObserver: Observer<CameraXState>? = null
     private var cameraOpen = false
     private var settingsApplied = false
@@ -89,12 +99,31 @@ class CameraController(context: Context) {
         effect: CameraEffect? = null,
         viewPort: ViewPort? = null,
         targetRotation: Int = Surface.ROTATION_0,
+        compositionFrames: CompositionFrameSource? = null,
+    ): CameraCapabilities = bindSession(lifecycleOwner, surfaceProvider, effect, viewPort, targetRotation, compositionFrames)
+
+    @RequiresPermission(android.Manifest.permission.CAMERA)
+    private suspend fun bindSession(
+        lifecycleOwner: LifecycleOwner,
+        surfaceProvider: Preview.SurfaceProvider,
+        effect: CameraEffect?,
+        viewPort: ViewPort?,
+        targetRotation: Int,
+        compositionFrames: CompositionFrameSource?,
+        expectedGeneration: Long? = null,
+        fallbackReason: String? = null,
     ): CameraCapabilities = withContext(Dispatchers.Main.immediate) {
         bindMutex.withLock {
             controlMutex.withLock {
                 check(!closed) { "相机控制器已经关闭。" }
+                if (expectedGeneration != null && expectedGeneration != sessionGeneration) {
+                    throw CancellationException("分析回退会话已被替换。")
+                }
                 detachSession()
-                mutableState.update { it.copy(isBound = false, isReady = false, error = null) }
+                val generation = sessionGeneration
+                mutableState.update { it.copy(isBound = false, isReady = false, error = null,
+                    compositionAnalysisActive = false, compositionAnalysisError = fallbackReason) }
+                var fallbackScheduled = false
                 try {
                     val cameraProvider = ProcessCameraProvider.getInstance(appContext)
                         .awaitValue(cancelOnCancellation = false)
@@ -117,35 +146,83 @@ class CameraController(context: Context) {
                     }
                     val newPreview = previewBuilder.build().also { it.setSurfaceProvider(surfaceProvider) }
                     val newCapture = captureBuilder.build()
+                    preview = newPreview
+                    imageCapture = newCapture
                     val sensorRotation = info.getSensorRotationDegrees(targetRotation)
                     val defaultViewAspect = if (sensorRotation == 90 || sensorRotation == 270) {
                         Rational(3, 4)
                     } else Rational(4, 3)
-                    val group = UseCaseGroup.Builder()
-                        .setViewPort(viewPort ?: ViewPort.Builder(defaultViewAspect, targetRotation)
-                            .setScaleType(ViewPort.FILL_CENTER).build())
+                    val sharedViewPort = viewPort ?: ViewPort.Builder(defaultViewAspect, targetRotation)
+                        .setScaleType(ViewPort.FILL_CENTER).build()
+                    val newAnalysis = compositionFrames?.let { source ->
+                        try {
+                            val sourceSession = source.activate()
+                            compositionSource = source
+                            val builder = ImageAnalysis.Builder().setTargetRotation(targetRotation)
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
+                                .setResolutionSelector(resolutionSelector(Size(640, 480), 640L * 480L))
+                            sensor.physicalCameraId?.let { Camera2Interop.Extender(builder).setPhysicalCameraId(it) }
+                            builder.build().also { analysis ->
+                                imageAnalysis = analysis
+                                analysis.setAnalyzer(source.executor) { source.analyze(it, sourceSession) }
+                            }
+                        } catch (_: Exception) {
+                            imageAnalysis?.clearAnalyzer()
+                            imageAnalysis = null
+                            source.deactivate()
+                            source.shutdownExecutor()
+                            compositionSource = null
+                            mutableState.update { it.copy(compositionAnalysisError = "构图分析暂不可用，拍摄仍可继续。") }
+                            null
+                        }
+                    }
+                    fun group(analysis: ImageAnalysis?) = UseCaseGroup.Builder()
+                        .setViewPort(sharedViewPort)
                         .addUseCase(newPreview)
                         .addUseCase(newCapture)
+                        .apply { analysis?.let { addUseCase(it) } }
                         .apply { effect?.let { addEffect(it) } }
                         .build()
-                    val boundCamera = cameraProvider.bindToLifecycle(
-                        lifecycleOwner,
-                        CameraSelector.DEFAULT_BACK_CAMERA,
-                        group,
-                    )
+                    val boundCamera = try {
+                        cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, group(newAnalysis))
+                    } catch (error: Exception) {
+                        if (newAnalysis == null || error is CancellationException) throw error
+                        newAnalysis.clearAnalyzer()
+                        compositionFrames?.deactivate()
+                        cameraProvider.unbind(newPreview, newCapture, newAnalysis)
+                        compositionFrames?.shutdownExecutor()
+                        imageAnalysis = null
+                        compositionSource = null
+                        mutableState.update { it.copy(compositionAnalysisError = "设备不支持并行构图分析，已保留取景与拍摄。") }
+                        cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, group(null))
+                    }
                     camera = boundCamera
-                    preview = newPreview
-                    imageCapture = newCapture
                     val capabilities = CameraCapabilityReader.read(boundCamera.cameraInfo, sensor)
-                    mutableState.update { it.copy(isBound = true, capabilities = capabilities, error = null) }
+                    mutableState.update { it.copy(isBound = true, capabilities = capabilities, error = null,
+                        compositionAnalysisActive = imageAnalysis != null) }
                     val observer = Observer<CameraXState> { current ->
                         cameraOpen = current.type == CameraXState.Type.OPEN
                         if (!cameraOpen) focusSession.invalidate()
+                        if (cameraOpen) compositionSource?.resume() else compositionSource?.pause()
                         mutableState.update {
                             it.copy(
                                 isReady = cameraOpen && settingsApplied,
                                 error = current.error?.let { error -> "相机会话错误（${error.code}），请重试。" },
                             )
+                        }
+                        if (current.error?.code == CameraXState.ERROR_STREAM_CONFIG && imageAnalysis != null &&
+                            !fallbackScheduled && generation == sessionGeneration) {
+                            fallbackScheduled = true
+                            sessionScope.launch {
+                                try {
+                                    bindSession(lifecycleOwner, surfaceProvider, effect, viewPort, targetRotation,
+                                        compositionFrames = null, expectedGeneration = generation,
+                                        fallbackReason = "设备不支持并行构图分析，已保留取景与拍摄。")
+                                } catch (_: Exception) {
+                                    // bindSession reports camera failures; a newer session cancels stale fallbacks.
+                                }
+                            }
                         }
                     }
                     stateObserver = observer
@@ -153,9 +230,18 @@ class CameraController(context: Context) {
                     applySettings(sanitizeRestoredSettings(mutableState.value.settings, capabilities))
                     capabilities
                 } catch (error: Exception) {
-                    detachSession()
-                    mutableState.update { it.copy(isBound = false, isReady = false, error = error.message) }
-                    throw error
+                    val caps = mutableState.value.capabilities
+                    if (fallbackScheduled && caps != null &&
+                        (error !is CancellationException || error is TimeoutCancellationException)) {
+                        // Release the bind/control locks so the already queued two-stream retry
+                        // can proceed. Detaching here would invalidate that retry's generation.
+                        mutableState.update { it.copy(isReady = false, error = null) }
+                        caps
+                    } else {
+                        detachSession()
+                        mutableState.update { it.copy(isBound = false, isReady = false, error = error.message) }
+                        throw error
+                    }
                 }
             }
         }
@@ -220,8 +306,46 @@ class CameraController(context: Context) {
         it.copy(iso = iso, exposureTimeNs = exposureTimeNs)
     }
 
+    suspend fun setShutterPriority(exposureTimeNs: Long) = mutateSettings {
+        it.copy(iso = null, exposureTimeNs = exposureTimeNs, autoExposureLocked = false)
+    }
+
+    suspend fun setExposureMode(mode: ExposureMode) = mutateSettings {
+        ExposurePolicy.select(it, mode, mutableState.value.capabilities ?: error("相机能力尚未读取。"))
+    }
+
+    /** Reset capture controls together; preserve framing, white balance and the app's colour recipe. */
+    suspend fun resetShootingParameters(): CaptureSettings = withContext(Dispatchers.Main.immediate) {
+        controlMutex.withLock {
+            val caps = mutableState.value.capabilities ?: error("相机能力尚未读取。")
+            focusSession.invalidate()
+            val settings = ExposurePolicy.reset(mutableState.value.settings, caps.autoFocusMode != null)
+            applySettings(settings)
+            mutableState.value.settings
+        }
+    }
+
     suspend fun setManualFocus(distanceDiopters: Float?) = mutateSettings {
         it.copy(focusDistanceDiopters = distanceDiopters)
+    }
+
+    /** Toggle against the accepted camera state and restore the user's last manual distance. */
+    suspend fun toggleFocusMode(rememberedDistance: Float): Float? = withContext(Dispatchers.Main.immediate) {
+        controlMutex.withLock {
+            val caps = mutableState.value.capabilities ?: error("相机能力尚未读取。")
+            val settings = mutableState.value.settings
+            val distance = FocusModePolicy.nextDistance(
+                currentDistance = settings.focusDistanceDiopters,
+                rememberedDistance = rememberedDistance,
+                maximumDiopters = caps.minimumFocusDistanceDiopters,
+                supportsManual = caps.supportsManualFocus,
+                supportsAuto = caps.autoFocusMode != null,
+            )
+            if (distance != settings.focusDistanceDiopters) {
+                applySettings(settings.copy(focusDistanceDiopters = distance))
+            }
+            distance
+        }
     }
 
     suspend fun setAutoExposureLock(locked: Boolean) = mutateSettings {
@@ -287,14 +411,18 @@ class CameraController(context: Context) {
     fun updateTargetRotation(rotation: Int) {
         require(rotation in Surface.ROTATION_0..Surface.ROTATION_270)
         mainExecutor.execute {
+            val changed = preview?.targetRotation != rotation
             preview?.targetRotation = rotation
             imageCapture?.targetRotation = rotation
+            imageAnalysis?.targetRotation = rotation
+            if (changed) compositionSource?.invalidateFrames()
         }
     }
 
     /** Releases only this controller's use cases; it never unbinds another component's camera. */
     fun close() {
         closed = true
+        sessionScope.cancel()
         mainExecutor.execute {
             detachSession()
             mutableState.update { it.copy(isBound = false, isReady = false, isFocusing = false) }
@@ -316,7 +444,7 @@ class CameraController(context: Context) {
             FocalLengthMath.zoomRatio(it, caps.nativeEquivalentFocalLengthMm, caps.maxZoomRatio)
                 ?: error("当前主摄不支持 ${settings.focalLength.label} 视角。")
         } ?: 1f
-        val manualExposure = settings.iso != null && settings.exposureTimeNs != null
+        val manualExposure = settings.exposureMode == ExposureMode.MANUAL
         val manualFocus = settings.focusDistanceDiopters != null
         val requests = CaptureRequestOptions.Builder()
             .setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, settings.whiteBalance.camera2Mode)
@@ -327,6 +455,15 @@ class CameraController(context: Context) {
                 if (manualExposure) {
                     setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, requireNotNull(settings.iso))
                     setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, requireNotNull(settings.exposureTimeNs))
+                }
+                if (Build.VERSION.SDK_INT >= 36 && caps.supportsShutterPriority) {
+                    val priority = settings.exposureMode == ExposureMode.SHUTTER_PRIORITY
+                    setCaptureRequestOption(CaptureRequest.CONTROL_AE_PRIORITY_MODE, if (priority) {
+                        CaptureRequest.CONTROL_AE_PRIORITY_MODE_SENSOR_EXPOSURE_TIME_PRIORITY
+                    } else CaptureRequest.CONTROL_AE_PRIORITY_MODE_OFF)
+                    if (priority) {
+                        setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, requireNotNull(settings.exposureTimeNs))
+                    }
                 }
                 if (caps.supportsAutoExposureLock) {
                     setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, settings.autoExposureLocked && !manualExposure)
@@ -355,6 +492,7 @@ class CameraController(context: Context) {
                     .setCaptureRequestOptions(requests).awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
             }
             if (needsAllSettings || oldSettings.focalLength != settings.focalLength) {
+                compositionSource?.invalidateFrames()
                 current.cameraControl.setZoomRatio(zoomRatio).awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
             }
             if (!manualExposure && caps.exposureCompensationMin != caps.exposureCompensationMax &&
@@ -366,7 +504,12 @@ class CameraController(context: Context) {
             settingsApplied = true
             mutableState.update { it.copy(settings = settings, zoomRatio = zoomRatio, isReady = cameraOpen, error = null) }
         } catch (error: Exception) {
-            settingsApplied = needsAllSettings.not() && cameraOpen
+            // A CameraX request may have been accepted before a later zoom or
+            // exposure operation fails.  The HAL can therefore be ahead of the
+            // state we keep in memory.  Do not infer success from the previous
+            // session: leave the controller unavailable until the complete
+            // parameter set is applied again on the next bind/retry.
+            settingsApplied = false
             val message = when (error) {
                 is TimeoutCancellationException -> "参数响应超时，请重试。"
                 is CancellationException -> null
@@ -374,8 +517,8 @@ class CameraController(context: Context) {
             }
             mutableState.update {
                 it.copy(
-                    settings = if (settingsApplied) oldSettings else it.settings,
-                    isReady = cameraOpen && settingsApplied,
+                    settings = oldSettings,
+                    isReady = false,
                     error = message,
                 )
             }
@@ -389,15 +532,23 @@ class CameraController(context: Context) {
     }
 
     private fun detachSession() {
+        sessionGeneration++
         focusSession.invalidate()
         stateObserver?.let { observer -> camera?.cameraInfo?.cameraState?.removeObserver(observer) }
         stateObserver = null
-        val useCases = listOfNotNull(preview, imageCapture)
+        imageAnalysis?.clearAnalyzer()
+        val oldCompositionSource = compositionSource
+        oldCompositionSource?.deactivate()
+        val useCases = listOfNotNull(preview, imageCapture, imageAnalysis)
         if (useCases.isNotEmpty()) provider?.unbind(*useCases.toTypedArray())
+        oldCompositionSource?.shutdownExecutor()
         preview?.setSurfaceProvider(null)
         camera = null
         preview = null
         imageCapture = null
+        imageAnalysis = null
+        compositionSource = null
+        mutableState.update { it.copy(compositionAnalysisActive = false) }
         cameraOpen = false
         settingsApplied = false
     }
@@ -448,17 +599,15 @@ class CameraController(context: Context) {
             }.build()
 
     private fun sanitizeRestoredSettings(settings: CaptureSettings, caps: CameraCapabilities): CaptureSettings {
-        val manualExposureValid = caps.supportsManualExposure && settings.iso != null && settings.exposureTimeNs != null &&
-            settings.iso in requireNotNull(caps.isoMin)..requireNotNull(caps.isoMax) &&
-            settings.exposureTimeNs in requireNotNull(caps.exposureTimeMinNs)..requireNotNull(caps.exposureTimeMaxNs)
+        val exposureValid = ExposurePolicy.isExposureValid(settings, caps)
         val focus = settings.focusDistanceDiopters?.takeIf {
             caps.supportsManualFocus && it.isFinite() && it in 0f..requireNotNull(caps.minimumFocusDistanceDiopters)
         }
         return settings.copy(
             focalLength = settings.focalLength.takeIf { it in caps.focalLengthOptions } ?: caps.focalLengthOptions.first(),
             exposureCompensationIndex = settings.exposureCompensationIndex.coerceIn(caps.exposureCompensationMin, caps.exposureCompensationMax),
-            iso = settings.iso.takeIf { manualExposureValid },
-            exposureTimeNs = settings.exposureTimeNs.takeIf { manualExposureValid },
+            iso = settings.iso.takeIf { exposureValid },
+            exposureTimeNs = settings.exposureTimeNs.takeIf { exposureValid },
             focusDistanceDiopters = focus,
             autoExposureLocked = settings.autoExposureLocked && caps.supportsAutoExposureLock,
             whiteBalance = settings.whiteBalance.takeIf { it in caps.whiteBalanceModes }
@@ -471,11 +620,18 @@ class CameraController(context: Context) {
         require(settings.exposureCompensationIndex in caps.exposureCompensationMin..caps.exposureCompensationMax) {
             "曝光补偿超出设备范围。"
         }
-        require((settings.iso == null) == (settings.exposureTimeNs == null)) { "手动曝光需要同时指定 ISO 和快门。" }
+        require(settings.iso == null || settings.exposureTimeNs != null) { "M 档需要同时指定 ISO 和快门。" }
         if (settings.iso != null && settings.exposureTimeNs != null) {
             require(caps.supportsManualExposure) { "当前设备不支持手动曝光。" }
             require(settings.iso in requireNotNull(caps.isoMin)..requireNotNull(caps.isoMax)) { "ISO 超出设备范围。" }
             require(settings.exposureTimeNs in requireNotNull(caps.exposureTimeMinNs)..requireNotNull(caps.exposureTimeMaxNs)) {
+                "快门时间超出设备范围。"
+            }
+        }
+        if (settings.exposureMode == ExposureMode.SHUTTER_PRIORITY) {
+            require(caps.supportsShutterPriority && Build.VERSION.SDK_INT >= 36) { "当前设备不支持 S 档快门优先。" }
+            require(requireNotNull(settings.exposureTimeNs) in
+                requireNotNull(caps.exposureTimeMinNs)..requireNotNull(caps.exposureTimeMaxNs)) {
                 "快门时间超出设备范围。"
             }
         }

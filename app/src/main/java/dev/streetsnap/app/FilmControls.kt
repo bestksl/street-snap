@@ -1,12 +1,9 @@
 package dev.streetsnap.app
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -15,9 +12,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
@@ -59,41 +53,9 @@ internal fun FilmAdjustments(settings: AppSettings, model: CameraViewModel) {
             }
         }
     }
-    Text(active?.description ?: "选择一卷；卸下后恢复先前影调。", Modifier.padding(vertical = 10.dp),
+    Text(active?.description ?: "选择胶片，拍下自己的色彩。", Modifier.padding(vertical = 10.dp),
         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Text("边框配置", style = MaterialTheme.typography.titleSmall)
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        FilmFrame.entries.forEach { frame ->
-            val selected = settings.filmFrame == frame.id
-            Column(Modifier.width(64.dp).clip(RoundedCornerShape(8.dp))
-                .border(1.dp, if (selected) MaterialTheme.colorScheme.primary else Color.DarkGray, RoundedCornerShape(8.dp))
-                .clickable(role = Role.Button) { model.setFilmFrame(frame) }
-                .semantics { this.selected = selected; contentDescription = "边框：${frame.label}" }
-                .padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                Canvas(Modifier.size(46.dp, 56.dp)) {
-                    val layout = FilmLayout.fit(size.width, size.height, frame)
-                    drawRect(if (frame == FilmFrame.WHITE) Color.White else Color.Black)
-                    drawRect(Brush.linearGradient(listOf(Color(0xFF658B95), Color(0xFFCFB48F))),
-                        Offset(layout.left, layout.top), Size(layout.right - layout.left, layout.bottom - layout.top))
-                }
-                Text(frame.label, Modifier.padding(top = 5.dp), fontSize = 11.sp,
-                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
-    Text("日期打印", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 4.dp))
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
-        DateStamp.entries.forEach { stamp ->
-            val selected = settings.dateStamp == stamp.id
-            TextButton(onClick = { model.setDateStamp(stamp) }, modifier = Modifier.heightIn(min = 48.dp)
-                .semantics { this.selected = selected }) {
-                Text(stamp.label, color = if (selected) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
-            }
-        }
-    }
-    Text("边框、日期写入成片。影调里可调颗粒、饱和度等，每卷单独记忆。",
+    Text("影调里可调颗粒、饱和度等，每卷单独记忆。",
         Modifier.padding(bottom = 10.dp), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
@@ -102,16 +64,17 @@ internal fun FilmAdjustments(settings: AppSettings, model: CameraViewModel) {
 private fun FilmCard(film: FilmProfile, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
     Column(modifier.clip(RoundedCornerShape(10.dp)).clickable(role = Role.Button, onClick = onClick)
         .semantics { this.selected = selected; contentDescription = "胶片：${film.displayName}" }) {
-        Box(Modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(10.dp))
-            .background(Brush.verticalGradient(listOf(Color(film.swatchStart), Color(film.swatchEnd))))
+        Box(Modifier.fillMaxWidth().height(88.dp).clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surface)
             .border(if (selected) 2.dp else 1.dp,
                 if (selected) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .15f), RoundedCornerShape(10.dp))) {
-            Text(film.displayName, Modifier.align(Alignment.Center).fillMaxWidth()
-                .background(Color.Black.copy(alpha = .85f)).padding(horizontal = 5.dp, vertical = 5.dp),
-                color = Color.White, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold,
-                fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (selected) Text("✓", Modifier.align(Alignment.BottomEnd).padding(horizontal = 5.dp),
-                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            FilmArtwork(film, Modifier.fillMaxSize().padding(6.dp))
+            if (selected) Text("✓", Modifier.align(Alignment.TopEnd).background(Color.Black.copy(alpha = .75f))
+                .padding(horizontal = 5.dp), color = MaterialTheme.colorScheme.primary,
+                fontSize = 14.sp, fontWeight = FontWeight.Bold)
         }
+        Text(film.displayName, Modifier.fillMaxWidth().padding(top = 5.dp),
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            fontFamily = FontFamily.Monospace, fontSize = 11.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }

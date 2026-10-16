@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import dev.streetsnap.app.edge.EdgeModelCatalog
 import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.ColorRecipe
@@ -51,8 +52,10 @@ data class AppSettings(
     val level: Boolean = true,
     val preset: String = "ORIGINAL",
     val filmId: String? = null,
-    val filmFrame: String = FilmFrame.NONE.id,
-    val dateStamp: String = DateStamp.OFF.id,
+    val mascotCamera: String? = CameraPreferences.DEFAULT_MASCOT,
+    val captureOrientation: String = CameraPreferences.DEFAULT_ORIENTATION,
+    val compositionEnabled: Boolean = false,
+    val compositionModel: String = "smolvlm-256m",
     val looks: Map<String, LookSettings> = emptyMap(),
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
@@ -82,8 +85,17 @@ data class AppSettings(
             whiteBalanceAmber = whiteBalanceAmber, whiteBalanceGreen = whiteBalanceGreen,
         )
     }
+}
 
-    fun filmRenderSpec() = FilmRenderSpec(FilmFrame.fromId(filmFrame), DateStamp.fromId(dateStamp))
+/** Stored IDs are independent of the Compose catalog so loading settings never needs UI code. */
+internal object CameraPreferences {
+    const val DEFAULT_MASCOT = "RICOH_GR"
+    const val DEFAULT_ORIENTATION = "AUTO"
+    private val mascots = setOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3")
+    private val orientations = setOf("AUTO", "LANDSCAPE", "PORTRAIT")
+
+    fun mascot(id: String?): String? = if (id == null) null else id.takeIf { it in mascots } ?: DEFAULT_MASCOT
+    fun orientation(id: String?): String = id?.takeIf { it in orientations } ?: DEFAULT_ORIENTATION
 }
 
 /** Keep the old key so installing over v0.1 migrates settings without losing the selected look. */
@@ -103,7 +115,7 @@ class SettingsRepository(private val context: Context) {
 
 internal object SettingsJson {
     fun encode(settings: AppSettings): String = JSONObject().apply {
-        put("version", 3)
+        put("version", 4)
         put("focalLength", settings.focalLength)
         put("exposure", settings.exposure)
         put("focus", settings.focus)
@@ -114,8 +126,10 @@ internal object SettingsJson {
         put("level", settings.level)
         put("preset", settings.preset)
         put("filmId", settings.filmId ?: JSONObject.NULL)
-        put("filmFrame", settings.filmFrame)
-        put("dateStamp", settings.dateStamp)
+        put("mascotCamera", CameraPreferences.mascot(settings.mascotCamera) ?: JSONObject.NULL)
+        put("captureOrientation", CameraPreferences.orientation(settings.captureOrientation))
+        put("compositionEnabled", settings.compositionEnabled)
+        put("compositionModel", EdgeModelCatalog.find(settings.compositionModel)?.id ?: "smolvlm-256m")
         put("lutName", settings.lutName ?: JSONObject.NULL)
         put("looks", JSONObject().apply {
             settings.looks.forEach { (preset, look) ->
@@ -174,8 +188,14 @@ internal object SettingsJson {
                 preset = preset,
                 filmId = if (json.isNull("filmId")) null else json.optString("filmId")
                     .takeIf { FilmRegistry.find(it) != null },
-                filmFrame = FilmFrame.fromId(json.optString("filmFrame", FilmFrame.NONE.id)).id,
-                dateStamp = DateStamp.fromId(json.optString("dateStamp", DateStamp.OFF.id)).id,
+                mascotCamera = when {
+                    !json.has("mascotCamera") -> CameraPreferences.DEFAULT_MASCOT
+                    json.isNull("mascotCamera") -> null
+                    else -> CameraPreferences.mascot(json.optString("mascotCamera"))
+                },
+                captureOrientation = CameraPreferences.orientation(json.optString("captureOrientation")),
+                compositionEnabled = json.optBoolean("compositionEnabled", false),
+                compositionModel = EdgeModelCatalog.find(json.optString("compositionModel"))?.id ?: "smolvlm-256m",
                 looks = looks,
                 lutName = if (json.isNull("lutName")) null else json.optString("lutName").takeIf(String::isNotBlank)?.take(120),
                 hdfEnabled = json.optBoolean("hdfEnabled", false),

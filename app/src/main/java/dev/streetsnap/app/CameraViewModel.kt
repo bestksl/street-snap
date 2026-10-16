@@ -6,7 +6,9 @@ import android.provider.OpenableColumns
 import androidx.camera.core.MeteringPoint
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.streetsnap.app.edge.EdgeModelCatalog
 import dev.streetsnap.camera.CameraController
+import dev.streetsnap.camera.ExposureMode
 import dev.streetsnap.camera.FocalLength
 import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorEngine
@@ -36,6 +38,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val colors = ColorEngine()
     private val repository = SettingsRepository(application)
     private val saver = PhotoSaver(application)
+    internal val composition = CompositionAssistant(application, viewModelScope)
+    private var foreground = false
     private val _settings = MutableStateFlow(AppSettings())
     val settings = _settings.asStateFlow()
     private val _inFlight = MutableStateFlow(0)
@@ -79,11 +83,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 notify("读取上次配方失败，已使用原色")
             } finally {
                 _settingsLoaded.value = true
+                syncComposition()
             }
         }
     }
 
-    fun onBindingStarted() { _controlsRestored.value = false }
+    fun onBindingStarted() { _controlsRestored.value = false; composition.invalidateView() }
 
     suspend fun onCameraBound() {
         _settingsLoaded.first { it }
@@ -112,7 +117,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                     saved.iso.coerceIn(capabilities.isoMin ?: saved.iso, capabilities.isoMax ?: saved.iso),
                     saved.exposureTimeNs.coerceIn(capabilities.exposureTimeMinNs ?: saved.exposureTimeNs, capabilities.exposureTimeMaxNs ?: saved.exposureTimeNs),
                 )
+            } else if (capabilities.supportsShutterPriority && saved.iso == null && saved.exposureTimeNs != null) {
+                camera.setShutterPriority(saved.exposureTimeNs.coerceIn(
+                    requireNotNull(capabilities.exposureTimeMinNs), requireNotNull(capabilities.exposureTimeMaxNs),
+                ))
+            } else {
+                camera.setExposureMode(ExposureMode.PROGRAM)
             }
+            val exposure = camera.state.value.settings
+            update { it.copy(iso = exposure.iso, exposureTimeNs = exposure.exposureTimeNs) }
             _controlsRestored.value = true
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -130,14 +143,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _inFlight.value++
         val recipe = currentRecipe()
         val captureLut = lut
-        val film = _settings.value.filmRenderSpec()
         val capturedAt = LocalDateTime.now()
         viewModelScope.launch {
             var captureFile: File? = null
             try {
                 val captured = camera.capture()
                 captureFile = captured.jpegFile
-                val uri = processing.withLock { saver.save(captured, colors, recipe, captureLut, film, capturedAt) }
+                val uri = processing.withLock { saver.save(captured, colors, recipe, captureLut, capturedAt) }
                 _latestPhoto.value = uri
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -150,6 +162,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setFocalLength(focal: FocalLength) = cameraAction {
+        composition.invalidateView()
         camera.setFocalLength(focal)
         update { it.copy(focalLength = focal.equivalentMm ?: 0) }
     }
@@ -160,13 +173,42 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun setManualFocus(diopters: Float?) = latestCameraAction("focus") {
-        camera.setManualFocus(diopters)
-        update { it.copy(focus = if (diopters == null) "AUTO" else "MANUAL", focusDiopters = diopters ?: it.focusDiopters) }
+        val maximum = camera.state.value.capabilities?.minimumFocusDistanceDiopters
+        val distance = if (diopters != null && maximum != null && maximum.isFinite() && maximum > 0f) {
+            diopters.coerceIn(0f, maximum)
+        } else diopters
+        camera.setManualFocus(distance)
+        update { it.copy(focus = if (distance == null) "AUTO" else "MANUAL", focusDiopters = distance ?: it.focusDiopters) }
     }
 
     fun setManualExposure(iso: Int?, exposureTimeNs: Long?) = latestCameraAction("manualExposure") {
         camera.setManualExposure(iso, exposureTimeNs)
         update { it.copy(iso = iso, exposureTimeNs = exposureTimeNs) }
+    }
+
+    fun setExposureMode(mode: ExposureMode) = latestCameraAction("manualExposure") {
+        camera.setExposureMode(mode)
+        val exposure = camera.state.value.settings
+        update { it.copy(iso = exposure.iso, exposureTimeNs = exposure.exposureTimeNs) }
+    }
+
+    fun setShutterPriority(exposureTimeNs: Long) = latestCameraAction("manualExposure") {
+        camera.setShutterPriority(exposureTimeNs)
+        update { it.copy(iso = null, exposureTimeNs = exposureTimeNs) }
+    }
+
+    fun resetShootingParameters() {
+        // A deferred slider or focus request must not reapply the previous value after Reset.
+        listOf("exposure", "manualExposure", "focus", "tapFocus").forEach { controlJobs[it]?.cancel() }
+        latestCameraAction("manualExposure") {
+            val capture = camera.resetShootingParameters()
+            update { it.copy(
+                iso = capture.iso, exposureTimeNs = capture.exposureTimeNs,
+                exposure = capture.exposureCompensationIndex,
+                focus = if (capture.focusDistanceDiopters == null) "AUTO" else "MANUAL",
+                focusDiopters = capture.focusDistanceDiopters ?: 0f,
+            ) }
+        }
     }
 
     fun setWhiteBalance(mode: WhiteBalanceMode) = latestCameraAction("whiteBalance") {
@@ -201,6 +243,12 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         else camera.cancelFocus()
         update { it.copy(focus = "AUTO") }
     }
+
+    fun toggleFocusMode() = latestCameraAction("focus") {
+        val distance = camera.toggleFocusMode(_settings.value.focusDiopters)
+        update { it.copy(focus = if (distance == null) "AUTO" else "MANUAL",
+            focusDiopters = distance ?: it.focusDiopters) }
+    }
     fun toggleGrid() = update { it.copy(grid = !it.grid) }
     fun toggleLevel() = update { it.copy(level = !it.level) }
 
@@ -222,8 +270,19 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         applyColor()
     }
 
-    fun setFilmFrame(frame: FilmFrame) = update { it.copy(filmFrame = frame.id) }
-    fun setDateStamp(stamp: DateStamp) = update { it.copy(dateStamp = stamp.id) }
+    fun setMascotCamera(id: String?) = update { it.copy(mascotCamera = CameraPreferences.mascot(id)) }
+    fun setCaptureOrientation(id: String) = update { it.copy(captureOrientation = CameraPreferences.orientation(id)) }
+
+    fun setCompositionEnabled(enabled: Boolean) = update { it.copy(compositionEnabled = enabled) }
+    fun setCompositionModel(id: String) {
+        if (EdgeModelCatalog.find(id) != null) update { it.copy(compositionModel = id) }
+    }
+    fun onForegroundChanged(active: Boolean) {
+        foreground = active
+        if (_settingsLoaded.value) syncComposition()
+    }
+    private fun syncComposition() = composition.configure(
+        _settings.value.compositionModel, _settings.value.compositionEnabled, foreground)
 
     fun setColor(
         intensity: Float? = null, grain: Float? = null, vignette: Float? = null,
@@ -301,6 +360,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun update(transform: (AppSettings) -> AppSettings) {
         _settings.value = transform(_settings.value)
+        if (_settingsLoaded.value) syncComposition()
         saveSettingsJob?.cancel()
         saveSettingsJob = viewModelScope.launch {
             delay(180)
@@ -329,6 +389,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        composition.close()
         camera.close()
         colors.close()
         noticeChannel.close()
