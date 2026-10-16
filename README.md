@@ -140,9 +140,9 @@ Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与
 
 | 取景与快拍 | 行色 · 影调微调 | WB · 白平衡漂移 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧取景界面，包含影调选择、构图网格与快门"> | <img src="docs/images/color-controls.png" width="250" alt="行色调整面板，粉末蓝预设与饱和度调节"> | <img src="docs/images/white-balance.png" width="250" alt="白平衡预设与 A–B、G–M 漂移控制"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧取景界面，包含 28 / 35 / 50mm 视角按钮、构图网格与快门"> | <img src="docs/images/color-controls.png" width="250" alt="行色调整面板，粉末蓝预设与饱和度调节"> | <img src="docs/images/white-balance.png" width="250" alt="白平衡预设与 A–B、G–M 漂移控制"> |
 
-Android 15 模拟器中的实际 APK 截图，取景为内置测试场景。截图用于展示交互，实拍效果以设备为准。
+Android 15 模拟器中的实际 APK 截图，取景为内置测试场景。28 / 35 / 50mm 按钮固定显示，不支持的视角置灰；图中模拟器使用原生视角。实拍效果以设备为准。
 
 ## 安装与发布
 

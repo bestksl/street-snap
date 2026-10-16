@@ -44,6 +44,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -71,6 +73,12 @@ class CameraController(context: Context) {
     private var settingsApplied = false
     private var focusGeneration = 0L
     @Volatile private var closed = false
+
+    private companion object {
+        // Camera2 controls should acknowledge promptly; a stuck HAL must not disable every
+        // control until the activity is recreated.
+        const val CAMERA_CONTROL_TIMEOUT_MS = 2_000L
+    }
 
     @RequiresPermission(android.Manifest.permission.CAMERA)
     suspend fun bind(
@@ -332,22 +340,39 @@ class CameraController(context: Context) {
                 settings.autoExposureLocked != oldSettings.autoExposureLocked ||
                 settings.whiteBalance != oldSettings.whiteBalance
             if (requestOptionsChanged) {
-                if (manualFocus) current.cameraControl.cancelFocusAndMetering().awaitValue()
-                Camera2CameraControl.from(current.cameraControl).setCaptureRequestOptions(requests).awaitValue()
+                // Cancelling metering is only needed when entering manual focus. Repeating it
+                // for unrelated changes (for example WB) can wait forever on some camera HALs.
+                if (manualFocus && oldSettings.focusDistanceDiopters == null) {
+                    current.cameraControl.cancelFocusAndMetering().awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
+                }
+                Camera2CameraControl.from(current.cameraControl)
+                    .setCaptureRequestOptions(requests)
+                    .awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
             }
             if (needsAllSettings || oldSettings.focalLength != settings.focalLength) {
-                current.cameraControl.setZoomRatio(zoomRatio).awaitValue()
+                current.cameraControl.setZoomRatio(zoomRatio).awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
             }
             if (!manualExposure && caps.exposureCompensationMin != caps.exposureCompensationMax &&
                 (needsAllSettings || oldSettings.iso != null ||
                     oldSettings.exposureCompensationIndex != settings.exposureCompensationIndex)) {
-                current.cameraControl.setExposureCompensationIndex(settings.exposureCompensationIndex).awaitValue()
+                current.cameraControl.setExposureCompensationIndex(settings.exposureCompensationIndex)
+                    .awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
             }
             settingsApplied = true
             mutableState.update { it.copy(settings = settings, zoomRatio = zoomRatio, isReady = cameraOpen, error = null) }
         } catch (error: Exception) {
+            settingsApplied = needsAllSettings.not() && cameraOpen
+            val message = when (error) {
+                is TimeoutCancellationException -> "参数响应超时，请重试。"
+                is CancellationException -> null
+                else -> "参数未生效：${error.message}"
+            }
             mutableState.update {
-                it.copy(isReady = false, error = if (error is CancellationException) null else "参数未生效：${error.message}")
+                it.copy(
+                    settings = if (settingsApplied) oldSettings else it.settings,
+                    isReady = cameraOpen && settingsApplied,
+                    error = message,
+                )
             }
             throw error
         }
@@ -391,16 +416,22 @@ class CameraController(context: Context) {
             )
         }
 
-    private suspend fun <T> ListenableFuture<T>.awaitValue(cancelOnCancellation: Boolean = true): T = suspendCancellableCoroutine { continuation ->
-        addListener({
-            try {
-                val value = get()
-                if (continuation.isActive) continuation.resume(value)
-            } catch (error: Exception) {
-                if (continuation.isActive) continuation.resumeWithException(error.cause ?: error)
-            }
-        }, mainExecutor)
-        if (cancelOnCancellation) continuation.invokeOnCancellation { cancel(false) }
+    private suspend fun <T> ListenableFuture<T>.awaitValue(
+        timeoutMs: Long? = null,
+        cancelOnCancellation: Boolean = true,
+    ): T {
+        suspend fun awaitUnbounded(): T = suspendCancellableCoroutine { continuation ->
+            addListener({
+                try {
+                    val value = get()
+                    if (continuation.isActive) continuation.resume(value)
+                } catch (error: Exception) {
+                    if (continuation.isActive) continuation.resumeWithException(error.cause ?: error)
+                }
+            }, mainExecutor)
+            if (cancelOnCancellation) continuation.invokeOnCancellation { cancel(false) }
+        }
+        return if (timeoutMs == null) awaitUnbounded() else withTimeout(timeoutMs) { awaitUnbounded() }
     }
 
     private fun resolutionSelector(preferred: Size, maxPixels: Long): ResolutionSelector =

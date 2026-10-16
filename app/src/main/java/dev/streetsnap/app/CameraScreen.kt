@@ -33,6 +33,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -393,16 +394,43 @@ private fun ShootingControls(
     latestPhoto: Uri?,
     openPhoto: (Uri) -> Unit,
 ) {
+    val focalLengths = listOf(FocalLength.MM28, FocalLength.MM35, FocalLength.MM50)
+    val capabilities = state.capabilities
+    val supportedFocalLengths = capabilities?.focalLengthOptions.orEmpty()
+    val minimumFocalWidth = maxOf(48.dp, (48f * LocalDensity.current.fontScale).dp)
+    val focalHint = when {
+        capabilities == null -> "焦段信息尚不可用 · 可在“设备”查看详情"
+        focalLengths.none { it in supportedFocalLengths } && state.settings.focalLength == FocalLength.NATIVE ->
+            if (capabilities.nativeEquivalentFocalLengthMm == null) "焦段信息不可用 · 当前为原生视角"
+            else "三档视角暂不可用 · 当前为原生视角"
+        focalLengths.any { it !in supportedFocalLengths } -> "灰色视角暂不可用 · 可在“设备”查看详情"
+        else -> null
+    }
     Column(modifier.background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
-            val options = state.capabilities?.focalLengthOptions
-                ?: listOf(FocalLength.MM28, FocalLength.MM35, FocalLength.MM50)
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                options.forEach { focal ->
-                    ControlButton(focal.label, state.settings.focalLength == focal,
-                        enabled = state.isReady && loaded, onClick = { model.setFocalLength(focal) })
+            BoxWithConstraints(Modifier.weight(1f)) {
+                val distribute = maxWidth >= minimumFocalWidth * 3 + 8.dp
+                Row(if (distribute) Modifier.fillMaxWidth() else Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    focalLengths.forEach { focal ->
+                        val enabled = focal in supportedFocalLengths && state.isReady && loaded
+                        val selected = enabled && state.settings.focalLength == focal
+                        TextButton(onClick = { model.setFocalLength(focal) }, enabled = enabled,
+                            modifier = (if (distribute) Modifier.weight(1f) else Modifier.widthIn(min = minimumFocalWidth))
+                                .height(48.dp).semantics { this.selected = selected },
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                            shape = RoundedCornerShape(10.dp)) {
+                            Text(focal.label, Modifier.background(
+                                if (selected) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent,
+                                RoundedCornerShape(7.dp)).padding(horizontal = 4.dp, vertical = 4.dp),
+                                color = if (!enabled) MaterialTheme.colorScheme.onSurface.copy(alpha = .38f)
+                                else if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                 }
             }
             TextButton(onClick = {
@@ -424,6 +452,8 @@ private fun ShootingControls(
                     color = if (settings.hdfEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        if (focalHint != null) Text(focalHint, Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 4.dp),
+            style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             ColorPreset.entries.filter { it != ColorPreset.CUSTOM || settings.lutName != null }.forEach { preset ->
