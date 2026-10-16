@@ -1,0 +1,34 @@
+.gradle/
+.kotlin/
+.idea/
+.DS_Store
+**/build/
+.tooling/
+local.properties
+*.iml
+*.jks
+*.keystore
+keystore.properties
+captures/
+
+# Local credentials and environment overrides
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+.secrets/
+
+# Generated packages, diagnostics and local agent state
+*.apk
+*.aab
+*.apks
+*.idsig
+*.log
+*.hprof
+.codex/
+.agents/
