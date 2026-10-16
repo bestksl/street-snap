@@ -24,6 +24,7 @@ captures/
 .secrets/
 
 # Generated packages, diagnostics and local agent state
+dist/
 *.apk
 *.aab
 *.apks

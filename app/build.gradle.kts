@@ -3,6 +3,15 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val isCiBuild = providers.gradleProperty("ciBuild").map { it.toBoolean() }.getOrElse(false)
+val distributionSigning = listOf(
+    "ANDROID_KEYSTORE_PATH", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
+).associateWith { providers.environmentVariable(it).orNull?.takeIf(String::isNotBlank) }
+val hasDistributionSigning = distributionSigning.values.all { it != null }
+check(hasDistributionSigning || distributionSigning.values.all { it == null }) {
+    "Release signing requires ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD."
+}
+
 android {
     namespace = "dev.streetsnap.app"
     compileSdk = 37
@@ -14,18 +23,39 @@ android {
         targetSdk = 37
         versionCode = 2
         versionName = "0.2.0-dev"
+        resValue("string", "app_name", "途帧")
+    }
+
+    if (hasDistributionSigning) {
+        signingConfigs.create("distribution") {
+            storeFile = file(requireNotNull(distributionSigning["ANDROID_KEYSTORE_PATH"]))
+            storePassword = distributionSigning["ANDROID_KEYSTORE_PASSWORD"]
+            keyAlias = distributionSigning["ANDROID_KEY_ALIAS"]
+            keyPassword = distributionSigning["ANDROID_KEY_PASSWORD"]
+        }
     }
 
     buildTypes {
+        debug {
+            if (isCiBuild) {
+                applicationIdSuffix = ".ci"
+                resValue("string", "app_name", "途帧 CI")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasDistributionSigning) signingConfig = signingConfigs.getByName("distribution")
         }
         create("preview") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
             isDebuggable = false
+            if (isCiBuild) {
+                applicationIdSuffix = ".ci"
+                resValue("string", "app_name", "途帧 CI")
+            }
             matchingFallbacks += "release"
         }
     }
@@ -33,7 +63,10 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    buildFeatures { compose = true }
+    buildFeatures {
+        compose = true
+        resValues = true
+    }
 }
 
 dependencies {

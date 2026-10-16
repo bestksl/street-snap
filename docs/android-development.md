@@ -16,11 +16,15 @@
 ./gradlew :app:assembleRelease
 ```
 
-试拍 APK：`app/build/outputs/apk/preview/app-preview.apk`，启用与 Release 一致的 R8 和资源裁剪，使用开发测试签名且关闭调试。调试 APK：`app/build/outputs/apk/debug/app-debug.apk`。正式 Release 默认生成未签名 APK，正式分发时使用维护者自己的签名，密钥和密码不能提交仓库。Preview / Debug 与正式包的签名不同，后续切换正式签名可能需要卸载开发包。
+试拍 APK：`app/build/outputs/apk/preview/app-preview.apk`，启用与 Release 一致的 R8 和资源裁剪，使用本机开发测试签名且关闭调试。调试 APK：`app/build/outputs/apk/debug/app-debug.apk`。未配置签名环境变量时，Release 生成未签名 APK；固定分发签名的配置见 [CI 与版本发布](ci-and-releases.md#配置固定发布签名)。Preview / Debug 继续使用本机开发签名。
 
-GitHub Actions 工作流在推送或 PR 时执行构建、Lint 和核心单元测试，产出 `street-snap-preview` 与 `street-snap-debug` 制品。未推送、未运行的 CI 不视为已通过。
+GitHub Actions 的 **Android** 工作流在推送到 `main`、PR 或手动触发时执行构建、Lint 和核心单元测试。成功后，从运行摘要下载带版本号与提交号的 Preview / Debug ZIP，内含 APK 和 `SHA256SUMS`，保留 30 天。CI 使用 `-PciBuild=true`：显示为「途帧 CI」，包名为 `dev.streetsnap.app.ci`，可与公开版并存；临时签名跨次运行可能变化。
+
+单独的 **Android release draft** 工作流处理版本标签，要求固定签名 Secrets，默认创建草稿且不覆盖已有 Release。具体下载、签名与发布步骤见 [CI APK 与版本发布](ci-and-releases.md)。流程是否通过，以对应 Actions 运行结果为准；仅配置工作流不等于完成发布验证。
 
 ## 本地验证 · 2026-10-16
+
+以下记录对应已发布的 [v0.2.0-dev APK](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)，保留为该版本的验证记录。后续源码重新构建的大小和哈希可能不同，CI 产物以随包生成的 `SHA256SUMS` 为准。
 
 | 检查 | 结果 |
 | --- | --- |
@@ -32,13 +36,22 @@ GitHub Actions 工作流在推送或 PR 时执行构建、Lint 和核心单元�
 | 桌面 GPU | 2D 着色器编译/链接通过；6 项像素检查通过，覆盖中性输出、去饱和、白平衡方向、空间处理与柔光的分条一致性 |
 | 硬件验证 | 用户已反馈 v0.1 可运行；v0.2 新效果、实时取景、折叠屏与温升尚待荣耀 Vs3 实拍记录 |
 
-本次 Preview APK 的 SHA-256：
+已发布 v0.2.0-dev Preview APK 的 SHA-256：
 
 ```text
 48fe4b41823a008c0ca99e3cafc417e43d2292ec24178929fd643501118339f5
 ```
 
 以上为本地构建、单元测试和桌面 GPU 验证结果。桌面验证使用 ANGLE / OpenGL，覆盖照片用的 2D 纹理路径；Android OES 相机预览、Camera2 控制与设备性能仍需真机验收，下方检查项保持待测。
+
+## CI 与界面验证 · 2026-10-16
+
+- 普通构建与 `-PciBuild=true` 构建通过；CI 包名为 `dev.streetsnap.app.ci`，显示名为「途帧 CI」。
+- 使用一次性测试密钥验证 Release 签名构建与 `apksigner verify`，随后删除测试密钥并恢复未签名 Release 输出。
+- 32 项单元测试通过，Debug Lint 无错误；Actions 工作流通过 `actionlint` 检查，APK 打包脚本与校验文件已本地验证。
+- Android 15 模拟器已验证普通版和 CI 版并存、实时取景、拍照保存、影调调节与白平衡漂移；README 的三张图片来自实际 APK，详见 [截图说明](images/README.md)。
+
+以上不代替 GitHub Actions 远端运行或荣耀 Vs3 真机验收。固定发布签名仍需按 [发布文档](ci-and-releases.md) 配置。
 
 ## 模块
 

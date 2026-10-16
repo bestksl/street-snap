@@ -31,21 +31,42 @@ jobs:
         run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v4
       - name: Build, test and lint
-        run: ./gradlew :app:assembleDebug :app:assemblePreview :app:assembleRelease :app:lintDebug :app:testDebugUnitTest :camera:testDebugUnitTest :color:testDebugUnitTest --stacktrace
+        run: ./gradlew -PciBuild=true :app:assembleDebug :app:assemblePreview :app:assembleRelease :app:lintDebug :app:testDebugUnitTest :camera:testDebugUnitTest :color:testDebugUnitTest --stacktrace
+      - name: Prepare APKs and checksums
+        id: packages
+        run: python3 .github/scripts/package-apks.py ci
       - name: Upload preview APK
+        id: preview
         uses: actions/upload-artifact@v4
         with:
-          name: street-snap-preview
-          path: app/build/outputs/apk/preview/*.apk
+          name: ${{ steps.packages.outputs.preview_artifact }}
+          path: dist/preview/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+          compression-level: 0
       - name: Upload debug APK
+        id: debug
         uses: actions/upload-artifact@v4
         with:
-          name: street-snap-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: ${{ steps.packages.outputs.debug_artifact }}
+          path: dist/debug/
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 30
+          compression-level: 0
+      - name: APK download summary
+        env:
+          APP_VERSION: ${{ steps.packages.outputs.version }}
+          PREVIEW_URL: ${{ steps.preview.outputs.artifact-url }}
+          DEBUG_URL: ${{ steps.debug.outputs.artifact-url }}
+          PREVIEW_SHA256: ${{ steps.packages.outputs.preview_sha256 }}
+        run: |
+          {
+            printf '## Android %s\n\n' "$APP_VERSION"
+            printf '[Download Preview APK](%s) · [Download Debug APK](%s)\n\n' "$PREVIEW_URL" "$DEBUG_URL"
+            printf 'Each ZIP includes a versioned APK and SHA256SUMS. Artifacts are retained for 30 days; downloading requires a GitHub login.\n\n'
+            printf 'Preview is optimized with R8 and resource shrinking. CI APKs use dev.streetsnap.app.ci and can coexist with the public release. Their temporary signing key may change between runs; reinstalling a CI APK may require uninstalling the previous CI build.\n\n'
+            printf 'Preview SHA-256: `%s`\n' "$PREVIEW_SHA256"
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4

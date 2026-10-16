@@ -136,6 +136,14 @@ Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
 - [ ] **iOS**：复用产品交互与配方规范，接入 iOS 原生相机和调色实现。
 
+## Interface
+
+| 取景与快拍 | 行色 · 影调微调 | WB · 白平衡漂移 |
+| :---: | :---: | :---: |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧取景界面，包含影调选择、构图网格与快门"> | <img src="docs/images/color-controls.png" width="250" alt="行色调整面板，粉末蓝预设与饱和度调节"> | <img src="docs/images/white-balance.png" width="250" alt="白平衡预设与 A–B、G–M 漂移控制"> |
+
+Android 15 模拟器中的实际 APK 截图，取景为内置测试场景。截图用于展示交互，实拍效果以设备为准。
+
 ## 安装与发布
 
 **Android 版已可安装，最低支持 Android 12。**
@@ -159,6 +167,19 @@ Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与
 ```
 
 输出：`app/build/outputs/apk/preview/app-preview.apk`。调试可使用 `:app:assembleDebug`；构建、测试与设备验收步骤见 [Android 开发说明](docs/android-development.md)。
+
+### CI → APK
+
+[![Android CI](https://github.com/bestksl/street-snap/actions/workflows/android.yml/badge.svg)](https://github.com/bestksl/street-snap/actions/workflows/android.yml)
+
+| 触发 | 产出 |
+| --- | --- |
+| 推送到 `main` / PR / 手动运行 | 构建、测试、Lint；提供 Preview / Debug APK 与 SHA-256 |
+| `v*` 版本标签 / 手动指定标签 | 固定签名 APK、SHA-256 与 Release 草稿 |
+
+体验最新代码：打开 [Actions → Android](https://github.com/bestksl/street-snap/actions/workflows/android.yml)，选择成功的运行，在摘要下载 **Preview APK**，解压后安装。CI 制品保留 30 天，下载需要登录 GitHub。
+
+CI 包使用独立包名，显示为「途帧 CI」，可与公开版并存；临时签名变化时需卸载旧 CI 包。长期使用请下载 [Releases](https://github.com/bestksl/street-snap/releases)。标签发布需要先配置签名 Secrets，步骤见 [CI 与版本发布](docs/ci-and-releases.md)。
 
 ## Contributing
 
