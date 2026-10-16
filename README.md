@@ -126,23 +126,27 @@ Rust 可作为后续共享模块的候选，用于 LUT 解析、配方校验或�
 
 ## Roadmap
 
-先完善 Android 拍照体验与设备验证，再推进 iOS；各阶段不作为发布时间承诺。
+Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与设备验证，再推进 iOS。
 
 - [x] **Design**：确认 Android 一期范围、最低系统版本与首测设备。
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
+- [x] **Android Preview**：[v0.2.0-dev · SNAP/02](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)，支持 Android 12 及以上版本。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
 - [ ] **iOS**：复用产品交互与配方规范，接入 iOS 原生相机和调色实现。
 
 ## 安装与发布
 
-稳定版尚未发布。开发者可构建经过体积优化的 Preview APK，CI 也配置了 APK 构建制品；Preview 使用开发测试签名，用于试拍与问题反馈。
+**Android 版已可安装，最低支持 Android 12。**
 
-- **Android**：计划在 [GitHub Releases](https://github.com/bestksl/street-snap/releases) 发布 APK。
-- **iOS**：计划通过 TestFlight 提供测试版本；具体分发方式及入口待开发者签名与发布配置确定后公布。
+[下载 APK · v0.2.0-dev](https://github.com/bestksl/street-snap/releases/download/v0.2.0-dev/street-snap-v0.2.0-dev.apk) · [Release 说明 · SNAP/02](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)
 
-Android 与 iOS 的签名、构建和发布方式不同，后续将分别提供说明。
+下载后在手机上打开 APK，按系统提示允许本次安装。已安装同签名开发版时，直接覆盖安装可保留拍摄参数与影调设置，无需卸载。
+
+这是用于试拍与反馈的 **Preview 开发预览**：采用开发测试签名、非调试构建，启用 R8 与资源裁剪。机型兼容性、预览与成片一致性、折叠屏行为及性能仍需真机验证，详见 [v0.2 试拍说明](docs/android-v0.2-notes.md)。
+
+**iOS** 后续开发，TestFlight 入口将在可用时公布。
 
 ## Build
 
@@ -163,7 +167,7 @@ Android 与 iOS 的签名、构建和发布方式不同，后续将分别提供�
 - **Camera**：原生相机接入、参数控制、设备适配。
 - **Color**：独立创作的 LUT、影调配方与调色代码。
 - **UX & Docs**：单手操作、取景界面、开发与预设制作文档。
-- **Device testing**：进入开发后，记录机型、系统版本、相机能力与复现步骤。
+- **Device testing**：安装开发预览试拍，反馈机型、系统版本、相机能力与复现步骤。
 
 提交影调预设时，请附上创作说明、来源与许可信息，并确保你有权以项目采用的许可证发布该内容。请勿提交从相机原厂固件中直接提取的色彩文件，或无权再分发的第三方 LUT。
 
