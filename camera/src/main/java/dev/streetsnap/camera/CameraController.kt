@@ -71,7 +71,9 @@ class CameraController(context: Context) {
     private var stateObserver: Observer<CameraXState>? = null
     private var cameraOpen = false
     private var settingsApplied = false
-    private var focusGeneration = 0L
+    private val focusSession = FocusSession(publish = { focusing, result, locked ->
+        mutableState.update { it.copy(isFocusing = focusing, focusResult = result, isFocusLocked = locked) }
+    })
     @Volatile private var closed = false
 
     private companion object {
@@ -138,6 +140,7 @@ class CameraController(context: Context) {
                     mutableState.update { it.copy(isBound = true, capabilities = capabilities, error = null) }
                     val observer = Observer<CameraXState> { current ->
                         cameraOpen = current.type == CameraXState.Type.OPEN
+                        if (!cameraOpen) focusSession.invalidate()
                         mutableState.update {
                             it.copy(
                                 isReady = cameraOpen && settingsApplied,
@@ -161,11 +164,11 @@ class CameraController(context: Context) {
     /** Pass PreviewView.meteringPointFactory.createPoint(x, y) for transformed screen coordinates. */
     suspend fun focus(point: MeteringPoint, lock: Boolean = false): Boolean =
         withContext(Dispatchers.Main.immediate) {
-            val (future, generation) = controlMutex.withLock {
-                val current = requireCamera()
-                check(mutableState.value.settings.focusDistanceDiopters == null) {
-                    "请先退出手动对焦。"
-                }
+            val (request, future) = controlMutex.withLock {
+                val current = camera ?: return@withContext false
+                if (closed || !mutableState.value.isReady ||
+                    mutableState.value.settings.focusDistanceDiopters != null ||
+                    mutableState.value.capabilities?.supportsFocusMetering != true) return@withContext false
                 val settings = mutableState.value.settings
                 var meteringFlags = FocusMeteringAction.FLAG_AF
                 if (settings.iso == null && !settings.autoExposureLocked) {
@@ -180,20 +183,22 @@ class CameraController(context: Context) {
                 ).apply {
                     if (lock) disableAutoCancel() else setAutoCancelDuration(4, TimeUnit.SECONDS)
                 }.build()
-                check(current.cameraInfo.isFocusMeteringSupported(action)) { "当前设备不支持点击对焦。" }
-                focusGeneration++
-                mutableState.update { it.copy(isFocusing = true, error = null) }
-                current.cameraControl.startFocusAndMetering(action) to focusGeneration
+                if (!current.cameraInfo.isFocusMeteringSupported(action)) return@withContext false
+                val request = focusSession.begin(lock) {
+                    current.cameraControl.cancelFocusAndMetering()
+                }
+                request to runCatching { current.cameraControl.startFocusAndMetering(action) }
             }
             // Autofocus can take seconds in low light. It must not hold the shutter/control lock.
-            try {
-                future.awaitValue().isFocusSuccessful
-            } finally {
-                if (generation == focusGeneration) {
-                    mutableState.update { it.copy(isFocusing = false) }
-                }
+            focusSession.await(request) {
+                future.getOrThrow().awaitValue().isFocusSuccessful
             }
         }
+
+    /** Releases tap-focus / AF-L and lets CameraX resume its automatic focus mode. */
+    suspend fun cancelFocus(): Unit = withContext(Dispatchers.Main.immediate) {
+        controlMutex.withLock { focusSession.invalidate() }
+    }
 
     /** Normalized coordinates refer to the untransformed preview surface, not a letterboxed View. */
     suspend fun focusNormalized(x: Float, y: Float, lock: Boolean = false): Boolean {
@@ -340,14 +345,14 @@ class CameraController(context: Context) {
                 settings.autoExposureLocked != oldSettings.autoExposureLocked ||
                 settings.whiteBalance != oldSettings.whiteBalance
             if (requestOptionsChanged) {
-                // Cancelling metering is only needed when entering manual focus. Repeating it
-                // for unrelated changes (for example WB) can wait forever on some camera HALs.
-                if (manualFocus && oldSettings.focusDistanceDiopters == null) {
-                    current.cameraControl.cancelFocusAndMetering().awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
+                if (settings.focusDistanceDiopters != oldSettings.focusDistanceDiopters) {
+                    focusSession.invalidate()
                 }
+                // setCaptureRequestOptions replaces all interop options. Omitting AF overrides
+                // in automatic mode restores CameraX's continuous AF and tap-focus behavior.
+                // Unrelated controls such as WB must not repeatedly cancel focus metering.
                 Camera2CameraControl.from(current.cameraControl)
-                    .setCaptureRequestOptions(requests)
-                    .awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
+                    .setCaptureRequestOptions(requests).awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
             }
             if (needsAllSettings || oldSettings.focalLength != settings.focalLength) {
                 current.cameraControl.setZoomRatio(zoomRatio).awaitValue(CAMERA_CONTROL_TIMEOUT_MS)
@@ -384,6 +389,7 @@ class CameraController(context: Context) {
     }
 
     private fun detachSession() {
+        focusSession.invalidate()
         stateObserver?.let { observer -> camera?.cameraInfo?.cameraState?.removeObserver(observer) }
         stateObserver = null
         val useCases = listOfNotNull(preview, imageCapture)
@@ -394,8 +400,6 @@ class CameraController(context: Context) {
         imageCapture = null
         cameraOpen = false
         settingsApplied = false
-        focusGeneration++
-        mutableState.update { it.copy(isFocusing = false) }
     }
 
     private suspend fun takePicture(useCase: ImageCapture, output: File) =

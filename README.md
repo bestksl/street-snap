@@ -136,6 +136,8 @@ Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
 - [ ] **iOS**：复用产品交互与配方规范，接入 iOS 原生相机和调色实现。
 
+当前源码还增加了 AF/MF 明确切换、点按对焦反馈，以及 7 套胶片配方、边框和日期打印，见 [胶片与对焦试拍说明](docs/film-and-focus.md)。这些变更尚未更新到上面的 Release；端侧多模态模型处于 [可行性评估](docs/edge-model-plan.md) 阶段。
+
 ## Interface
 
 | 取景与快拍 | 行色 · 影调微调 | WB · 白平衡漂移 |

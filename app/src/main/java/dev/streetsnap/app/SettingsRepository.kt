@@ -7,6 +7,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.ColorRecipe
+import dev.streetsnap.color.FilmRegistry
 import java.io.IOException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -28,7 +29,16 @@ data class LookSettings(
     val shadows: Float = 0f,
     val sharpness: Float = 0f,
     val clarity: Float = 0f,
-)
+) {
+    companion object {
+        fun fromRecipe(recipe: ColorRecipe) = LookSettings(
+            intensity = recipe.intensity, grain = recipe.grain, vignette = recipe.vignette,
+            saturation = recipe.saturation, hue = recipe.hue, contrast = recipe.contrast,
+            brightness = recipe.brightness, highlights = recipe.highlights, shadows = recipe.shadows,
+            sharpness = recipe.sharpness, clarity = recipe.clarity,
+        )
+    }
+}
 
 data class AppSettings(
     val focalLength: Int = 28,
@@ -40,6 +50,9 @@ data class AppSettings(
     val grid: Boolean = true,
     val level: Boolean = true,
     val preset: String = "ORIGINAL",
+    val filmId: String? = null,
+    val filmFrame: String = FilmFrame.NONE.id,
+    val dateStamp: String = DateStamp.OFF.id,
     val looks: Map<String, LookSettings> = emptyMap(),
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
@@ -48,14 +61,19 @@ data class AppSettings(
     val whiteBalanceAmber: Int = 0,
     val whiteBalanceGreen: Int = 0,
 ) {
-    val activeLook: LookSettings get() = looks[preset] ?: LookSettings()
+    val activeLookKey: String get() = FilmRegistry.find(filmId)?.let { "FILM:${it.id}" } ?: preset
+    val activeLook: LookSettings get() = looks[activeLookKey]
+        ?: FilmRegistry.find(filmId)?.let { LookSettings.fromRecipe(it.defaults) }
+        ?: LookSettings()
 
-    fun updateLook(transform: (LookSettings) -> LookSettings) = copy(looks = looks + (preset to transform(activeLook)))
-    fun resetLook() = copy(looks = looks - preset)
+    fun updateLook(transform: (LookSettings) -> LookSettings) =
+        copy(looks = looks + (activeLookKey to transform(activeLook)))
+    fun resetLook() = copy(looks = looks - activeLookKey)
 
     fun colorRecipe(): ColorRecipe = activeLook.let { look ->
         ColorRecipe(
-            preset = runCatching { ColorPreset.valueOf(preset) }.getOrDefault(ColorPreset.ORIGINAL),
+            preset = FilmRegistry.find(filmId)?.basePreset
+                ?: runCatching { ColorPreset.valueOf(preset) }.getOrDefault(ColorPreset.ORIGINAL),
             intensity = look.intensity, grain = look.grain, vignette = look.vignette,
             saturation = look.saturation, hue = look.hue, contrast = look.contrast,
             brightness = look.brightness, highlights = look.highlights, shadows = look.shadows,
@@ -64,6 +82,8 @@ data class AppSettings(
             whiteBalanceAmber = whiteBalanceAmber, whiteBalanceGreen = whiteBalanceGreen,
         )
     }
+
+    fun filmRenderSpec() = FilmRenderSpec(FilmFrame.fromId(filmFrame), DateStamp.fromId(dateStamp))
 }
 
 /** Keep the old key so installing over v0.1 migrates settings without losing the selected look. */
@@ -83,7 +103,7 @@ class SettingsRepository(private val context: Context) {
 
 internal object SettingsJson {
     fun encode(settings: AppSettings): String = JSONObject().apply {
-        put("version", 2)
+        put("version", 3)
         put("focalLength", settings.focalLength)
         put("exposure", settings.exposure)
         put("focus", settings.focus)
@@ -93,6 +113,9 @@ internal object SettingsJson {
         put("grid", settings.grid)
         put("level", settings.level)
         put("preset", settings.preset)
+        put("filmId", settings.filmId ?: JSONObject.NULL)
+        put("filmFrame", settings.filmFrame)
+        put("dateStamp", settings.dateStamp)
         put("lutName", settings.lutName ?: JSONObject.NULL)
         put("looks", JSONObject().apply {
             settings.looks.forEach { (preset, look) ->
@@ -126,9 +149,16 @@ internal object SettingsJson {
                 .takeIf { name -> ColorPreset.entries.any { it.name == name } } ?: "ORIGINAL"
             val savedLooks = json.optJSONObject("looks")
             val looks = if (savedLooks != null) {
-                ColorPreset.entries.mapNotNull { choice ->
+                val presetLooks = ColorPreset.entries.mapNotNull { choice ->
                     savedLooks.optJSONObject(choice.name)?.let { choice.name to decodeLook(it) }
-                }.toMap()
+                }
+                val filmLooks = FilmRegistry.entries.mapNotNull { film ->
+                    val key = "FILM:${film.id}"
+                    savedLooks.optJSONObject(key)?.let {
+                        key to decodeLook(it, LookSettings.fromRecipe(film.defaults))
+                    }
+                }
+                (presetLooks + filmLooks).toMap()
             } else if (json.optInt("version", 1) == 1) {
                 mapOf(preset to decodeLook(json))
             } else emptyMap()
@@ -142,6 +172,10 @@ internal object SettingsJson {
                 grid = json.optBoolean("grid", true),
                 level = json.optBoolean("level", true),
                 preset = preset,
+                filmId = if (json.isNull("filmId")) null else json.optString("filmId")
+                    .takeIf { FilmRegistry.find(it) != null },
+                filmFrame = FilmFrame.fromId(json.optString("filmFrame", FilmFrame.NONE.id)).id,
+                dateStamp = DateStamp.fromId(json.optString("dateStamp", DateStamp.OFF.id)).id,
                 looks = looks,
                 lutName = if (json.isNull("lutName")) null else json.optString("lutName").takeIf(String::isNotBlank)?.take(120),
                 hdfEnabled = json.optBoolean("hdfEnabled", false),
@@ -154,12 +188,13 @@ internal object SettingsJson {
         }.getOrDefault(AppSettings())
     }
 
-    private fun decodeLook(json: JSONObject) = LookSettings(
-        intensity = json.amount("intensity", 1f), grain = json.amount("grain", 0f), vignette = json.amount("vignette", 0f),
-        saturation = json.amount("saturation", 0f, -1f), hue = json.amount("hue", 0f, -1f),
-        contrast = json.amount("contrast", 0f, -1f), brightness = json.amount("brightness", 0f, -1f),
-        highlights = json.amount("highlights", 0f, -1f), shadows = json.amount("shadows", 0f, -1f),
-        sharpness = json.amount("sharpness", 0f, -1f), clarity = json.amount("clarity", 0f, -1f),
+    private fun decodeLook(json: JSONObject, defaults: LookSettings = LookSettings()) = LookSettings(
+        intensity = json.amount("intensity", defaults.intensity),
+        grain = json.amount("grain", defaults.grain), vignette = json.amount("vignette", defaults.vignette),
+        saturation = json.amount("saturation", defaults.saturation, -1f), hue = json.amount("hue", defaults.hue, -1f),
+        contrast = json.amount("contrast", defaults.contrast, -1f), brightness = json.amount("brightness", defaults.brightness, -1f),
+        highlights = json.amount("highlights", defaults.highlights, -1f), shadows = json.amount("shadows", defaults.shadows, -1f),
+        sharpness = json.amount("sharpness", defaults.sharpness, -1f), clarity = json.amount("clarity", defaults.clarity, -1f),
     )
 
     private fun JSONObject.amount(name: String, default: Float, minimum: Float = 0f, maximum: Float = 1f): Float =

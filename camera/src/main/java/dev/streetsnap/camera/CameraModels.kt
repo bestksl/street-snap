@@ -29,6 +29,8 @@ data class CameraState(
     val isReady: Boolean = false,
     val isCapturing: Boolean = false,
     val isFocusing: Boolean = false,
+    val focusResult: Boolean? = null,
+    val isFocusLocked: Boolean = false,
     val capabilities: CameraCapabilities? = null,
     val settings: CaptureSettings = CaptureSettings(),
     val zoomRatio: Float = 1f,
@@ -54,6 +56,8 @@ data class CameraCapabilities(
     val supportsManualFocus: Boolean,
     val minimumFocusDistanceDiopters: Float?,
     val focusDistanceCalibration: String,
+    /** Device capability only; CameraX owns the active AF mode and tap-focus trigger. */
+    val autoFocusMode: Int? = null,
     val supportsAutoExposureLock: Boolean,
     val supportsFocusMetering: Boolean,
     val notes: List<String>,

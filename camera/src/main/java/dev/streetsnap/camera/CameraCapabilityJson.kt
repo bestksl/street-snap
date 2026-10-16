@@ -30,6 +30,8 @@ internal object CameraCapabilityJson {
         })
         put("focus", JSONObject().apply {
             put("manualSupported", value.supportsManualFocus)
+            put("autoSupported", value.autoFocusMode != null)
+            put("autoMode", value.autoFocusMode ?: JSONObject.NULL)
             put("maximumDiopters", value.minimumFocusDistanceDiopters ?: JSONObject.NULL)
             put("distanceCalibration", value.focusDistanceCalibration)
             put("meteringSupported", value.supportsFocusMetering)

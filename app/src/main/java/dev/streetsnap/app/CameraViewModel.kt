@@ -12,7 +12,9 @@ import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorEngine
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.CubeLut
+import dev.streetsnap.color.FilmRegistry
 import java.io.File
+import java.time.LocalDateTime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -128,12 +130,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _inFlight.value++
         val recipe = currentRecipe()
         val captureLut = lut
+        val film = _settings.value.filmRenderSpec()
+        val capturedAt = LocalDateTime.now()
         viewModelScope.launch {
             var captureFile: File? = null
             try {
                 val captured = camera.capture()
                 captureFile = captured.jpegFile
-                val uri = processing.withLock { saver.save(captured, colors, recipe, captureLut) }
+                val uri = processing.withLock { saver.save(captured, colors, recipe, captureLut, film, capturedAt) }
                 _latestPhoto.value = uri
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -190,7 +194,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         applyColor()
     }
 
-    fun focus(point: MeteringPoint) = cameraAction { camera.focus(point) }
+    fun focus(point: MeteringPoint, lock: Boolean = false) = latestCameraAction("tapFocus") { camera.focus(point, lock) }
+
+    fun autoFocus() = latestCameraAction("focus") {
+        if (camera.state.value.settings.focusDistanceDiopters != null) camera.setManualFocus(null)
+        else camera.cancelFocus()
+        update { it.copy(focus = "AUTO") }
+    }
     fun toggleGrid() = update { it.copy(grid = !it.grid) }
     fun toggleLevel() = update { it.copy(level = !it.level) }
 
@@ -199,9 +209,21 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             notify("请先导入 .cube LUT")
             return
         }
-        update { it.copy(preset = preset.name) }
+        update { it.copy(preset = preset.name, filmId = null) }
         applyColor()
     }
+
+    fun setFilm(id: String?) {
+        val profile = FilmRegistry.find(id)
+        update {
+            if (profile == null) it.copy(filmId = null)
+            else it.copy(filmId = profile.id)
+        }
+        applyColor()
+    }
+
+    fun setFilmFrame(frame: FilmFrame) = update { it.copy(filmFrame = frame.id) }
+    fun setDateStamp(stamp: DateStamp) = update { it.copy(dateStamp = stamp.id) }
 
     fun setColor(
         intensity: Float? = null, grain: Float? = null, vignette: Float? = null,
@@ -255,7 +277,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 lut = result.first
                 colors.setCustomLut(lut)
-                update { it.copy(preset = ColorPreset.CUSTOM.name, lutName = result.second.take(120)) }
+                update { it.copy(preset = ColorPreset.CUSTOM.name, filmId = null, lutName = result.second.take(120)) }
                 applyColor()
                 notify("已导入 ${result.second}")
             } catch (error: Exception) {

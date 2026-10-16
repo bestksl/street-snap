@@ -112,12 +112,14 @@ import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.FocalLength
 import dev.streetsnap.color.ColorPreset
+import dev.streetsnap.color.FilmRegistry
 import kotlin.coroutines.resume
 import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
@@ -287,6 +289,16 @@ private fun Viewfinder(
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
     val streaming by model.previewStreaming.collectAsStateWithLifecycle()
     val hasSize = width > 0 && height > 0
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    val manualFocus = state.settings.focusDistanceDiopters != null
+    val canTapFocus = state.isReady && !manualFocus && state.capabilities?.supportsFocusMetering == true
+    LaunchedEffect(manualFocus, retry, landscape, width, height) { focusPoint = null }
+    LaunchedEffect(focusPoint, state.isFocusing, state.isFocusLocked) {
+        if (!state.isFocusing && !state.isFocusLocked) {
+            delay(4_000)
+            focusPoint = null
+        }
+    }
     // The adjustment panel only changes the preview's size, not its 4:3 framing.
     // PreviewView handles those resizes without tearing down the camera session.
     LaunchedEffect(preview, lifecycle, retry, hasSize, landscape) {
@@ -319,10 +331,21 @@ private fun Viewfinder(
                 height = it.height
             })
             val roll = rememberLevelAngle(settings.level, preview)
-            Canvas(Modifier.fillMaxSize().pointerInput(preview, state.isReady) {
-                detectTapGestures { position ->
-                    if (state.isReady) model.focus(preview.meteringPointFactory.createPoint(position.x, position.y))
-                }
+            Canvas(Modifier.fillMaxSize().pointerInput(preview, canTapFocus) {
+                detectTapGestures(
+                    onTap = { position ->
+                        if (canTapFocus) {
+                            focusPoint = Offset(position.x / width, position.y / height)
+                            model.focus(preview.meteringPointFactory.createPoint(position.x, position.y))
+                        }
+                    },
+                    onLongPress = { position ->
+                        if (canTapFocus) {
+                            focusPoint = Offset(position.x / width, position.y / height)
+                            model.focus(preview.meteringPointFactory.createPoint(position.x, position.y), lock = true)
+                        }
+                    },
+                )
             }) {
                 if (settings.grid) {
                     val color = Color.White.copy(alpha = .32f)
@@ -340,6 +363,19 @@ private fun Viewfinder(
                     drawLine(color, midpoint - delta, midpoint + delta, 2.dp.toPx())
                     drawCircle(color, 3.dp.toPx(), midpoint)
                 }
+                focusPoint?.let { point ->
+                    val radius = minOf(22.dp.toPx(), size.minDimension / 4f)
+                    val x = (point.x * size.width).coerceIn(radius, size.width - radius)
+                    val y = (point.y * size.height).coerceIn(radius, size.height - radius)
+                    val color = when {
+                        state.isFocusing -> Color.White
+                        state.focusResult == true -> Color(0xFFE2FF79)
+                        state.focusResult == false -> Color(0xFFFFB36B)
+                        else -> Color.White
+                    }
+                    drawRect(color, Offset(x - radius, y - radius),
+                        androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
+                }
             }
             Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(state.settings.focalLength.label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
@@ -348,10 +384,27 @@ private fun Viewfinder(
                 if (settings.hdfEnabled) Text("HDF", color = MaterialTheme.colorScheme.primary,
                     fontFamily = FontFamily.Monospace, fontSize = 11.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = .45f), RoundedCornerShape(4.dp)).padding(5.dp))
-                if (state.settings.focusDistanceDiopters != null) Text("MF", color = MaterialTheme.colorScheme.primary,
-                    fontFamily = FontFamily.Monospace, modifier = Modifier.padding(5.dp))
+                TextButton(onClick = { focusPoint = null; model.autoFocus() },
+                    enabled = state.isReady && state.capabilities?.autoFocusMode != null,
+                    modifier = Modifier.heightIn(min = 48.dp).semantics {
+                        contentDescription = if (manualFocus) "切换自动对焦" else "解除对焦锁定"
+                    }) {
+                    Text(when {
+                        manualFocus -> "MF"
+                        state.isFocusLocked -> "AF-L"
+                        state.capabilities?.autoFocusMode != null -> "AF"
+                        else -> "固定焦点"
+                    }, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
+                }
             }
-            if (state.isFocusing) Text("对焦中", Modifier.align(Alignment.BottomCenter).padding(16.dp), color = Color.White)
+            val focusHint = when {
+                state.isFocusing -> "对焦中"
+                state.isFocusLocked -> "对焦已锁定 · 点 AF-L 解除"
+                focusPoint != null && state.focusResult == false -> "未合焦 · 可重试或直接拍摄"
+                else -> null
+            }
+            focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter).padding(16.dp),
+                color = Color.White, fontSize = 12.sp) }
         }
         val error = bindingError ?: previewError ?: state.error
         if (error != null) {
@@ -368,7 +421,7 @@ private fun Viewfinder(
 }
 
 private enum class AdjustmentTab(val label: String) {
-    LOOK("影调"), WHITE_BALANCE("白平衡"), SHOOTING("拍摄"),
+    LOOK("影调"), FILM("胶片"), WHITE_BALANCE("白平衡"), SHOOTING("拍摄"),
 }
 
 private enum class LookParameter(val label: String, val signed: Boolean = true) {
@@ -456,8 +509,10 @@ private fun ShootingControls(
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "胶片", settings.filmId != null,
+                enabled = loaded, onClick = { onTab(AdjustmentTab.FILM) })
             ColorPreset.entries.filter { it != ColorPreset.CUSTOM || settings.lutName != null }.forEach { preset ->
-                ControlButton(preset.displayName, settings.preset == preset.name,
+                ControlButton(preset.displayName, settings.filmId == null && settings.preset == preset.name,
                     enabled = loaded, onClick = { model.setPreset(preset) })
             }
         }
@@ -564,7 +619,7 @@ private fun AdjustmentPanel(
     val contentScroll = rememberScrollState()
     LaunchedEffect(tab) { contentScroll.scrollTo(0) }
     Column(modifier.clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceContainer)) {
-        Row(Modifier.fillMaxWidth().height(48.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
+        Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.SpaceEvenly) {
             AdjustmentTab.entries.forEach { item ->
                 ControlButton(item.label, item == tab, onClick = { onTab(item) })
             }
@@ -573,6 +628,7 @@ private fun AdjustmentPanel(
         Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(contentScroll).padding(horizontal = 12.dp)) {
             when (tab) {
                 AdjustmentTab.LOOK -> LookAdjustments(settings, importing, model, importLut)
+                AdjustmentTab.FILM -> FilmAdjustments(settings, model)
                 AdjustmentTab.WHITE_BALANCE -> WhiteBalanceAdjustments(state, settings, model)
                 AdjustmentTab.SHOOTING -> ShootingAdjustments(state, settings, model)
             }
@@ -656,6 +712,7 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
         }
     }
     Text(if (parameter == LookParameter.DIFFUSION) "柔光与白平衡对所有预设生效。"
+        else if (settings.filmId != null) "胶片 · ${FilmRegistry.find(settings.filmId)?.displayName.orEmpty()} · 独立记忆参数"
         else if (settings.preset == ColorPreset.CUSTOM.name && settings.lutName != null) "LUT · ${settings.lutName}"
         else "每套影调单独记忆参数。",
         Modifier.padding(bottom = 10.dp), style = MaterialTheme.typography.labelSmall,
@@ -798,9 +855,18 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
                 steps = (maximum - minimum - 1).coerceAtLeast(0),
                 onChange = { model.setExposure(it.roundToInt()) })
         }
+        val manual = state.settings.focusDistanceDiopters != null
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
+            ControlButton("AF 自动", !manual && capabilities.autoFocusMode != null,
+                enabled = state.isReady && capabilities.autoFocusMode != null, onClick = model::autoFocus)
+            ControlButton("MF 预设", manual, enabled = state.isReady && capabilities.supportsManualFocus,
+                onClick = { model.setManualFocus(settings.focusDiopters) })
+        }
+        Text(if (manual) "焦点保持预设距离；点 AF 自动恢复自动对焦。"
+            else if (capabilities.supportsFocusMetering) "点按画面对焦 · 长按锁定 · 点 AF 解除锁定"
+            else "当前设备不支持点按对焦。", style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (capabilities.supportsManualFocus && (capabilities.minimumFocusDistanceDiopters ?: 0f) > 0f) {
-            val manual = state.settings.focusDistanceDiopters != null
-            ToggleRow("预设对焦", manual) { model.setManualFocus(if (it) settings.focusDiopters else null) }
             if (manual) {
                 val distance = state.settings.focusDistanceDiopters ?: 0f
                 AdjustmentSlider("焦点", if (distance < .01f) "∞" else "%.2f D".format(distance), distance,
@@ -879,6 +945,8 @@ private fun CapabilitiesDialog(capabilities: CameraCapabilities?, error: String?
                 Text("主摄等效：${capabilities.nativeEquivalentFocalLengthMm?.let { "%.1f mm".format(it) } ?: "设备未报告"}")
                 Text("可用视角：${capabilities.focalLengthOptions.joinToString { it.label }}")
                 Text("手动曝光：${if (capabilities.supportsManualExposure) "支持" else "不支持"}")
+                Text("自动对焦：${if (capabilities.autoFocusMode != null) "支持" else "不支持"}")
+                Text("点按对焦：${if (capabilities.supportsFocusMetering) "支持" else "不支持"}")
                 Text("手动对焦：${if (capabilities.supportsManualFocus) "支持" else "不支持"}")
                 Text("白平衡：${capabilities.whiteBalanceModes.joinToString { it.displayName }}")
                 Text("对焦校准：${capabilities.focusDistanceCalibration}")

@@ -1,6 +1,7 @@
 package dev.streetsnap.app
 
 import dev.streetsnap.color.ColorPreset
+import dev.streetsnap.color.FilmRegistry
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -80,5 +81,76 @@ class SettingsJsonTest {
         assertEquals(50, settings.focalLength)
         assertEquals(LookSettings(), settings.activeLook)
         assertEquals(.5f, settings.copy(preset = "POSITIVE").activeLook.contrast, 0f)
+    }
+
+    @Test fun selectingFilmUsesItsAuthoredRecipeWithoutOverwritingCameraControls() {
+        for (film in FilmRegistry.entries) {
+            val settings = AppSettings(
+                preset = "CUSTOM", filmId = film.id, lutName = "Street.cube",
+                whiteBalance = "DAYLIGHT", whiteBalanceAmber = 2, whiteBalanceGreen = -1,
+                hdfEnabled = true, hdfStrength = .55f,
+            )
+            assertEquals(
+                film.defaults.copy(hdfEnabled = true, hdfStrength = .55f, whiteBalanceAmber = 2, whiteBalanceGreen = -1),
+                settings.colorRecipe(),
+            )
+            assertEquals("CUSTOM", settings.preset)
+            assertEquals("Street.cube", settings.lutName)
+            assertEquals(settings, SettingsJson.decode(SettingsJson.encode(settings)))
+        }
+    }
+
+    @Test fun twoFilmsSharingALutKeepTheirOwnEditsAndRestoreThePreviousPreset() {
+        val day = FilmRegistry.find("DAY_01")!!
+        val slowDay = FilmRegistry.find("NEG_01")!!
+        assertEquals(day.basePreset, slowDay.basePreset)
+        val original = AppSettings(preset = day.basePreset.name)
+            .updateLook { it.copy(grain = .9f, contrast = -.8f) }
+        val settings = original.copy(filmId = day.id)
+            .updateLook { it.copy(grain = .6f, saturation = -.4f) }
+            .copy(filmId = slowDay.id)
+            .updateLook { it.copy(grain = .1f, saturation = .2f) }
+
+        val loaded = SettingsJson.decode(SettingsJson.encode(settings))
+        assertEquals(settings, loaded)
+        assertEquals(.1f, loaded.activeLook.grain, 0f)
+        assertEquals(.2f, loaded.activeLook.saturation, 0f)
+        assertEquals(.6f, loaded.copy(filmId = day.id).activeLook.grain, 0f)
+        assertEquals(-.4f, loaded.copy(filmId = day.id).activeLook.saturation, 0f)
+        assertEquals(original.activeLook, loaded.copy(filmId = null).activeLook)
+        assertEquals(original.colorRecipe(), loaded.copy(filmId = null).colorRecipe())
+        assertEquals(setOf("SUNNY", "FILM:DAY_01", "FILM:NEG_01"), loaded.looks.keys)
+    }
+
+    @Test fun resettingFilmRestoresItsRecipeAndPreservesOtherLooksAndFrameOptions() {
+        val film = FilmRegistry.find("DAY_01")!!
+        val settings = AppSettings(preset = "NEGATIVE", filmFrame = "WHITE", dateStamp = "DATE")
+            .updateLook { it.copy(contrast = -.4f) }
+            .copy(filmId = "PORTRAIT_01").updateLook { it.copy(saturation = .3f) }
+            .copy(filmId = film.id).updateLook { it.copy(grain = 0f, sharpness = 1f) }
+            .resetLook()
+        assertEquals(film.defaults, settings.colorRecipe())
+        assertEquals(-.4f, settings.copy(filmId = null).activeLook.contrast, 0f)
+        assertEquals(.3f, settings.copy(filmId = "PORTRAIT_01").activeLook.saturation, 0f)
+        assertEquals("WHITE", settings.filmFrame)
+        assertEquals("DATE", settings.dateStamp)
+        assertEquals(settings, SettingsJson.decode(SettingsJson.encode(settings)))
+    }
+
+    @Test fun unknownFilmFallsBackToSavedPresetAndIgnoresUnknownLookKeys() {
+        val settings = SettingsJson.decode("""{"version":3,"preset":"MONO","filmId":"REMOVED","filmFrame":"UNKNOWN","dateStamp":"UNKNOWN","looks":{"MONO":{"contrast":0.5},"FILM:REMOVED":{"grain":0.9},"FILM:DAY_01":{"grain":0.4}}}""")
+        assertNull(settings.filmId)
+        assertEquals(ColorPreset.MONO, settings.colorRecipe().preset)
+        assertEquals(.5f, settings.activeLook.contrast, 0f)
+        assertEquals("NONE", settings.filmFrame)
+        assertEquals("OFF", settings.dateStamp)
+        assertEquals(setOf("MONO", "FILM:DAY_01"), settings.looks.keys)
+    }
+
+    @Test fun partialAndInvalidFilmEditsRecoverFromItsDefaults() {
+        val defaults = LookSettings.fromRecipe(FilmRegistry.find("NIGHT_01")!!.defaults)
+        val settings = SettingsJson.decode("""{"version":3,"preset":"ORIGINAL","filmId":"NIGHT_01","looks":{"FILM:NIGHT_01":{"grain":"NaN","sharpness":99,"saturation":-99,"brightness":0.1}}}""")
+        assertEquals(defaults.copy(sharpness = 1f, saturation = -1f, brightness = .1f), settings.activeLook)
+        settings.colorRecipe()
     }
 }

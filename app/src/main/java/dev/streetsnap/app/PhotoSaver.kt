@@ -25,7 +25,8 @@ class PhotoSaver(private val context: Context) {
         "street-snap ${context.packageManager.getPackageInfo(context.packageName, 0).versionName}"
     }
     /** CameraX already crops the JPEG to the PreviewView viewport; only EXIF orientation is applied. */
-    suspend fun save(capture: CaptureResult, engine: ColorEngine, recipe: ColorRecipe, customLut: CubeLut?): Uri = withContext(Dispatchers.IO) {
+    suspend fun save(capture: CaptureResult, engine: ColorEngine, recipe: ColorRecipe, customLut: CubeLut?,
+        film: FilmRenderSpec = FilmRenderSpec(), capturedAt: LocalDateTime = LocalDateTime.now()): Uri = withContext(Dispatchers.IO) {
         val sourceFile = capture.jpegFile
         val renderedFile = File.createTempFile("street-snap-render-", ".jpg", context.cacheDir)
         var input: Bitmap? = null
@@ -56,17 +57,24 @@ class PhotoSaver(private val context: Context) {
                 upright = null
                 oriented.recycle()
             }
+            val decorated = FilmCompositor.apply(rendered, film, capturedAt)
+            if (decorated !== rendered) {
+                if (input === rendered) input = null
+                if (upright === rendered) upright = null
+                output = decorated
+                rendered.recycle()
+            }
             renderedFile.outputStream().use { stream ->
-                check(rendered.compress(Bitmap.CompressFormat.JPEG, 95, stream)) { "JPEG 编码失败" }
+                check(decorated.compress(Bitmap.CompressFormat.JPEG, 95, stream)) { "JPEG 编码失败" }
             }
             val destinationExif = ExifInterface(renderedFile)
             // Keep photographic metadata only. Location, vendor thumbnails and offsets are never copied.
             metadataTags.forEach { tag -> sourceExif.getAttribute(tag)?.let { destinationExif.setAttribute(tag, it) } }
             destinationExif.setAttribute(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL.toString())
-            destinationExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, rendered.width.toString())
-            destinationExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, rendered.height.toString())
-            destinationExif.setAttribute(ExifInterface.TAG_PIXEL_X_DIMENSION, rendered.width.toString())
-            destinationExif.setAttribute(ExifInterface.TAG_PIXEL_Y_DIMENSION, rendered.height.toString())
+            destinationExif.setAttribute(ExifInterface.TAG_IMAGE_WIDTH, decorated.width.toString())
+            destinationExif.setAttribute(ExifInterface.TAG_IMAGE_LENGTH, decorated.height.toString())
+            destinationExif.setAttribute(ExifInterface.TAG_PIXEL_X_DIMENSION, decorated.width.toString())
+            destinationExif.setAttribute(ExifInterface.TAG_PIXEL_Y_DIMENSION, decorated.height.toString())
             capture.settings.focalLength.equivalentMm?.let {
                 destinationExif.setAttribute(ExifInterface.TAG_FOCAL_LENGTH_IN_35MM_FILM, it.toString())
             }
@@ -74,7 +82,7 @@ class PhotoSaver(private val context: Context) {
             destinationExif.setAttribute(ExifInterface.TAG_COLOR_SPACE, "1") // Output is explicitly converted to sRGB.
             destinationExif.saveAttributes()
 
-            val name = "STREET_${LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))}.jpg"
+            val name = "STREET_${capturedAt.format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))}.jpg"
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, name)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")

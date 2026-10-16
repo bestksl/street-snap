@@ -72,6 +72,13 @@ internal object CameraCapabilityReader {
         val focusDistance = characteristics[CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE]
             ?.takeIf { it.isFinite() && it >= 0f }
         val afModes = characteristics[CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES] ?: intArrayOf()
+        val autoFocusMode = when {
+            CameraCharacteristics.CONTROL_AF_MODE_CONTINUOUS_PICTURE in afModes ->
+                CameraCharacteristics.CONTROL_AF_MODE_CONTINUOUS_PICTURE
+            CameraCharacteristics.CONTROL_AF_MODE_AUTO in afModes ->
+                CameraCharacteristics.CONTROL_AF_MODE_AUTO
+            else -> null
+        }
         val manualFocus = manualSensor && focusDistance != null && focusDistance > 0f &&
             CameraCharacteristics.CONTROL_AF_MODE_OFF in afModes
         val focusCalibration = when (characteristics[CameraCharacteristics.LENS_INFO_FOCUS_DISTANCE_CALIBRATION]) {
@@ -103,6 +110,7 @@ internal object CameraCapabilityReader {
             supportsManualFocus = manualFocus,
             minimumFocusDistanceDiopters = focusDistance,
             focusDistanceCalibration = focusCalibration,
+            autoFocusMode = autoFocusMode,
             supportsAutoExposureLock = characteristics[CameraCharacteristics.CONTROL_AE_LOCK_AVAILABLE] == true,
             supportsFocusMetering = info.isFocusMeteringSupported(
                 FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).build(),
