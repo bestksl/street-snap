@@ -918,7 +918,7 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
         TextButton(onClick = model::resetShootingParameters, enabled = state.isReady,
             modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "复位拍摄参数" }) { Text("复位", fontSize = 12.sp) }
     }
-    Text("复位：自动曝光、EV 归零、恢复 AF；保留影调与白平衡。",
+    Text("复位：自动曝光、EV 归零；设备支持时恢复 AF，保留影调与白平衡。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (capabilities != null && controlsRestored) {
         val exposureMode = state.settings.exposureMode

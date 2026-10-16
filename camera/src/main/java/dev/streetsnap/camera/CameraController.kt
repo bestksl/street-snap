@@ -471,6 +471,11 @@ class CameraController(context: Context) {
                 if (manualFocus) {
                     setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
                     setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, requireNotNull(settings.focusDistanceDiopters))
+                } else {
+                    // Camera2Interop options may outlive the previous request on some HALs.
+                    // Write the selected AF mode back explicitly when leaving MF so a prior
+                    // AF_OFF override cannot leave the lens stuck in manual mode.
+                    caps.autoFocusMode?.let { setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, it) }
                 }
             }.build()
         settingsApplied = false

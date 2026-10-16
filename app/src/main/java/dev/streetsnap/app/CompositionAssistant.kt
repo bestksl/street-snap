@@ -113,7 +113,11 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
 
     fun install() {
         val prepared = plan ?: return
-        if (prepared.model.id != configuration?.id || installJob?.isActive == true) return
+        // AVAILABLE is published only after metadata preparation has produced this plan.
+        // Do not reject the first tap merely because the preparation coroutine has not
+        // completed its final dispatch yet.
+        if (prepared.model.id != configuration?.id || _state.value.install != ModelInstallStatus.AVAILABLE) return
+        installJob?.cancel()
         installJob = scope.launch {
             _state.update { it.copy(install = ModelInstallStatus.DOWNLOADING, downloadedBytes = 0, installError = null) }
             try {
