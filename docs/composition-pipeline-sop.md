@@ -101,6 +101,14 @@ UI：一个推荐构图框 + 对应中文理由 + 来源 + 耗时
 - 取景框平滑：`rememberSmoothCrop` 用四边 `Animatable` 做 220 ms FastOutSlowIn 插值，动画值在 Canvas draw scope 读取（只触发重绘不重组）；首帧、origin 切换、缩放/旋转导致 overlay 失效后立即 snap，不跨场景滑动，退化矩形保持上一帧。
 - 测试：新增 10 条 JVM 单测（overlay 抑制判据 6 + 帧时钟参数校验 2 及既有生命周期用例），全部模块 `./gradlew test` 与 `:app:assemblePreview` 通过；AVD 截图确认蓝框、三分线、中文文案与“画面分析 1 ms”正常显示。候选质量路径（96px 统计、384 取帧、三个候选、门闸、30 s 预算、单并发背压）均未改动。
 
+2026-10-18（夜）建议质量 prompt 修订实验（T07）——假设被隔离评测否决，保持 v0：
+
+- 官方 SOP 对齐：核对 d1 模型卡与官方 `prompt.py` 后确认现有编码已逐项符合 schema——`state` 可为空（图像题以整张图为 state）、`criteria` 对 choice 题由 `{name: description}` 选项渲染为 `"name: description"`、至少 2 项、512×512 SigLIP2 NaFlex、图像+文本 896 文本位、option token budget = max(96, min(24k+32, maxLen/2))。因此本轮只动候选题的文案，不动编码与管线。
+- 假设：把题面从无偏好的 `"Which crop gives the best composition?"` + 对称选项 `"a: crop option A"`（v0，state 空）升级为描述式选项 `"A: crop shown in panel A"` + 点名主体/三分/居中对称/留白/边缘切割 criteria 的题面 + panel-layout state（v1），可让模型从“按物理位置应答”转向“按画面内容应答”。
+- 预注册判据（看数前固定）：18 张判别探针上 v1 过闸且正确数 ≥ v0；P1/P2 偏置探针 max-prob 均值增量 ≤ 0.05；差 <4/18 视为无差异。探针为 20 张确定性 Graphics2D 合成 sheet（无 RNG，几何镜像 `CandidateContactSheet`；2 张三连同图偏置探针 + 6 场景变体×好图轮转 A/B/C 共 18 张；GOOD=完整高对比主体压三分点且有留白，CUT=主体一半出画，CORNER=主体只剩边角）；真 pin 版权重、桌面 ORT 1.22、vision 特征每 sheet 只算一次且两版共享；同日复跑逐 sheet 概率完全一致。
+- 结果：v0 argmax 正确 **9/18**（好图在 A/B/C 位时 3/1/5）、过 margin 门闸 12/18、过闸且正确 **6/18**、偏置 max-prob 0.4476、物理位分布 A5/B4/C9；v1 为 **6/18**（6/0/0）、过闸 6/18、过闸正确 **3/18**、0.4393、分布 A13/B3/C2。判据 REJECT：两版在合成探针上都是位置应答器（v0 偏 C 位、v1 偏 A 位），criteria 题面没有带来内容跟随力，反而让过闸率减半、偏好槽位旋转。
+- 处置：整体回退 v0（state 仍为空），保留 `CANDIDATE_PROMPT_VERSION="comp-choice-v0"` 常量、两条 rank 日志的 `prompt=` 字段与版本锁定单测（`D1PromptTest`：选项对称去字母后全等、版本/题面/state 固定且可编码），未来设备证据可归因到 prompt 修订。证据等级维持 `loaded-only`：合成图形远离照片分布，失败只能否决“文案改进”主张，不能证明审美真值；审美质量的下一步唯一证据来源是独立标注照片集。原始数据与冻结 harness 归档于 edge-model-solutions `evaluations/d1-prompt-v1-eval-2026-10-18.json` 与 `scripts/d1-prompt-eval/`（含 README、预注册判据、复现命令）。
+
 ## 历史诊断：为什么先前没有框
 
 此前直接让通用 SmolVLM 生成裁切坐标，实际输出包含 `[0,0,0,0]`、残缺坐标或普通描述，被合法性检查拒绝。相机输入与 ONNX 推理已打通；未经过本项目构图/定位训练的模型不能仅凭提示词保证坐标和审美能力。此前 Q4 语义探针曾连续两次正确识别画面右侧电视，描述任务也出现人物幻觉，不能据此证明可靠定位。

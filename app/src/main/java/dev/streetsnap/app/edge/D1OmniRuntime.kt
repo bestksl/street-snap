@@ -219,11 +219,13 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
             visionMs = SystemClock.elapsedRealtime() - startedAt
             log("rank_vision_ms=$visionMs prefix=$prefixLength")
 
-            // 2) Prompt: choice over A/B/C, state empty (the image carries the scene).
+            // 2) Prompt: choice over A/B/C. State stays empty (the image is the whole
+            // state, as the image tasks were trained); the criteria-rich v1 wording was
+            // rejected by isolated probing on 2026-10-18 and reverted to v0.
             val encoded = D1Prompt.encode(
                 encode = { text -> tokenizer.encode(text) },
                 idOf = { token -> if (token == "<bos>") bosTokenId else tokenizer.specialId(token) },
-                state = "",
+                state = D1Prompt.CANDIDATE_STATE,
                 instructions = D1Prompt.CANDIDATE_QUESTION,
                 options = D1Prompt.CANDIDATE_OPTIONS,
                 maxLen = imageTextLength,
@@ -291,13 +293,15 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
             ranking?.let { result ->
                 log("rank_selected=${result.selectedIndex} support=${result.support} margin=${result.margin} " +
                     "probabilities=${result.probabilities} raw_scores=${result.rawScores} " +
-                    "min_margin=${CropRankingScores.MIN_MARGIN} text_tokens=${ids.size}")
+                    "min_margin=${CropRankingScores.MIN_MARGIN} text_tokens=${ids.size} " +
+                    "prompt=${D1Prompt.CANDIDATE_PROMPT_VERSION}")
             }
             return ranking
         } finally {
             temporary.asReversed().forEach { it.close() }
             log("rank_total_ms=${SystemClock.elapsedRealtime() - startedAt} vision_ms=$visionMs " +
-                "decision_ms=$decisionMs selected=${ranking?.selectedIndex}")
+                "decision_ms=$decisionMs selected=${ranking?.selectedIndex} " +
+                "prompt=${D1Prompt.CANDIDATE_PROMPT_VERSION}")
         }
     }
 

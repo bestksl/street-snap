@@ -84,6 +84,20 @@ internal object D1Prompt {
         return Encoded(ids, markerPositions)
     }
 
+    /**
+     * Bumped whenever the candidate wording changes; logged with every ranking so device
+     * evidence stays attributable to a prompt revision. v1 (criteria-rich question,
+     * described options, panel-layout state) was rejected by the 2026-10-18 isolated
+     * probe: on programmatic good/bad-framing sheets it moved the model's positional
+     * preference from panel C to panel A without improving content following
+     * (6/18 vs 9/18 argmax; 3/18 vs 6/18 gate-passed correct). See
+     * edge-model-solutions evaluations/d1-prompt-v1-eval-2026-10-18.json.
+     */
+    const val CANDIDATE_PROMPT_VERSION = "comp-choice-v0"
+
+    /** Image is the whole state, as d1's image tasks were trained; v1 added text here and lost. */
+    const val CANDIDATE_STATE = ""
+
     /** The three contact-sheet choices, matching CandidateContactSheet's A/B/C labels. */
     val CANDIDATE_OPTIONS = listOf("a: crop option A", "b: crop option B", "c: crop option C")
     const val CANDIDATE_QUESTION = "Which crop gives the best composition?"

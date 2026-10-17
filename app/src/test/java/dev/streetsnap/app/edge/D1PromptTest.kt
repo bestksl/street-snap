@@ -97,6 +97,39 @@ class D1PromptTest {
         assertTrue(encoded.markerPositions.last() <= 127L)
     }
 
+    // -- Candidate prompt revision lock (comp-choice-v0) ----------------------
+
+    @Test
+    fun candidateOptionsAreSymmetricDescriptionsOfDistinctPanels() {
+        val options = D1Prompt.CANDIDATE_OPTIONS
+        assertEquals(listOf("a", "b", "c"), options.map { it.substringBefore(":") })
+        // Strip the varying panel letter: what remains must be identical, so no option
+        // can carry rule-layer information (style, score, how much the crop keeps).
+        val normalized = options.map { it.substringAfter(": ").replace(Regex("[ABC]$"), "") }
+        assertEquals(1, normalized.toSet().size)
+        assertTrue(normalized.none { it.isBlank() })
+    }
+
+    @Test
+    fun candidateWordingIsPinnedToThePromptRevisionThatPassedProbing() {
+        // v1 wording failed the isolated 2026-10-18 probe (see edge-model-solutions
+        // evaluations/d1-prompt-v1-eval-2026-10-18.json); the app must not drift silently.
+        assertEquals("comp-choice-v0", D1Prompt.CANDIDATE_PROMPT_VERSION)
+        assertEquals("", D1Prompt.CANDIDATE_STATE)
+        assertEquals("Which crop gives the best composition?", D1Prompt.CANDIDATE_QUESTION)
+        val encoded = D1Prompt.encode(
+            encode = ::encode,
+            idOf = ::idOf,
+            state = D1Prompt.CANDIDATE_STATE,
+            instructions = D1Prompt.CANDIDATE_QUESTION,
+            options = D1Prompt.CANDIDATE_OPTIONS,
+        )
+        assertEquals(3, encoded.optionCount)
+        assertTrue(encoded.ids.size <= D1Prompt.IMAGE_TEXT_LENGTH)
+        assertTrue(encoded.markerPositions.all { it < encoded.ids.size })
+        assertEquals(listOf(16L, 16L, 16L), encoded.markerPositions.map { encoded.ids[it.toInt()] })
+    }
+
     @Test
     fun rejectsOptionCountOutsideContract() {
         assertThrows(IllegalArgumentException::class.java) {

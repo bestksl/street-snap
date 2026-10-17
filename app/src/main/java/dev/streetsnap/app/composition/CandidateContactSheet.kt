@@ -11,7 +11,7 @@ import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.min
 
-/** A/B/C use the list order. The caller owns the returned bitmap and must recycle it. */
+/** A/B/C use the list order; the drawn labels match both rankers' option text case-for-case. The caller owns the returned bitmap and must recycle it. */
 internal object CandidateContactSheet {
     fun create(source: Bitmap, candidates: List<CompositionCandidate>): Bitmap {
         require(!source.isRecycled && source.width > 0 && source.height > 0)
