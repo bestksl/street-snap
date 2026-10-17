@@ -1,9 +1,15 @@
 package dev.streetsnap.app
 
 import android.content.Context
+import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import dev.streetsnap.app.composition.CandidateContactSheet
+import dev.streetsnap.app.composition.CandidateSelectionGate
+import dev.streetsnap.app.composition.CompositionCandidate
+import dev.streetsnap.app.composition.FastCompositionAdvisor
 import dev.streetsnap.app.edge.CompositionSuggestion
+import dev.streetsnap.app.edge.CropRanking
 import dev.streetsnap.app.edge.EdgeModelCatalog
 import dev.streetsnap.app.edge.EdgeModelStore
 import dev.streetsnap.app.edge.ModelDownloadPlan
@@ -11,11 +17,14 @@ import dev.streetsnap.app.edge.SmolVlmRuntime
 import dev.streetsnap.camera.CompositionFrameSource
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -30,7 +39,8 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 internal enum class ModelInstallStatus { CHECKING, ABSENT, PREPARING, AVAILABLE, DOWNLOADING, INSTALLED, REMOVING, FAILED }
 internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAILED }
-internal enum class CompositionOutcome { RETURNED, NO_RESULT, TIMED_OUT, SCENE_CHANGED, FAILED }
+internal enum class CompositionOutcome { RETURNED, NO_RESULT, UNSTABLE_SELECTION, TIMED_OUT, SCENE_CHANGED, FAILED }
+internal enum class AdviceOrigin { IMAGE_ANALYSIS, MODEL_SELECTION }
 internal data class CompositionUiState(
     val modelId: String = "smolvlm-256m",
     val install: ModelInstallStatus = ModelInstallStatus.CHECKING,
@@ -44,14 +54,23 @@ internal data class CompositionUiState(
     val inferenceBudgetMs: Long = 30_000L,
     val inferenceStartedAtMs: Long? = null,
     val lastOutcome: CompositionOutcome? = null,
+    val adviceOrigin: AdviceOrigin? = null,
+    val fastAdviceMs: Long? = null,
+    val modelSelectionMs: Long? = null,
+    val isRequestRunning: Boolean = false,
 )
-internal data class CompositionOverlay(val suggestion: CompositionSuggestion, val expiresAtMs: Long)
-private data class CompletedComposition(val suggestion: CompositionSuggestion?)
+internal data class CompositionOverlay(
+    val suggestion: CompositionSuggestion,
+    val expiresAtMs: Long,
+    val origin: AdviceOrigin = AdviceOrigin.IMAGE_ANALYSIS,
+)
+private data class CompletedRanking(val first: CropRanking?, val validation: CropRanking?)
 
 /** Optional inference has its own lifetime and never takes the camera's controls or shutter locks. */
 internal class CompositionAssistant(context: Context, private val scope: CoroutineScope) : AutoCloseable {
-    private data class Configuration(val id: String, val enabled: Boolean, val foreground: Boolean)
+    private data class Configuration(val id: String, val enabled: Boolean, val foreground: Boolean, val realtime: Boolean)
     private val store = EdgeModelStore(context)
+    private val modelPreferences = context.getSharedPreferences("composition-models", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(CompositionUiState())
     val state = _state.asStateFlow()
     private val _source = MutableStateFlow<CompositionFrameSource?>(null)
@@ -66,7 +85,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     private var sessionJob: Job? = null
     private var installJob: Job? = null
     private var expiryJob: Job? = null
+    private var requestFrameTimeout: Job? = null
     private var plan: ModelDownloadPlan? = null
+    @Volatile private var manualRequestPending = false
     private var closed = false
 
     /** Let CameraX observe the null source and unbind ImageAnalysis before shutting its executor down. */
@@ -79,9 +100,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         }
     }
 
-    fun configure(id: String, enabled: Boolean, foreground: Boolean) {
+    fun configure(id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false) {
         if (closed) return
-        val next = Configuration(EdgeModelCatalog.find(id)?.id ?: "smolvlm-256m", enabled, foreground)
+        val next = Configuration(EdgeModelCatalog.find(id)?.id ?: "smolvlm-256m", enabled, foreground, realtime)
         if (configuration == next) return
         val changedModel = configuration?.id != next.id
         configuration = next
@@ -98,6 +119,48 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         _source.value?.invalidateFrames()
         _overlay.value = null
         expiryJob?.cancel()
+        _state.update { it.copy(adviceOrigin = null) }
+    }
+
+    /** One manual request owns one fast suggestion and at most one model comparison. */
+    fun requestAdvice() {
+        val config = configuration ?: return
+        if (closed || !config.enabled || !config.foreground || _state.value.isRequestRunning ||
+            _state.value.install == ModelInstallStatus.REMOVING) return
+        manualRequestPending = true
+        _state.update { it.copy(isRequestRunning = true, statusText = "正在获取构图画面",
+            lastOutcome = null, lastInferenceMs = null, modelSelectionMs = null) }
+        _source.value?.requestNextFrame()
+        val generation = sessionGeneration.get()
+        requestFrameTimeout?.cancel()
+        requestFrameTimeout = scope.launch(Dispatchers.Main.immediate) {
+            delay(5_000L)
+            if (manualRequestPending && sessionGeneration.get() == generation) {
+                manualRequestPending = false
+                _state.update { it.copy(isRequestRunning = false, statusText = "尚未收到取景画面，请稍后重试") }
+                Log.w("StreetSnapComposition", "request_end outcome=NO_CAMERA_FRAME")
+            }
+        }
+    }
+
+    /** UI-thread only: every visible rectangle has an origin and a bounded lifetime. */
+    private fun showAdvice(candidate: CompositionCandidate, origin: AdviceOrigin) {
+        val crop = candidate.crop
+        val answer = CompositionOverlay(
+            CompositionSuggestion(crop.left, crop.top, crop.right, crop.bottom, candidate.reason),
+            SystemClock.elapsedRealtime() + 30_000L,
+            origin,
+        )
+        _overlay.value = answer
+        _state.update { it.copy(adviceOrigin = origin) }
+        expiryJob?.cancel()
+        expiryJob = scope.launch(Dispatchers.Main.immediate) {
+            delay((answer.expiresAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            if (_overlay.value === answer) {
+                _overlay.value = null
+                _state.update { it.copy(adviceOrigin = null) }
+            }
+        }
     }
 
     /** Metadata only. A second, explicit install action is required after the size is visible. */
@@ -153,14 +216,21 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
 
     fun removeModel() {
         val config = configuration ?: return
+        // Removing the imported copy is an explicit opt-out from automatic asset
+        // import, including after the app restarts. Explicit downloads remain usable.
+        modelPreferences.edit().putBoolean("bundled-disabled-${config.id}", true).apply()
         installJob?.cancel()
         sessionJob?.cancel()
         sessionGeneration.incrementAndGet()
+        manualRequestPending = false
+        requestFrameTimeout?.cancel()
         val oldSource = _source.value
         _source.value = null
         retireSource(oldSource)
         invalidateView()
-        _state.update { it.copy(install = ModelInstallStatus.REMOVING, status = AssistStatus.UNINSTALLED, statusText = null) }
+        _state.update { it.copy(install = ModelInstallStatus.REMOVING, status = AssistStatus.UNINSTALLED,
+            statusText = null, isRequestRunning = false, inferenceStartedAtMs = null,
+            lastOutcome = null, lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
         installJob = scope.launch {
             try {
                 // Runtime cleanup holds this lock until native sessions and any active inference end.
@@ -168,23 +238,30 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 if (configuration?.id == config.id) {
                     plan = null
                     _state.update { it.copy(install = ModelInstallStatus.ABSENT, bytes = null, downloadedBytes = 0) }
+                    restartSession(imageOnly = true)
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
             catch (error: Exception) {
-                if (configuration?.id == config.id) _state.update { it.copy(install = ModelInstallStatus.FAILED,
-                    installError = error.message ?: "删除未完成") }
+                if (configuration?.id == config.id) {
+                    _state.update { it.copy(install = ModelInstallStatus.FAILED,
+                        installError = error.message ?: "删除未完成") }
+                    // A model-management failure must not disable image-only advice.
+                    restartSession(imageOnly = true)
+                }
             }
         }
     }
 
     fun retry() { restartSession() }
 
-    private fun restartSession() {
+    private fun restartSession(imageOnly: Boolean = false) {
         val config = configuration ?: return
         if (_state.value.install == ModelInstallStatus.REMOVING) return
         val generation = sessionGeneration.incrementAndGet()
         fun isCurrentSession() = configuration == config && sessionGeneration.get() == generation
         sessionJob?.cancel()
+        manualRequestPending = false
+        requestFrameTimeout?.cancel()
         val oldSource = _source.value
         _source.value = null
         retireSource(oldSource)
@@ -193,141 +270,294 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
             !config.enabled -> AssistStatus.OFF
             !config.foreground -> AssistStatus.PAUSED
             else -> AssistStatus.LOADING
-        }, statusText = null, lastInferenceMs = null,
-            sampleIntervalMs = 3_000L, inferenceBudgetMs = 30_000L, inferenceStartedAtMs = null, lastOutcome = null) }
-        sessionJob = scope.launch {
+        }, statusText = null, lastInferenceMs = null, fastAdviceMs = null, modelSelectionMs = null,
+            isRequestRunning = false, sampleIntervalMs = 3_000L, inferenceBudgetMs = 30_000L,
+            inferenceStartedAtMs = null, lastOutcome = null) }
+        sessionJob = scope.launch(Dispatchers.Main.immediate) {
             sessionMutex.withLock {
+                val sessionScope = CoroutineScope(currentCoroutineContext())
+                val runtimeReady = CompletableDeferred<SmolVlmRuntime?>()
+                val cadence = CompositionCadence()
+                val selectionGate = CandidateSelectionGate(listOf(1, 2, 0))
                 var runtime: SmolVlmRuntime? = null
                 var frames: CompositionFrameSource? = null
+                var modelJob: Job? = null
+                var rankingDisabled = false
+                var nextModelAtMs = 0L
+                var lastRankedScene: (() -> Boolean)? = null
+                var visibleScene: (() -> Boolean)? = null
+                var selectedScene: (() -> Boolean)? = null
+                var selectedCandidate: CompositionCandidate? = null
+
+                fun clearVisibleAdvice() {
+                    visibleScene = null
+                    selectedScene = null
+                    selectedCandidate = null
+                    _overlay.value = null
+                    expiryJob?.cancel()
+                    _state.update { it.copy(adviceOrigin = null, lastOutcome = null,
+                        lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
+                }
+
+                // Runs as a session child on Main. Only independent sheets survive
+                // the source callback; the borrowed source bitmap is never read later.
+                suspend fun compareCandidates(sheet: Bitmap, validationSheet: Bitmap, candidates: List<CompositionCandidate>,
+                    ticket: CompositionResultGate.Ticket, frameCurrent: () -> Boolean, sceneCurrent: () -> Boolean) {
+                    var started: Long? = null
+                    var firstRanking: CropRanking? = null
+                    var validationRanking: CropRanking? = null
+                    try {
+                        val engine = runtimeReady.await()
+                        if (!isCurrentSession()) return
+                        if (engine == null || rankingDisabled) {
+                            _state.update { it.copy(statusText = "图像构图建议已就绪，模型择优暂不可用") }
+                            return
+                        }
+                        delay((nextModelAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+                        if (!isCurrentSession()) return
+                        if (!frameCurrent() || !sceneCurrent() ||
+                            !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) {
+                            _state.update { it.copy(lastOutcome = CompositionOutcome.SCENE_CHANGED,
+                                lastInferenceMs = null, modelSelectionMs = null,
+                                statusText = "画面已变化，可重新获取构图建议") }
+                            return
+                        }
+                        val runStarted = SystemClock.elapsedRealtime()
+                        started = runStarted
+                        lastRankedScene = sceneCurrent
+                        // Both passes share one deadline; a consistency check cannot
+                        // double the request budget or retry indefinitely.
+                        val budgetMs = 30_000L
+                        _state.update { it.copy(inferenceStartedAtMs = runStarted, inferenceBudgetMs = budgetMs,
+                            statusText = "模型正在比较构图，当前建议可先用") }
+                        val completed = withTimeoutOrNull(budgetMs) {
+                            inferenceMutex.withLock {
+                                firstRanking = engine.rankCandidates(sheet)
+                                // An abstention cannot pass, so avoid a second image pass.
+                                validationRanking = if (firstRanking?.selectedIndex != null) engine.rankCandidates(validationSheet) else null
+                                CompletedRanking(firstRanking, validationRanking)
+                            }
+                        }
+                        val now = SystemClock.elapsedRealtime()
+                        val elapsed = now - runStarted
+                        if (!isCurrentSession()) return
+                        val decision = selectionGate.evaluate(completed?.first?.selectedIndex,
+                            completed?.validation?.selectedIndex, candidates.all { it.supportsModelComparison })
+                        val selected = decision.canonicalIndex?.let(candidates::getOrNull)
+                        val fresh = resultGate.accepts(ticket, now, frameCurrent()) && sceneCurrent()
+                        val outcome = when {
+                            completed == null -> CompositionOutcome.TIMED_OUT
+                            !fresh -> CompositionOutcome.SCENE_CHANGED
+                            decision.verdict == CandidateSelectionGate.Verdict.INCONSISTENT -> CompositionOutcome.UNSTABLE_SELECTION
+                            selected == null -> CompositionOutcome.NO_RESULT
+                            else -> CompositionOutcome.RETURNED
+                        }
+                        val next = if (completed == null) cadence.recordTimeout(elapsed)
+                            else cadence.recordCompleted(elapsed, selected != null)
+                        nextModelAtMs = now + next.cooldownMs
+                        _state.update { it.copy(lastInferenceMs = elapsed.takeIf { fresh }, modelSelectionMs = elapsed.takeIf { fresh },
+                            lastOutcome = outcome, inferenceStartedAtMs = null,
+                            sampleIntervalMs = next.cooldownMs, inferenceBudgetMs = budgetMs,
+                            statusText = when (outcome) {
+                                CompositionOutcome.RETURNED -> "AI 已从候选中选择构图"
+                                CompositionOutcome.NO_RESULT -> "模型未作出明确选择，保留图像构图建议"
+                                CompositionOutcome.UNSTABLE_SELECTION -> "AI 比较未通过一致性检查，保留画面分析建议"
+                                CompositionOutcome.TIMED_OUT -> "模型比较超时，保留图像构图建议"
+                                CompositionOutcome.SCENE_CHANGED -> "画面已变化，当前显示最新构图建议"
+                                CompositionOutcome.FAILED -> "模型比较失败，保留图像构图建议"
+                            }) }
+                        Log.i("StreetSnapComposition", "model_outcome=$outcome total_ms=$elapsed " +
+                            "first_position=${firstRanking?.selectedIndex} first_canonical=${firstRanking?.selectedIndex} " +
+                            "validation_position=${validationRanking?.selectedIndex} " +
+                            "validation_canonical=${selectionGate.canonicalForValidation(validationRanking?.selectedIndex)} " +
+                            "first_support=${firstRanking?.support} validation_support=${validationRanking?.support} " +
+                            "first_margin=${firstRanking?.margin} validation_margin=${validationRanking?.margin} " +
+                            "cooldown_ms=${next.cooldownMs} budget_ms=$budgetMs")
+                        if (outcome == CompositionOutcome.RETURNED && selected != null) {
+                            selectedScene = sceneCurrent
+                            selectedCandidate = selected
+                            visibleScene = sceneCurrent
+                            showAdvice(selected, AdviceOrigin.MODEL_SELECTION)
+                        }
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) {
+                        if (isCurrentSession()) {
+                            rankingDisabled = true
+                            val elapsed = started?.let { SystemClock.elapsedRealtime() - it }
+                            _state.update { it.copy(lastOutcome = CompositionOutcome.FAILED,
+                                lastInferenceMs = elapsed, modelSelectionMs = elapsed,
+                                statusText = "模型比较暂不可用，保留图像构图建议") }
+                            Log.w("StreetSnapComposition", "model_outcome=FAILED elapsed_ms=$elapsed", error)
+                        }
+                    } finally {
+                        sheet.recycle()
+                        validationSheet.recycle()
+                        if (isCurrentSession()) {
+                            _state.update { it.copy(inferenceStartedAtMs = null, isRequestRunning = false) }
+                            Log.i("StreetSnapComposition", "request_end model_outcome=${_state.value.lastOutcome}")
+                        }
+                    }
+                }
+
                 try {
                     val model = requireNotNull(EdgeModelCatalog.find(config.id))
-                    val installed = withContext(Dispatchers.IO) {
-                        // An APK may bundle faster graphs at the same model revision.
-                        // Ensure that variant on active use before considering an older
-                        // installed variant. Disabled/background sessions never copy assets.
-                        if (config.enabled && config.foreground) {
-                            store.installBundled(model) ?: store.installed(model)
-                        } else store.installed(model)
-                    }
-                    currentCoroutineContext().ensureActive()
-                    // A running download owns its install state; a resume must not overwrite its progress.
-                    if (_state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
-                            ModelInstallStatus.REMOVING, ModelInstallStatus.AVAILABLE)) {
-                        _state.update { it.copy(install = if (installed == null) ModelInstallStatus.ABSENT else ModelInstallStatus.INSTALLED,
-                            bytes = installed?.plan?.totalBytes ?: it.bytes) }
-                    }
-                    if (!config.enabled || !config.foreground) return@withLock
-                    if (installed == null) {
-                        _state.update { it.copy(status = AssistStatus.UNINSTALLED) }
-                        return@withLock
-                    }
-                    withContext(Dispatchers.IO) { runtime = SmolVlmRuntime(installed) }
-                    currentCoroutineContext().ensureActive()
-                    val engine = requireNotNull(runtime)
-                    val cadence = CompositionCadence()
-                    frames = CompositionFrameSource(minimumIntervalMs = cadence.cooldownMs(), maximumEdge = 384,
-                        onSceneChanged = {
-                            // Serialize scene invalidation with result publication. A scene
-                            // change just after the final check must still clear that answer.
-                            scope.launch(Dispatchers.Main.immediate) {
-                                if (isCurrentSession()) {
-                                    _overlay.value = null
-                                    expiryJob?.cancel()
+                    if (config.enabled && config.foreground) {
+                        frames = CompositionFrameSource(minimumIntervalMs = 1_000L, maximumEdge = 384,
+                            shouldCaptureFrame = { isCurrentSession() && (manualRequestPending || config.realtime) },
+                            onSceneChanged = {
+                                scope.launch(Dispatchers.Main.immediate) {
+                                    if (isCurrentSession()) clearVisibleAdvice()
                                 }
-                            }
-                        },
-                        onError = { error ->
-                            scope.launch(Dispatchers.Main.immediate) {
-                                if (isCurrentSession()) _state.update {
-                                    it.copy(statusText = error.message ?: "无法分析当前画面")
-                                }
-                            }
-                        }, onFrame = frameCallback@{ frame ->
-                        val ticket = resultGate.ticket(frame.receivedAtElapsedRealtimeMs) ?: return@frameCallback
-                        val started = SystemClock.elapsedRealtime()
-                        val budgetMs = cadence.budgetMs()
-                        val canStart = withContext(Dispatchers.Main.immediate) {
-                            if (!isCurrentSession() || !frame.isCurrent ||
-                                !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) false
-                            else {
-                                _state.update { it.copy(inferenceStartedAtMs = started, inferenceBudgetMs = budgetMs,
-                                    statusText = "正在分析，请保持画面稳定") }
-                                true
-                            }
-                        }
-                        if (!canStart) return@frameCallback
-                        try {
-                            // A wrapped nullable answer distinguishes completion from timeout.
-                            val completed = withTimeoutOrNull(budgetMs) {
-                                inferenceMutex.withLock { CompletedComposition(engine.suggest(frame.bitmap)) }
-                            }
-                            val inferenceMs = SystemClock.elapsedRealtime() - started
-                            withContext(Dispatchers.Main.immediate) {
-                                if (!isCurrentSession()) return@withContext
-                                // Recheck after dispatch, alongside all state/overlay writes.
-                                // configure/invalidateView and scene clearing cannot interleave
-                                // a successful check and publication on the UI thread.
-                                val now = SystemClock.elapsedRealtime()
-                                val suggestion = completed?.suggestion
-                                val fresh = resultGate.accepts(ticket, now, frame.isCurrent) && frame.isSceneCurrent
-                                val outcome = when {
-                                    completed == null -> CompositionOutcome.TIMED_OUT
-                                    suggestion == null -> CompositionOutcome.NO_RESULT
-                                    !fresh -> CompositionOutcome.SCENE_CHANGED
-                                    else -> CompositionOutcome.RETURNED
-                                }
-                                val next = if (completed == null) cadence.recordTimeout(inferenceMs)
-                                    else cadence.recordCompleted(inferenceMs, suggestion != null)
-                                frames?.setMinimumIntervalMs(next.cooldownMs)
-                                Log.i("StreetSnapComposition", "outcome=$outcome elapsed_ms=$inferenceMs " +
-                                    "cooldown_ms=${next.cooldownMs} budget_ms=${next.nextBudgetMs}")
-                                _state.update { it.copy(lastInferenceMs = inferenceMs, lastOutcome = outcome,
-                                    sampleIntervalMs = next.cooldownMs, inferenceBudgetMs = next.nextBudgetMs,
-                                    inferenceStartedAtMs = null, statusText = when (outcome) {
-                                        CompositionOutcome.RETURNED -> "构图框已返回"
-                                        CompositionOutcome.TIMED_OUT -> "本次分析超时，休息后重试"
-                                        CompositionOutcome.SCENE_CHANGED -> "画面已变化，等待下一帧"
-                                        else -> "已完成分析，未返回有效构图框"
-                                    }) }
-                                expiryJob?.cancel()
-                                if (outcome == CompositionOutcome.RETURNED && suggestion != null) {
-                                    // Slow analysis remains useful on an unchanged scene.
-                                    // Movement clears the box via onSceneChanged.
-                                    val answer = CompositionOverlay(suggestion, now + 8_000L)
-                                    _overlay.value = answer
-                                    expiryJob = scope.launch(Dispatchers.Main.immediate) {
-                                        delay((answer.expiresAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
-                                        if (_overlay.value === answer) _overlay.value = null
+                            }, onError = { error ->
+                                scope.launch(Dispatchers.Main.immediate) {
+                                    if (isCurrentSession()) {
+                                        manualRequestPending = false
+                                        _state.update { it.copy(statusText = error.message ?: "无法分析当前画面",
+                                            isRequestRunning = modelJob?.isActive == true) }
                                     }
-                                } else _overlay.value = null
-                            }
-                        } catch (cancelled: CancellationException) { throw cancelled }
-                        catch (error: Exception) {
-                            withContext(Dispatchers.Main.immediate) {
-                                if (isCurrentSession()) {
-                                    _state.update { it.copy(status = AssistStatus.FAILED, statusText = error.message ?: "本地推理失败",
-                                        inferenceStartedAtMs = null, lastOutcome = CompositionOutcome.FAILED,
-                                        lastInferenceMs = SystemClock.elapsedRealtime() - started) }
-                                    _overlay.value = null
-                                    expiryJob?.cancel()
-                                    // Cancelling the session releases the model and detaches analysis; normal capture continues.
-                                    sessionJob?.cancel()
                                 }
-                            }
+                            }, onFrame = frameCallback@{ frame ->
+                                val ticket = resultGate.ticket(frame.receivedAtElapsedRealtimeMs) ?: return@frameCallback
+                                val manual = withContext(Dispatchers.Main.immediate) {
+                                    if (!isCurrentSession() || !frame.isCurrent ||
+                                        !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
+                                    if (visibleScene?.invoke() == false) clearVisibleAdvice()
+                                    val requested = manualRequestPending
+                                    if (!requested && !config.realtime) return@withContext null
+                                    if (requested) {
+                                        manualRequestPending = false
+                                        requestFrameTimeout?.cancel()
+                                    }
+                                    requested
+                                } ?: return@frameCallback
+                                try {
+                                    val started = SystemClock.elapsedRealtime()
+                                    val bitmap = frame.bitmap
+                                    val pixels = IntArray(bitmap.width * bitmap.height)
+                                    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                                    val candidates = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
+                                    val first = candidates.firstOrNull() ?: error("当前画面无法生成构图建议")
+                                    val fastMs = SystemClock.elapsedRealtime() - started
+                                    val frameCurrent = { frame.isCurrent }
+                                    val sceneCurrent = { frame.isSceneCurrent }
+                                    val shouldRank = withContext(Dispatchers.Main.immediate) {
+                                        if (!isCurrentSession()) return@withContext false
+                                        if (!resultGate.accepts(ticket, SystemClock.elapsedRealtime(), frame.isCurrent) || !sceneCurrent()) {
+                                            if (manual) _state.update { it.copy(isRequestRunning = false) }
+                                            return@withContext false
+                                        }
+                                        val retainedSelection = selectedCandidate?.takeIf {
+                                            !manual && selectedScene?.invoke() == true
+                                        }
+                                        if (retainedSelection != null) {
+                                            visibleScene = selectedScene
+                                            showAdvice(retainedSelection, AdviceOrigin.MODEL_SELECTION)
+                                        } else {
+                                            selectedScene = null
+                                            selectedCandidate = null
+                                            visibleScene = sceneCurrent
+                                            showAdvice(first, AdviceOrigin.IMAGE_ANALYSIS)
+                                        }
+                                        _state.update { it.copy(status = AssistStatus.READY, fastAdviceMs = fastMs) }
+                                        Log.i("StreetSnapComposition", "fast_ms=$fastMs manual=$manual candidates=" +
+                                            candidates.joinToString(";") { "${it.crop.left},${it.crop.top},${it.crop.right},${it.crop.bottom}" })
+                                        val eligible = !rankingDisabled && candidates.size == 3 && candidates.all { it.supportsModelComparison } &&
+                                            modelJob?.isActive != true &&
+                                            (manual || (SystemClock.elapsedRealtime() >= nextModelAtMs && lastRankedScene?.invoke() != true))
+                                        if (eligible) _state.update { it.copy(isRequestRunning = true) }
+                                        else if (manual) {
+                                            _state.update { it.copy(isRequestRunning = false) }
+                                            Log.i("StreetSnapComposition", "request_end model_outcome=FAST_ONLY")
+                                        }
+                                        eligible
+                                    }
+                                    if (!shouldRank) return@frameCallback
+                                    // Create both permutations from the same live frame before
+                                    // handing off; neither pass can borrow the source bitmap.
+                                    val sheet = CandidateContactSheet.create(bitmap, candidates)
+                                    var validationSheet: Bitmap? = null
+                                    var transferred = false
+                                    try {
+                                        val reorderedSheet = CandidateContactSheet.create(bitmap,
+                                            selectionGate.validationOrder.map(candidates::get))
+                                        validationSheet = reorderedSheet
+                                        withContext(Dispatchers.Main.immediate) {
+                                            if (!isCurrentSession() || !frame.isCurrent) {
+                                                if (isCurrentSession()) _state.update { it.copy(isRequestRunning = false) }
+                                                return@withContext
+                                            }
+                                            modelJob = sessionScope.launch(Dispatchers.Main.immediate, start = CoroutineStart.UNDISPATCHED) {
+                                                compareCandidates(sheet, reorderedSheet, candidates, ticket, frameCurrent, sceneCurrent)
+                                            }
+                                            transferred = true
+                                        }
+                                    } finally {
+                                        if (!transferred) {
+                                            sheet.recycle()
+                                            validationSheet?.recycle()
+                                        }
+                                    }
+                                } catch (cancelled: CancellationException) { throw cancelled }
+                                catch (error: Exception) {
+                                    withContext(Dispatchers.Main.immediate) {
+                                        if (isCurrentSession()) {
+                                            _state.update { it.copy(statusText = error.message ?: "暂时无法更新构图建议",
+                                                isRequestRunning = modelJob?.isActive == true) }
+                                            Log.w("StreetSnapComposition", "fast_advice_failed", error)
+                                        }
+                                    }
+                                }
+                            })
+                        // Publish input before copying assets or creating native sessions.
+                        _source.value = frames
+                        _state.update { it.copy(status = AssistStatus.READY, statusText = "点击构图获取画面建议") }
+                    }
+                    try {
+                        val installed = withContext(Dispatchers.IO) {
+                            if (imageOnly) null
+                            else if (config.enabled && config.foreground &&
+                                !modelPreferences.getBoolean("bundled-disabled-${model.id}", false)) {
+                                store.installBundled(model) ?: store.installed(model)
+                            } else store.installed(model)
                         }
-                    })
-                    _source.value = frames
-                    _state.update { it.copy(status = AssistStatus.READY, statusText = "等待画面建议") }
+                        currentCoroutineContext().ensureActive()
+                        if (!imageOnly && _state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
+                                ModelInstallStatus.REMOVING, ModelInstallStatus.AVAILABLE)) {
+                            _state.update { it.copy(install = if (installed == null) ModelInstallStatus.ABSENT else ModelInstallStatus.INSTALLED,
+                                bytes = installed?.plan?.totalBytes ?: it.bytes) }
+                        }
+                        if (!config.enabled || !config.foreground) return@withLock
+                        if (installed == null) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                            _state.update { it.copy(statusText = "图像构图建议可用，可安装模型进行择优") }
+                        } else {
+                            withContext(Dispatchers.IO) { runtime = SmolVlmRuntime(installed) }
+                            currentCoroutineContext().ensureActive()
+                            runtimeReady.complete(requireNotNull(runtime))
+                        }
+                    } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (error: Exception) {
+                        rankingDisabled = true
+                        runtimeReady.complete(null)
+                        _state.update { it.copy(statusText = "本地模型暂不可用，图像构图建议仍可使用") }
+                        Log.w("StreetSnapComposition", "model_load_failed", error)
+                    }
                     awaitCancellation()
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Throwable) {
                     if (isCurrentSession()) _state.update { it.copy(status = AssistStatus.FAILED,
-                        statusText = error.message?.take(180) ?: "模型无法在当前设备运行", inferenceStartedAtMs = null) }
+                        statusText = error.message?.take(180) ?: "构图辅助无法启动",
+                        inferenceStartedAtMs = null, isRequestRunning = false) }
                 } finally {
                     if (_source.value === frames) _source.value = null
                     retireSource(frames)
-                    withContext(NonCancellable + Dispatchers.IO) {
-                        inferenceMutex.withLock { runCatching { runtime?.close() } }
+                    runtimeReady.complete(null)
+                    withContext(NonCancellable) {
+                        modelJob?.cancelAndJoin()
+                        withContext(Dispatchers.IO) {
+                            inferenceMutex.withLock { runCatching { runtime?.close() } }
+                        }
                     }
                 }
             }
@@ -339,6 +569,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         sessionGeneration.incrementAndGet()
         installJob?.cancel()
         sessionJob?.cancel()
+        requestFrameTimeout?.cancel()
         val oldSource = _source.value
         _source.value = null
         retireSource(oldSource)

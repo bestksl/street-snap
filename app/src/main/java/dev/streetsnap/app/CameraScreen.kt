@@ -355,6 +355,7 @@ private fun Viewfinder(
         val ratio = if (landscape) 4f / 3f else 3f / 4f
         val previewWidth = min(maxWidth.value, maxHeight.value * ratio).dp
         val previewHeight = previewWidth / ratio
+        val compactPreview = previewWidth < 300.dp
         Box(Modifier.size(previewWidth, previewHeight)) {
             AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().onSizeChanged {
                 width = it.width
@@ -377,7 +378,7 @@ private fun Viewfinder(
                     },
                 )
             }) {
-                if (settings.grid) {
+                if (settings.grid && compositionOverlay == null) {
                     val color = Color.White.copy(alpha = .32f)
                     for (i in 1..2) {
                         drawLine(color, Offset(size.width * i / 3, 0f), Offset(size.width * i / 3, size.height), 1.dp.toPx())
@@ -413,20 +414,40 @@ private fun Viewfinder(
                     val right = (suggestion.right.coerceIn(0f, 1f) * size.width)
                     val bottom = (suggestion.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
-                        drawRect(Color(0xFFE2FF79).copy(alpha = .86f), Offset(left, top),
+                        val tint = if (overlay.origin == AdviceOrigin.MODEL_SELECTION) Color(0xFFE2FF79) else Color(0xFFB7E3F6)
+                        val shade = Color.Black.copy(alpha = .26f)
+                        drawRect(shade, size = androidx.compose.ui.geometry.Size(size.width, top))
+                        drawRect(shade, Offset(0f, bottom), androidx.compose.ui.geometry.Size(size.width, size.height - bottom))
+                        drawRect(shade, Offset(0f, top), androidx.compose.ui.geometry.Size(left, bottom - top))
+                        drawRect(shade, Offset(right, top), androidx.compose.ui.geometry.Size(size.width - right, bottom - top))
+                        drawRect(tint.copy(alpha = .95f), Offset(left, top),
                             androidx.compose.ui.geometry.Size(right - left, bottom - top), style = Stroke(2.dp.toPx()))
-                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset((left + right) / 2f, top),
-                            Offset((left + right) / 2f, bottom), 1.dp.toPx())
-                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(left, (top + bottom) / 2f),
-                            Offset(right, (top + bottom) / 2f), 1.dp.toPx())
+                        for (i in 1..2) {
+                            val x = left + (right - left) * i / 3f
+                            val y = top + (bottom - top) * i / 3f
+                            drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
+                            drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
+                        }
                     }
                 }
             }
-            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(state.settings.focalLength.label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(if (compactPreview) 4.dp else 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (!compactPreview) Text(state.settings.focalLength.label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = .45f), RoundedCornerShape(4.dp)).padding(5.dp))
                 Spacer(Modifier.weight(1f))
-                if (settings.hdfEnabled) Text("HDF", color = MaterialTheme.colorScheme.primary,
+                TextButton(onClick = model::requestComposition,
+                    enabled = state.isReady && !compositionState.isRequestRunning,
+                    modifier = Modifier.heightIn(min = 48.dp).semantics { contentDescription = "分析一次构图" }) {
+                    Text(if (!compositionState.isRequestRunning) "构图" else "分析中", color = Color.White, fontSize = 12.sp)
+                }
+                TextButton(onClick = { model.setCompositionRealtime(!settings.compositionRealtime) },
+                    modifier = Modifier.heightIn(min = 48.dp).semantics {
+                        contentDescription = "实时构图开关"; selected = settings.compositionRealtime
+                    }) {
+                    Text(if (settings.compositionRealtime) "实时 · 开" else "实时", fontSize = 11.sp,
+                        color = if (settings.compositionRealtime) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .7f))
+                }
+                if (settings.hdfEnabled && !compactPreview) Text("HDF", color = MaterialTheme.colorScheme.primary,
                     fontFamily = FontFamily.Monospace, fontSize = 11.sp,
                     modifier = Modifier.background(Color.Black.copy(alpha = .45f), RoundedCornerShape(4.dp)).padding(5.dp))
                 TextButton(onClick = {
@@ -451,10 +472,13 @@ private fun Viewfinder(
                 }
             }
             if (settings.compositionEnabled) {
-                Text(compositionTimingLabel(compositionState),
-                    Modifier.align(Alignment.BottomStart).padding(10.dp)
-                        .background(Color.Black.copy(alpha = .60f), RoundedCornerShape(5.dp)).padding(6.dp),
-                    color = Color.White, fontSize = 11.sp, maxLines = 2)
+                Column(Modifier.align(Alignment.BottomStart).padding(10.dp)
+                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)) {
+                    compositionOverlay?.suggestion?.modelText?.let {
+                        Text(it, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(compositionTimingLabel(compositionState), color = Color.White.copy(alpha = .78f), fontSize = 10.sp, maxLines = 2)
+                }
             }
             val focusHint = when {
                 state.isFocusing -> "对焦中"
@@ -1024,13 +1048,13 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
     Text("构图辅助 · 实验性", style = MaterialTheme.typography.titleSmall)
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("本地模型建议", style = MaterialTheme.typography.bodyMedium)
+            Text("推荐构图框", style = MaterialTheme.typography.bodyMedium)
             Text(when (state.status) {
                 AssistStatus.OFF -> "关闭，不读取取景画面"
-                AssistStatus.UNINSTALLED -> "模型未安装"
+                AssistStatus.UNINSTALLED -> "画面分析可用，AI 模型未安装"
                 AssistStatus.PAUSED -> "后台已暂停"
                 AssistStatus.LOADING -> "加载本地模型…"
-                AssistStatus.READY -> state.statusText ?: "等待构图建议"
+                AssistStatus.READY -> state.statusText ?: "点取景器上的构图，分析当前画面"
                 AssistStatus.FAILED -> state.statusText ?: "本地推理失败"
             }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1038,10 +1062,11 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
         Switch(settings.compositionEnabled, { model.setCompositionEnabled(it) },
             modifier = Modifier.semantics { contentDescription = "构图辅助开关" })
     }
+    ToggleRow("实时构图 · 自动更新建议", settings.compositionRealtime, model::setCompositionRealtime)
     Text(compositionTimingLabel(state), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
-    if (state.status == AssistStatus.READY) Text(
-        "完成后休息 ${formatInferenceTime(state.sampleIntervalMs)} 再取新帧 · 单次最多 ${formatInferenceTime(state.inferenceBudgetMs)}",
+    if (state.status == AssistStatus.READY && settings.compositionRealtime) Text(
+        "画面分析约每秒更新 · AI 完成后至少间隔 ${formatInferenceTime(state.sampleIntervalMs)}，画面未变则复用",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
@@ -1093,7 +1118,7 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
             TextButton(onClick = model.composition::prepareInstall, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
         }
     }
-    Text("构图建议只显示实时取景框，不会改变曝光或阻塞快门。模型仅在你安装并打开后运行。",
+    Text("点“构图”分析一次，也可开启实时。先显示画面分析建议，AI 比较候选后再择优；框仅供取景参考，照片不会自动裁切。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(bottom = 8.dp))
 }
@@ -1114,23 +1139,30 @@ private fun compositionTimingLabel(state: CompositionUiState): String {
             delay(500L)
         }
     }
-    if (started != null) return "正在分析 · ${formatInferenceTime(elapsedMs)}"
-    val duration = state.lastInferenceMs?.let(::formatInferenceTime)
-    if (duration == null) return when (state.status) {
-        AssistStatus.LOADING -> "正在加载本地模型"
-        AssistStatus.OFF -> "构图辅助已关闭"
-        AssistStatus.PAUSED -> "构图辅助已暂停"
-        AssistStatus.UNINSTALLED -> "请先安装模型"
-        AssistStatus.FAILED -> "模型加载失败"
-        else -> "等待首帧分析"
+    val fast = state.fastAdviceMs?.let { "画面分析 ${formatInferenceTime(it)}" }
+    val source = when (state.adviceOrigin) {
+        AdviceOrigin.IMAGE_ANALYSIS -> "画面分析建议"
+        AdviceOrigin.MODEL_SELECTION -> "AI 选择"
+        null -> null
     }
-    return when (state.lastOutcome) {
-        CompositionOutcome.RETURNED -> "模型框已返回 · $duration"
-        CompositionOutcome.NO_RESULT -> "分析已返回 · $duration · 无有效框"
-        CompositionOutcome.TIMED_OUT -> "分析超时 · $duration"
-        CompositionOutcome.SCENE_CHANGED -> "分析已返回 · $duration · 画面已变"
-        CompositionOutcome.FAILED -> "分析失败 · $duration"
-        null -> "上次分析 · $duration"
+    if (started != null) return listOfNotNull(source, fast, "AI 比较中 ${formatInferenceTime(elapsedMs)}").joinToString(" · ")
+    if (state.isRequestRunning) return if (source == null) "正在获取构图画面"
+        else listOfNotNull(source, fast, "准备 AI 比较").joinToString(" · ")
+    val duration = state.modelSelectionMs?.let(::formatInferenceTime)
+    val model = when (state.lastOutcome) {
+        CompositionOutcome.RETURNED -> duration?.let { "AI 比较 $it" }
+        CompositionOutcome.NO_RESULT -> "AI 未明确选择${duration?.let { " · $it" } ?: ""}"
+        CompositionOutcome.UNSTABLE_SELECTION -> "AI 比较不稳定${duration?.let { " · $it" } ?: ""}"
+        CompositionOutcome.TIMED_OUT -> "AI 比较超时${duration?.let { " · $it" } ?: ""}"
+        CompositionOutcome.SCENE_CHANGED -> "画面已变化，旧比较已忽略"
+        CompositionOutcome.FAILED -> "AI 暂不可用"
+        null -> null
+    }
+    if (source != null) return listOfNotNull(source, fast, model).joinToString(" · ")
+    return when (state.status) {
+        AssistStatus.OFF -> "点“构图”获取建议"
+        AssistStatus.PAUSED -> "构图辅助已暂停"
+        else -> model ?: "点“构图”分析当前画面"
     }
 }
 

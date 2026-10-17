@@ -1,20 +1,26 @@
-# 端侧小模型与本地多模态 API 评估（双支路 SOP 附录）
+# 端侧模型与分发附录
 
-> 本文不是第二套产品路线。唯一的运行架构见 [端侧构图双支路 SOP](composition-pipeline-sop.md)；本文只记录候选模型、运行时、分发方式和验证顺序。当前最小闭环先使用 SmolVLM 低频回退，YOLO 主体支路与 d1-omni 构图支路属于后续目标。
+当前产品流程以 [端侧构图建议 SOP](composition-pipeline-sop.md) 为准：用户点“构图”或开启实时，画面统计先生成可见候选框，本地 SmolVLM 异步比较候选，界面显示推荐框、一句中文建议、来源和耗时。主体检测框已从当前需求中移出；YOLO/d1 尚未接入，不是本轮依赖。
 
-状态：Android 首个实验闭环已接入；SmolVLM 256M 固定 revision 已完成文件校验，并在 Android 35 AVD 的模型内置调试 APK 中完成首次导入、私有目录校验和 ONNX 会话启动；荣耀 Vs3 真机基准和可验收构图框仍未完成。资料核对日期：2026-10-17。
+## 一个模型，三个图部件
 
-双支路目标已确定：高频主体框与低频构图建议共享一次 `ImageAnalysis` 采样，使用有界消费者。目标检测器为 YOLOv11-Nano Int8（320×320，先以 10–15fps 做真机基准），目标构图模型为 d1-omni-600M Q4 ONNX（384×384，目标 1–2fps）；当前实际运行 SmolVLM ONNX 单支路，一次只处理一帧，完成后冷却再取新帧。YOLO 和 d1-omni 的具体 revision、图结构、类别表、许可证、SHA-256 和 Android 后端尚未锁定，不列为已支持模型。完整数据流和验收标准见 [端侧构图双支路 SOP](composition-pipeline-sop.md)。
+| 部件 | 输入与作用 |
+| --- | --- |
+| vision encoder | 512×512 的 A/B/C 裁切对照图，提取视觉特征 |
+| embed tokens | 将短英文构图比较指令和标签转换成文本嵌入 |
+| decoder | 融合视觉/文本，每个排列运行一次 prefill，读取下一 token 的 A/B/C 分数 |
 
-## 结论
+三个 ONNX 图共同组成一个 SmolVLM 256M 模型，规则候选生成器并非另一个神经网络。模型当前只比较已存在的合法裁切，坐标来自图像规则；Compose 负责把最终候选画在取景器上。中文提示是候选的规则理由，不是模型生成的解释。
 
-**目标是双支路闭环：共享取景帧 → 高频主体检测 + 低频本地 VLM → 两类归一化构图框。** 在 YOLO 与 d1-omni 的模型契约完成前，应用继续使用已接入的 SmolVLM 低频回退；所有结果只给取景器提供实验性参考，不自动改变曝光、对焦或快门，也不开放网络 API。
+完整词表支持度和三选项差距不足时保留“画面分析建议”，不能在三个选项内强制归一化后冒充有效理解。当前两个阈值均为 0.10，尚未通过人工构图数据校准。本轮候选循环换序及纯灰对照发现偏爱 B，因此应用新增两次排列的原候选一致性检查，不一致不采纳，保留规则框。低纹理图像直接跳过模型。仍须用独立画面评价是否带来审美收益。本轮没有训练或微调模型。
 
-本轮使用 `HuggingFaceTB/SmolVLM-256M-Instruct` 固定 revision `7e3e67edbbed1bf9888184d9df282b700a323964` 的已有本地文件，选择 `cpu-int8` 预置包：视觉、嵌入、decoder 三张图均为 Int8，连同配置共 7 个文件、`263,439,781` bytes（251.24 MiB）。较小的 `compact` 配置按原 Q4 优先策略选择图，共 `182,318,056` bytes（173.9 MiB），保留为可选小包。`SmolVLM-500M-Instruct` 固定 revision `a588b6298f96d180aff4c31e259409d106b5571e` 仍为约 347 MiB 的可选对照。默认 Preview APK 不带权重；显式指定本地目录与清单可构建内置模型的 debug APK，首次启动再导入应用私有目录。两种 256M 配置共用模型 revision，分别记录选中图的大小与 SHA-256。最终 CPU Int8 debug APK 为 299,583,942 bytes（约 300 MB / 285.7 MiB）；覆盖安装会优先导入新图配置到独立目录并保留旧 Q4，重复启动复用已有导入。
+## 固定版本与打包
+
+本轮使用 `HuggingFaceTB/SmolVLM-256M-Instruct` 固定 revision `7e3e67edbbed1bf9888184d9df282b700a323964` 的已有本地文件，选择 `cpu-int8` 预置包：视觉、嵌入、decoder 三张图均为 Int8，连同配置共 7 个文件、`263,439,781` bytes（251.24 MiB）。较小的 `compact` 配置按原 Q4 优先策略选择图，共 `182,318,056` bytes（173.9 MiB），保留为可选小包。`SmolVLM-500M-Instruct` 固定 revision `a588b6298f96d180aff4c31e259409d106b5571e` 仍为约 347 MiB 的可选对照。默认 Preview APK 不带权重；显式指定本地目录与清单可构建内置模型的 debug APK，首次在前台启用构图辅助时导入应用私有目录。两种 256M 配置共用模型 revision，分别记录选中图的大小与 SHA-256。上一批 CPU Int8 debug APK 为 299,583,942 bytes（约 300 MB / 285.7 MiB）；覆盖安装会优先导入新图配置到独立目录并保留旧 Q4，重复启动复用已有导入。
 
 模型下载后可以放在项目外的专属目录，例如 `/Users/haoxuanli/Downloads/street-snap-models/smolvlm-256m/`。使用仓库内的 `scripts/check_smolvlm_bundle.py` 可在不联网的情况下检查配置、三张 ONNX 图、外部数据文件并生成本地 SHA-256 清单；清单只证明本地文件完整，不替代固定 revision 的来源核验。模型文件和生成的清单都不提交 Git。
 
-如果本机已经有 Hugging Face CLI，可用下面的固定 revision 命令下载最小闭环所需文件；`HF_HOME` 也放在项目外，便于缓存和复用：
+如果本机已经有 Hugging Face CLI，可用下面的固定 revision 命令下载用于比较 compact / CPU Int8 的图文件；`HF_HOME` 也放在项目外，便于缓存和复用：
 
 ```sh
 MODEL_DIR="$HOME/Downloads/street-snap-models/smolvlm-256m"
@@ -44,119 +50,26 @@ python3 scripts/check_smolvlm_bundle.py "$MODEL_DIR" \
 
 ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。外置 256M bundle 已通过离线清单校验；模型内置 debug APK 已验证 assets 首次导入到 `files/edge-models/...`、7 个文件的 bytes/SHA-256 校验和三张 ONNX 图会话创建。
 
-历史 Android 35 AVD 基线为单次推理约 19–21 秒，使用最多 64 个生成 token。当前上限为 40 token，视觉会话优先尝试 XNNPACK（2–4 个工作线程，ORT 线程池设为 1，失败回退 CPU），decoder/embedding 使用 2–4 个线程并启用 ALL_OPT，推理线程使用普通优先级。当前采用单帧串行：推理结束后冷却 3–15 秒，再取一张新帧；首次预算 30 秒，按实际完成耗时或超时调整至最多 60 秒。结果发布还需通过 65 秒帧年龄、当前会话和场景一致性校验，不能只因推理耗时超过旧的 5 秒阈值就全部丢弃。
 
-本轮 Android 35 AVD 的同一通用框任务中，`cpu-int8` 的 App 请求耗时为 4.3–6.4 秒，视觉编码 3.2–5.1 秒；原 Q4 配置为 16.4 / 17.5 秒，视觉编码 8.9 / 10.9 秒。两种配置均出现全零框 `[0,0,0,0]`、缺失坐标或只返回描述，尚未验收首帧有效框。Q4 语义探针询问画面右侧内容时连续两次正确识别电视，图像描述测试也出现人物幻觉，因此只能确认部分语义输入输出有效，不能宣称可靠定位。最终包启动后的首帧请求为 6.2 秒，开启分析时快门保存 JPEG 成功。107 项单元测试、Lint、离线 Preview / bundled Debug 构建和 APK v2 签名验证通过。样本量不足以给出 p50/p95；荣耀 Vs3 尚未测试。
+## 历史诊断与当前验证
 
-下一步选择具有定位训练、具体导出版本和可核验许可证的检测模型，先验证真实主体框，再接回双支路；继续盲调通用 VLM 的提示词不足以证明定位能力。
+旧版本直接请求归一化坐标，出现全零、残缺坐标或描述。Android 35 ARM64 AVD 曾测得旧 Int8 请求 4.3–6.4 秒、Q4 16.4–17.5 秒，输入 dump 与取景一致。语义探针曾识别右侧电视，也有人物幻觉。这证明部分输入/推理链路工作，不能证明可靠主体定位或构图能力；旧数据不作为新候选排序的实测成绩。
 
-需要把两个速度分开：取景帧率由相机和渲染维持，模型按自己的速度处理抽样帧。流式输出文字不等于逐帧视频理解；在荣耀设备上达到多低的延迟，要等实际模型、分辨率和加速后端确定后测量。现阶段不能承诺 30 fps 多模态推理或“完全不影响拍照”。
+当前快速候选不等待模型导入或初始化；默认手动一次，实时模式才自动更新。模型一个任务执行期间不会堆积候选图，完成后冷却 3–15 秒，未变化场景复用选择。每 500ms 观察小图场景变化，过期、后台或旧会话结果不能覆盖新场景。拍照保留完整画面，不自动应用推荐裁切。
 
-当前实现先采用官方 **SmolVLM ONNX**：256M 为默认最小模型，500M 作为可选质量对照；二者都在手机内显示体积后才允许用户主动安装。llama.cpp、Gemma 3n 与外部 API 仍是后续评估项。运行时延后初始化，快门和曝光/对焦操作无需等待模型结果。
+单元测试验证规则坐标/内容关联与支持度门闸。Debug 提供独立 Android Instrumentation 入口 `dev.streetsnap.app.validation.CompositionRankingValidation`，读取应用私有目录已有的 `composition-validation.png`，使用相同制图和真实模型比较原顺序、循环换序与纯色对照；不下载或修改模型、不落盘照片。运行命令：
 
-## 当前代码条件
-
-- 最低 Android 12（API 31），编译/目标 API 37，Java 17；AGP 9.4.1 使用内置 Kotlin，依赖元数据中的 Kotlin Gradle Plugin 为 2.2.10，Compose 编译器插件也声明为 2.2.10。
-- `camera` 使用 CameraX 1.5.1 和 Camera2 interop；构图辅助打开且模型已安装时，按节流策略绑定 `Preview + ImageCapture + ImageAnalysis`，不支持三流时自动回退到两流。
-- `color` 通过 OpenGL ES 3.0 处理 OES 相机纹理，提供 LUT、颗粒、暗角、柔光和白平衡漂移预览，不逐帧创建 Bitmap。
-- 当前拍后处理有 20 MP 上限。新增分析用例需要与预览、拍照一起验证设备支持的流组合，不能只凭 Android 版本推定兼容。
-
-用户提供的首测设备名称为“荣耀 Vs3”。准确型号、Android/MagicOS 版本、SoC、内存与可用加速后端仍待设备报告确认；本评估不据此假定 NPU 可用或给出实测速度。
-
-## 模型与运行时候选
-
-以下是便于做首轮对比的具体候选，不是“最新模型”排名，也不代表已在本项目跑通。
-
-| 候选 | 使用方式 | 重点验证 | 许可与来源 |
-| --- | --- | --- | --- |
-| **SmolVLM-500M-Instruct**；256M 可作较低资源对照 | llama.cpp 的 `libmtmd` 处理图像和文本，GGUF 文本权重配套视觉 projector，经 JNI 接入 Android | 优先验证完整链路、中文理解与街拍建议质量；CPU 与 Vulkan 后端分别测试 | llama.cpp 为 MIT；SmolVLM 官方发布说明采用 Apache-2.0，接入前仍需核对所选 500M/256M checkpoint 及转换文件的许可证。[模型卡](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct) · [官方介绍](https://huggingface.co/blog/smolvlm) · [运行时多模态支持](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md) |
-| **Gemma 3n E2B** | LiteRT-LM 的 Android/Kotlin 接口，选择配套 `.litertlm` 模型包；本轮先测图像 + 文本 | 模型包实际包含的模态、首次加载、视觉编码耗时、GPU 与相机预览的资源竞争；NPU 仅在后端和设备明确支持时比较 | LiteRT-LM 为 Apache-2.0，Gemma 权重遵循独立的 Gemma 条款，不能套用途帧 MIT。[运行时](https://github.com/google-ai-edge/LiteRT-LM) · [Android 指南](https://ai.google.dev/edge/litert-lm/android) · [模型卡](https://ai.google.dev/gemma/docs/gemma-3n/model_card) · [Gemma 条款](https://ai.google.dev/gemma/terms) |
-| **Qwen2.5-VL-7B-Instruct**，作为质量对照 | llama.cpp 支持相应 GGUF + projector；可量化，但服务器 AWQ 包不等于 Android 可直接加载的模型包 | 中文、细节理解与前两者相比是否值得更高的存储、内存和计算开销；不作为首个常驻模型 | 7B 模型卡标注 Apache-2.0；Qwen 各尺寸/版本须逐个核对，不能把这一结论推广到 3B/72B。[模型卡](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) · [运行时支持清单](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md) |
-
-本次已读取 LiteRT-LM、llama.cpp、SmolVLM 的官方 GitHub 文档与 SmolVLM 发布说明；部分模型卡站点连接超时。表中模型卡和条款保留为选型入口，正式下载/分发前必须锁定具体版本、量化方式、视觉编码器、tokenizer 和许可证。256M 外置 bundle 已锁定 revision、文件清单与本地 SHA-256；YOLO、d1-omni 和其他候选权重仍未下载或列为已验证可分发资源。
-
-权重体积不能直接当运行内存：视觉编码器、projector、KV cache、运行时缓冲与 GPU 分配都要计入。也不能把 Gemma 3n 的 E2B 名称简单换算成整个包的参数量或下载大小。
-
-LiteRT 的轻量分类模型可以另外提供场景标签；它们本身不是可接受任意图像与文本问题的多模态 API。NNAPI 已在 Android 15 弃用，新集成不以它作为默认路线；优先验证运行时当前支持的 CPU/GPU 后端，再按设备测试可用 NPU 后端。[Android 官方说明](https://developer.android.com/ndk/guides/neuralnetworks)
-
-## 两种辅助各做什么
-
-| 能力 | 合适的实现 | 结果用途 |
-| --- | --- | --- |
-| 高光占比、直方图、画面变化 | 图像统计；需要时增加小型检测模型 | 快速取景提示，不必先接大模型 |
-| “这个场景为什么适合负片？”、照片描述、基于问题的构图建议 | 图像 + 文本 VLM | 用户主动提问，或有限频率刷新一条短建议 |
-| 语音提问或短片段理解 | 选择真正支持相应输入的模型和运行时 | 后续扩展；不能由“支持图像”推定音频/视频也可用 |
-
-峰值对焦通常来自局部边缘/高频对比检测，不应包装成场景分类模型的能力。模型对光线、构图和影调的判断也不等于传感器测量；如果输出建议曝光或白平衡，应用应校验参数范围并让用户选择是否应用。
-
-## 当前接入方式
-
-应用层通过 `CompositionAssistant` 管理模型选择、安装、取消、删除、前后台生命周期和过期结果；`camera` 提供独立 RGB 帧与场景有效性检查。默认 Preview APK 不带权重，显式 `edgeModelDir` 本地调试构建可内置已校验模型。以下接口是后续扩展本地多模态 API 的设计示意：
-
-```kotlin
-interface LocalMultimodalRuntime : Closeable {
-    val state: StateFlow<RuntimeState>
-    fun analyze(request: VisionRequest): Flow<VisionEvent>
-    suspend fun cancel(requestId: String)
-}
-
-data class VisionRequest(
-    val requestId: String,
-    val frame: OwnedVisionFrame, // 独立缓冲，不持有 ImageProxy
-    val prompt: String,
-    val cameraContext: CameraContext,
-    val maxOutputTokens: Int,
-)
+```sh
+adb -s <设备序列号> shell input keyevent KEYCODE_HOME
+adb -s <设备序列号> shell am instrument -w   dev.streetsnap.app/dev.streetsnap.app.validation.CompositionRankingValidation
 ```
 
-`VisionEvent` 区分开始、文本片段、完成、错误和取消；包含请求 ID、模型版本、帧时间戳及预处理信息。对外的帧年龄使用单调时钟计算后传递，避免跨进程误解时间基准。模型不支持某类输入时明确返回能力错误。
+输出区分推理是否完成、选择是否有效、映射回原候选后是否一致与纯色选择偏置。三个任务完成不代表质量通过。具体本轮结果与限制见 SOP 验收段。仪器验证入口仅存在 Debug 构建，Preview/Release 不包含。
 
-### 取帧、背压与资源释放
+荣耀 Vs3 尚未连接；模拟器只能验证链路。真机需要记录首框、模型比较、预览/快门响应、温升、内存及折叠屏几何映射。足够独立样本后再报告 p50/p95 和主观构图偏好，不凭参数量或模型包大小推断速度。
 
-1. 打开辅助时才尝试绑定 `ImageAnalysis`，使用 `STRATEGY_KEEP_ONLY_LATEST` 和独立 executor。绑定失败则回到原拍摄会话；从已拍照片提问仍属于后续能力。
-2. 模型空闲且完成后的 3–15 秒冷却已结束时，按模型预处理规范缩放/转换图像；正确处理 YUV 的 row stride、pixel stride、旋转与预览裁切。复制出独立缓冲后在 `finally` 中关闭 `ImageProxy`，不能持有它等待文本生成。
-3. 每次只允许一个推理任务，没有待处理大图。执行期间每 500ms 仅更新最长边 24px 的 RGB signature，场景变化清除旧框但不硬取消推理；结果完成时检查场景是否仍匹配，最近场景采样超过 2 秒则拒绝发布。有效框发布后最多保留 8 秒。后续主动提问需要明确绑定用户提问时的画面。
-4. 不在渲染线程同步读取整张 GPU 纹理。分析默认使用相机原始帧；需要评论当前影调时，明确提供影调信息或受控处理后的副本，不能声称模型看到了实际未输入的滤镜效果。
-5. 后台、关闭辅助或热状态升高时停止新请求，释放会话/缓冲。协程超时仅能停止等待，未必终止底层推理；必须验证运行时的取消能力，未结束前不能继续堆叠任务。
+## 运行时与许可
 
-相机和模型即使分线程也会竞争 GPU、带宽和内存。是否启用 GPU 推理要由“预览 + 调色 + 拍照 + 推理”一起运行的结果决定，不能只看单独模型的 tokens/s。
+Android 最低 API 31，CameraX/Camera2 提供预览、拍照和 ImageAnalysis，Kotlin/Compose 管理手动/实时请求与叠框，ONNX Runtime 1.22.0 使用现有 ARM64 构建。视觉图优先尝试 XNNPACK，失败回退 CPU；不假定设备 NPU 可用。图像模型、相机和渲染仍会竞争 CPU/内存，须联合实测。
 
-### “本地 API”可以提供两层
-
-| 调用者 | 形式 | 边界 |
-| --- | --- | --- |
-| 途帧自身 UI | Kotlin 接口 + Flow | 首个集成入口，无 HTTP 序列化和端口成本 |
-| 同机其他 Android 应用 | Bound Service/AIDL，或下述 HTTP 接口 | Service 校验调用身份；需要开放第三方接入时定义授权方式 |
-| 同机脚本、其他客户端 | **可选的 loopback HTTP 服务**，如 `127.0.0.1` 上的 `/v1/vision/analyze`；SSE 返回生成片段 | 用户显式开启，使用访问令牌；只监听 loopback 仍需鉴权，因为同机应用可能访问；需要 `INTERNET` 权限和明确的生命周期 |
-
-HTTP 是可实现的产品选项，不应把“本地 API”强行限定成进程内函数。服务可以接收客户端传来的图像 + 文本，也可以在获得相机访问授权后分析途帧的最新帧；后者必须绑定正在使用的相机会话，不能默认向任何客户端暴露取景。
-
-建议先提供 `/v1/capabilities`、`/v1/vision/analyze` 与取消请求，限制图片尺寸、请求体、输出长度和并发。若要兼容 OpenAI 风格的 `/v1/chat/completions`，需列出支持的字段和图像格式，而非宣称完整兼容。HTTP/SSE 只负责传输，不提高底层推理速度。离开应用后是否持续服务，应单独适配 Android 前台服务和相机使用规则。
-
-## 基准测试与初始目标
-
-下表区分当前实验配置和后续验收目标；配置值不等于已测性能，也不构成产品承诺。所有测试记录模型 revision、量化格式、图像 token/分辨率、上下文长度、后端、机型与系统版本。
-
-| 项目 | 首轮实验设置或目标 | 如何判断 |
-| --- | --- | --- |
-| 图像输入 | 单帧，按候选模型支持的较低分辨率起步 | 保持一致测试样本；有裁切/分块时记录实际视觉 token 数，避免一律强缩到 224 px |
-| VLM 输出 | 当前最多 40 tokens，实验验证归一化框；图像描述用于诊断 | 记录模型原始输出与解析结果，区分无效框和真实超时 |
-| 持续分析 | 当前单帧串行，完成后冷却 3–15 秒再取新帧 | 总间隔包含推理耗时与冷却；没有待处理大图 |
-| 完成与时效 | 当前首次预算 30 秒，最多 60 秒；发布年龄上限 65 秒且场景仍匹配 | 允许慢设备完成首帧；移动画面不叠旧框，完成无有效框不计为超时 |
-| 响应 | 预热后首段文字暂以 2 秒内作为交互目标 | 分别测视觉编码、首 token、完整回答的 p50/p95；不达标则仅保留主动提问或更换模型 |
-| 相机开销 | 建立关闭/开启辅助的成对基线 | 记录启动至可拍、帧时间、触发到保存、连续拍摄失败率和内存峰值；不使用“零开销”验收口号 |
-| 持续运行 | 先做 30 分钟取景、间歇提问与连续拍照组合测试 | 观察温升/热降频、PSS、耗电和后台恢复，决定刷新间隔与默认开关 |
-
-预设降级顺序为：降低分析频率 → 缩短输出/减少视觉输入（遵循模型要求）→ 停止持续分析、保留主动提问 → 卸载模型。每种降级都要验证真实释放了资源，而不只是把 UI 提示隐藏。
-
-## 交付顺序与验收
-
-1. **先验收定位能力。** SmolVLM 的文件、会话与单帧返回已经验证，但尚无有效框。下一步锁定具有定位训练且许可证可核验的检测模型，用固定样本验证真实主体框、坐标与延迟；不以调整提示词替代定位验收。
-2. **接入应用内的图像 + 文本接口。** 完成模型选择、加载进度、错误、取消和卸载；模型下载或用户导入时展示来源、大小、许可证和 SHA-256，校验配套文件。SHA-256 校验完整性，可信来源另行确认。
-3. **接入取景抽样。** 先主动提问，再做可开关的低频持续辅助；验证相机流组合、有限队列、帧释放、旋转/折叠、白平衡/对焦/变焦以及连续拍摄。模型异常时仍能回到纯相机模式。
-4. **提供外部本机 API。** 复用同一推理队列，验证请求鉴权、取消、背压、图片限制和服务关闭；需要 HTTP 的构建明确声明网络权限及用途。
-5. **再决定音频、多帧输入与 NPU 优化。** 以支持它们的具体模型和后端为前提，各自建立测试，不把单帧问答写成完整实时视频理解。
-
-模型处理在本地完成，分析帧默认只短暂驻留内存，不写图库或日志；联网只在明确的模型下载或用户开启的 API 场景发生。模型许可独立于项目 MIT，权重、转换文件和运行时分别记录来源与版本。
-
-正式对外写“支持端侧多模态”之前，仍需完成一次真机图像 + 文本推理、连续取景共存、模型失败恢复和荣耀 Vs3 热稳定性验证。当前 UI 和代码已提供可安装、可选、可卸载的实验入口，但没有把未运行真实权重说成已验证的性能或质量结果。
+SmolVLM 模型使用其独立许可证，来源为 [官方 256M 模型卡](https://huggingface.co/HuggingFaceTB/SmolVLM-256M-Instruct)，代码仓库 MIT 不替代模型授权；ONNX Runtime 许可与声明保存在 `third_party/onnxruntime/`。本轮使用用户已经下载并固定 revision 的文件，不新增模型、SDK、镜像或工具链下载。权重、APK、清单、测试照片与签名材料均不提交 Git。

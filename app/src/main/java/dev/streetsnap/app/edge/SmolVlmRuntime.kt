@@ -130,7 +130,14 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
     }
 
     /** Busy calls return null. Cancellation terminates ORT; close waits for any native call to finish. */
-    suspend fun suggest(bitmap: Bitmap, prompt: String = DEFAULT_PROMPT): CompositionSuggestion? {
+    suspend fun suggest(bitmap: Bitmap, prompt: String = DEFAULT_PROMPT): CompositionSuggestion? =
+        runImageTask(bitmap) { frame, options -> infer(frame, prompt.take(800), options) }
+
+    /** One image pass and one prefill; a null selection means the model abstained. */
+    suspend fun rankCandidates(sheet: Bitmap): CropRanking? =
+        runImageTask(sheet, ::rank)
+
+    private suspend fun <T> runImageTask(bitmap: Bitmap, action: (ImageInput, OrtSession.RunOptions) -> T?): T? {
         check(!closed.get()) { "模型已卸载" }
         if (!running.compareAndSet(false, true)) return null
         val frame = try { withContext(Dispatchers.Default) { prepareImage(bitmap) } }
@@ -141,24 +148,39 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
             continuation.invokeOnCancellation { runCatching { options.setTerminate(true) } }
             try {
                 worker.execute {
+                    var result: T? = null
+                    var failure: Throwable? = null
                     try {
-                        val result = synchronized(lock) {
+                        result = synchronized(lock) {
                             check(!closed.get()) { "模型已卸载" }
-                            if (continuation.isActive) infer(frame, prompt.take(800), options) else null
+                            if (continuation.isActive) action(frame, options) else null
                         }
-                        if (continuation.isActive) continuation.resume(result)
                     } catch (error: Throwable) {
-                        if (continuation.isActive) continuation.resumeWithException(error)
+                        failure = error
                     } finally {
+                        // Native work and its tensors have finished before this
+                        // point. Publish availability before resuming the caller,
+                        // so an immediate next request cannot spuriously see busy.
+                        // Cancellation alone never releases this gate early.
                         activeOptions.compareAndSet(options, null)
-                        options.close()
-                        running.set(false)
+                        try { options.close() }
+                        catch (error: Throwable) {
+                            val original = failure
+                            if (original == null) failure = error
+                            else if (original !== error) original.addSuppressed(error)
+                        } finally { running.set(false) }
+                    }
+                    if (continuation.isActive) {
+                        val error = failure
+                        if (error != null) continuation.resumeWithException(error)
+                        else continuation.resume(result)
                     }
                 }
             } catch (error: Throwable) {
                 activeOptions.compareAndSet(options, null)
-                options.close()
-                running.set(false)
+                try { options.close() }
+                catch (cleanup: Throwable) { if (cleanup !== error) error.addSuppressed(cleanup) }
+                finally { running.set(false) }
                 if (continuation.isActive) continuation.resumeWithException(error)
             }
         }
@@ -192,9 +214,7 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
         } finally { if (scaled !== source) scaled.recycle() }
     }
 
-    private fun infer(frame: ImageInput, prompt: String, options: OrtSession.RunOptions): CompositionSuggestion? {
-        val startedAt = SystemClock.elapsedRealtime()
-        Log.i(LOG_TAG, "stage=vision image=${frame.width}x${frame.height}")
+    private fun encodeImage(frame: ImageInput, options: OrtSession.RunOptions): FloatArray {
         val pixelRank = (vision.inputInfo.getValue("pixel_values").info as TensorInfo).shape.size
         val maskRank = (vision.inputInfo.getValue("pixel_attention_mask").info as TensorInfo).shape.size
         require(pixelRank == 5 && maskRank == 4) { "视觉模型输入维度不兼容" }
@@ -212,6 +232,94 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
         require(features.isNotEmpty() && features.size % hiddenSize == 0 && features.all { it.isFinite() }) {
             "视觉特征无效"
         }
+        return features
+    }
+
+    private fun rank(frame: ImageInput, options: OrtSession.RunOptions): CropRanking? {
+        val startedAt = SystemClock.elapsedRealtime()
+        var visionMs = 0L
+        var prefillMs = 0L
+        var completed = false
+        var ranking: CropRanking? = null
+        val temporary = mutableListOf<OnnxTensor>()
+        try {
+            // Score an explicit answer continuation. Bare "A" at the beginning of
+            // unrestricted prose can instead mean the English indefinite article.
+            val labelTokens = listOf(" A", " B", " C").map { label ->
+                tokenizer.encode(label).also { require(it.size == 1) { "模型候选标签必须是单个 token" } }.single().toInt()
+            }.toIntArray()
+            logRanking("stage=rank_vision image=${frame.width}x${frame.height}")
+            val features = encodeImage(frame, options)
+            val imageTokens = features.size / hiddenSize
+            require(imageTokens in 1..256) { "视觉 token 数超出限制" }
+            visionMs = SystemClock.elapsedRealtime() - startedAt
+            logRanking("rank_vision_ms=$visionMs image_tokens=$imageTokens")
+            val imagePrompt = "<fake_token_around_image><global-img>" + "<image>".repeat(imageTokens) + "<fake_token_around_image>"
+            val ids = tokenizer.encode("<|im_start|>User:$imagePrompt$RANKING_PROMPT<end_of_utterance>\nAssistant: Best crop:")
+            require(ids.size <= 512 && ids.count { it == imageToken } == imageTokens) { "候选提示过长或图像 token 不匹配" }
+            val prefillStartedAt = SystemClock.elapsedRealtime()
+            val tokenTensor = OnnxTensor.createTensor(environment, LongBuffer.wrap(ids), longArrayOf(1, ids.size.toLong()))
+                .also { temporary += it }
+            val values = embeddings.run(mapOf("input_ids" to tokenTensor), options).use { output ->
+                requireNotNull(output.tensor("inputs_embeds").floatBuffer).let { buffer ->
+                    FloatArray(buffer.remaining()).also { buffer.get(it) }
+                }
+            }
+            require(values.size == ids.size * hiddenSize)
+            var source = 0
+            for (token in ids.indices) if (ids[token] == imageToken) {
+                features.copyInto(values, token * hiddenSize, source, source + hiddenSize)
+                source += hiddenSize
+            }
+            val inputEmbedding = OnnxTensor.createTensor(environment, FloatBuffer.wrap(values),
+                longArrayOf(1, ids.size.toLong(), hiddenSize.toLong())).also { temporary += it }
+            val attention = OnnxTensor.createTensor(environment, LongBuffer.wrap(LongArray(ids.size) { 1L }),
+                longArrayOf(1, ids.size.toLong())).also { temporary += it }
+            val positions = OnnxTensor.createTensor(environment, LongBuffer.wrap(LongArray(ids.size) { it.toLong() }),
+                longArrayOf(1, ids.size.toLong())).also { temporary += it }
+            val feeds = linkedMapOf("inputs_embeds" to inputEmbedding, "attention_mask" to attention, "position_ids" to positions)
+            if ("use_cache_branch" in decoder.inputNames) {
+                feeds["use_cache_branch"] = OnnxTensor.createTensor(environment, ByteBuffer.wrap(byteArrayOf(0)),
+                    longArrayOf(1), OnnxJavaType.BOOL).also { temporary += it }
+            }
+            for (name in cacheOutputs.keys) feeds[name] = emptyCacheTensor(name).also { temporary += it }
+            // No token-generation loop and no KV outputs: all three choices come
+            // from this same real image-conditioned forward pass.
+            decoder.run(feeds, setOf("logits"), options).use { output ->
+                val logits = output.tensor("logits")
+                val vocabulary = logits.info.shape.last().toInt()
+                require(vocabulary in 1..100_000)
+                val scores = requireNotNull(logits.floatBuffer)
+                require(scores.remaining() >= vocabulary)
+                scores.position(scores.limit() - vocabulary)
+                val lastLogits = FloatArray(vocabulary).also { scores.get(it) }
+                prefillMs = SystemClock.elapsedRealtime() - prefillStartedAt
+                ranking = CropRankingScores.fromLogits(lastLogits, labelTokens)
+                completed = true
+            }
+            ranking?.let { result ->
+                logRanking("rank_selected=${result.selectedIndex} support=${result.support} margin=${result.margin} " +
+                    "probabilities=${result.probabilities} raw_scores=${result.rawScores} " +
+                    "min_support=${CropRankingScores.MIN_SUPPORT} min_margin=${CropRankingScores.MIN_MARGIN}")
+            }
+            return ranking
+        } finally {
+            temporary.asReversed().forEach { it.close() }
+            logRanking("rank_total_ms=${SystemClock.elapsedRealtime() - startedAt} vision_ms=$visionMs " +
+                "prefill_ms=$prefillMs completed=$completed selected=${ranking?.selectedIndex}")
+        }
+    }
+
+    private fun logRanking(message: String) {
+        // Explicit local opt-in; never log source images, scene descriptions or
+        // frame fingerprints. The records contain scores and timings only.
+        if (Log.isLoggable(LOG_TAG, Log.DEBUG)) Log.d(LOG_TAG, message)
+    }
+
+    private fun infer(frame: ImageInput, prompt: String, options: OrtSession.RunOptions): CompositionSuggestion? {
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(LOG_TAG, "stage=vision image=${frame.width}x${frame.height}")
+        val features = encodeImage(frame, options)
         val imageTokens = features.size / hiddenSize
         require(imageTokens in 1..256) { "视觉 token 数超出限制" }
         val visionMs = SystemClock.elapsedRealtime() - startedAt
@@ -357,6 +465,9 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
 
     companion object {
         private const val LOG_TAG = "StreetSnapVlm"
+        private const val RANKING_PROMPT = "Choose crop A, B or C. Preserve the main content, " +
+            "avoid cutting important parts, and balance empty space. The rule of thirds is optional. " +
+            "Reply with one letter."
         // Digits are separate tokens. Four coordinates plus spaces, punctuation,
         // and a short answer prefix can exceed 24 tokens, so permit a complete
         // tuple while the caller independently bounds each sampled-frame request.

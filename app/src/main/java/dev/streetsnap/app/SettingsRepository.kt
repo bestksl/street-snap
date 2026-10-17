@@ -55,6 +55,7 @@ data class AppSettings(
     val mascotCamera: String? = CameraPreferences.DEFAULT_MASCOT,
     val captureOrientation: String = CameraPreferences.DEFAULT_ORIENTATION,
     val compositionEnabled: Boolean = false,
+    val compositionRealtime: Boolean = false,
     val compositionModel: String = "smolvlm-256m",
     val looks: Map<String, LookSettings> = emptyMap(),
     val lutName: String? = null,
@@ -129,6 +130,7 @@ internal object SettingsJson {
         put("mascotCamera", CameraPreferences.mascot(settings.mascotCamera) ?: JSONObject.NULL)
         put("captureOrientation", CameraPreferences.orientation(settings.captureOrientation))
         put("compositionEnabled", settings.compositionEnabled)
+        put("compositionRealtime", settings.compositionRealtime)
         put("compositionModel", EdgeModelCatalog.find(settings.compositionModel)?.id ?: "smolvlm-256m")
         put("lutName", settings.lutName ?: JSONObject.NULL)
         put("looks", JSONObject().apply {
@@ -195,6 +197,7 @@ internal object SettingsJson {
                 },
                 captureOrientation = CameraPreferences.orientation(json.optString("captureOrientation")),
                 compositionEnabled = json.optBoolean("compositionEnabled", false),
+                compositionRealtime = json.optBoolean("compositionRealtime", false),
                 compositionModel = EdgeModelCatalog.find(json.optString("compositionModel"))?.id ?: "smolvlm-256m",
                 looks = looks,
                 lutName = if (json.isNull("lutName")) null else json.optString("lutName").takeIf(String::isNotBlank)?.take(120),

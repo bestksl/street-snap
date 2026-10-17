@@ -37,6 +37,8 @@ class CompositionFrameSource(
     private val maximumEdge: Int = 384,
     onError: (Throwable) -> Unit = {},
     private val onSceneChanged: () -> Unit = {},
+    /** Read-only, thread-safe demand check on the camera executor, before copying a full RGB frame. */
+    private val shouldCaptureFrame: () -> Boolean = { true },
     onFrame: suspend (CompositionFrame) -> Unit,
 ) : AutoCloseable {
     init {
@@ -56,6 +58,7 @@ class CompositionFrameSource(
     private var frameEpoch = 0L
     private var active = false
     private var closed = false
+    private var analyzerAttached = false
     private var executorClosed = false
     private val gate = LatestFrameGate(scope, release = { frame: CompositionFrame ->
         frame.close()
@@ -69,6 +72,7 @@ class CompositionFrameSource(
         generation++
         frameEpoch++
         active = true
+        analyzerAttached = true
         sampling.reset()
         sceneSampling.reset()
         sceneTracker.reset()
@@ -80,22 +84,33 @@ class CompositionFrameSource(
             active = false; generation++; frameEpoch++; sampling.reset(); sceneSampling.reset(); sceneTracker.reset()
         }
         gate.dropPending()
+        runCatching(onSceneChanged)
     }
 
-    /** Called by CameraController after ImageAnalysis has been detached. */
+    /** Called after detachment. A live source can be rebound after a rotation or preview resize. */
     internal fun shutdownExecutor() {
         synchronized(lock) {
-            if (executorClosed) return
+            analyzerAttached = false
+            shutdownExecutorIfDetached()
+        }
+    }
+
+    /** Caller holds lock; both source disposal and analyzer detachment must precede shutdown. */
+    private fun shutdownExecutorIfDetached() {
+        if (closed && !analyzerAttached && !executorClosed) {
             executorClosed = true
             executor.shutdown()
         }
     }
 
     internal fun pause() {
-        synchronized(lock) {
+        val wasActive = synchronized(lock) {
+            val previous = active
             active = false; frameEpoch++; sampling.reset(); sceneSampling.reset(); sceneTracker.reset()
+            previous
         }
         gate.dropPending()
+        if (wasActive) runCatching(onSceneChanged)
     }
 
     internal fun resume() = synchronized(lock) {
@@ -108,6 +123,11 @@ class CompositionFrameSource(
     fun setMinimumIntervalMs(value: Long) = synchronized(lock) {
         require(value in 100L..60_000L)
         sampling.setMinimumIntervalNs(value * 1_000_000L)
+    }
+
+    /** A manual request may skip the cooldown, while preserving scene checks and any in-flight frame. */
+    fun requestNextFrame() = synchronized(lock) {
+        if (!closed) sampling.reset()
     }
 
     /** Invalidate a model change or a framing change without adding another camera stream. */
@@ -123,9 +143,10 @@ class CompositionFrameSource(
         var offered = false
         try {
             val now = SystemClock.elapsedRealtimeNanos()
+            val captureRequested = shouldCaptureFrame()
             val (epoch, observeScene) = synchronized(lock) {
                 if (!active || closed || generation != session) return
-                reserved = sampling.accept(now)
+                reserved = captureRequested && sampling.accept(now)
                 val sceneDue = sceneSampling.accept(now)
                 frameEpoch to (reserved || sceneDue)
             }
@@ -160,7 +181,10 @@ class CompositionFrameSource(
     }
 
     override fun close() {
-        synchronized(lock) { closed = true; active = false; generation++; frameEpoch++ }
+        synchronized(lock) {
+            closed = true; active = false; generation++; frameEpoch++
+            shutdownExecutorIfDetached()
+        }
         gate.close()
         scope.cancel()
         // CameraX may still dispatch an analyzer callback until its use case is
