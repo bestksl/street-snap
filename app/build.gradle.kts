@@ -1,3 +1,6 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -8,56 +11,68 @@ val isCiBuild = providers.gradleProperty("ciBuild").map { it.toBoolean() }.getOr
 // builds; when supplied, the model directory is copied into ignored app assets so the
 // Android plugin packages it in the APK without putting weights in source control.
 val edgeModelDir = providers.gradleProperty("edgeModelDir").orNull?.let { file(it) }
+// Resolve an explicitly selected manifest relative to the repository root, while
+// its weight paths still refer to edgeModelDir (which may be outside the repo).
+val explicitEdgeModelManifest = providers.gradleProperty("edgeModelManifest").orNull?.let { rootProject.file(it) }
+require(explicitEdgeModelManifest == null || edgeModelDir != null) { "edgeModelManifest requires edgeModelDir" }
 val edgeModelManifest = edgeModelDir?.let { source ->
     require(source.isDirectory) { "edgeModelDir must be a model directory: $source" }
-    // Downloads made by the repository verifier use street-snap-manifest.json. The
-    // staging task renames that validated manifest to install.json in the APK assets.
-    val manifest = source.resolve("install.json").takeIf { it.isFile }
+    explicitEdgeModelManifest?.also {
+        require(it.isFile) { "edgeModelManifest must be an existing file: $it" }
+    } ?: source.resolve("install.json").takeIf { it.isFile }
         ?: source.resolve("street-snap-manifest.json").takeIf { it.isFile }
-    require(manifest != null) { "edgeModelDir must contain install.json or street-snap-manifest.json: $source" }
-    manifest
+        ?: error("edgeModelDir must contain install.json or street-snap-manifest.json: $source")
 }
-val edgeModelManifestText = edgeModelManifest?.readText()
-val edgeModelAssetName = edgeModelManifestText?.let { text ->
-    val id = Regex("\\\"model\\\"\\s*:\\s*\\\"([A-Za-z0-9_-]+)\\\"").find(text)?.groupValues?.get(1)
-    val revision = Regex("\\\"revision\\\"\\s*:\\s*\\\"([a-f0-9]{40})\\\"").find(text)?.groupValues?.get(1)
-    require(!id.isNullOrBlank() && revision != null) {
-        "edgeModelDir/install.json must declare model and a 40-character revision"
+val edgeModelManifestData = edgeModelManifest?.let { manifest ->
+    require(manifest.length() in 1..2_000_000L) { "edge model manifest is empty or too large" }
+    JsonSlurper().parseText(manifest.readText()) as? Map<*, *> ?: error("edge model manifest must be a JSON object")
+}
+val edgeModelAssetName = edgeModelManifestData?.let { data ->
+    val id = data["model"] as? String
+    val revision = data["revision"] as? String
+    require(id != null && id.matches(Regex("[A-Za-z0-9_-]+")) &&
+        revision != null && revision.matches(Regex("[a-f0-9]{40}"))) {
+        "edge model manifest must declare model and a 40-character revision"
     }
     "$id-$revision"
 }
-val edgeModelFilePaths = edgeModelManifestText?.let { text ->
-    val paths = Regex("\\\"path\\\"\\s*:\\s*\\\"([A-Za-z0-9_./-]+)\\\"").findAll(text)
-        .map { it.groupValues[1] }.toList().distinct()
-    require(paths.isNotEmpty()) { "edgeModelDir manifest must declare model files" }
-    paths
-}
-val edgeModelCanonicalManifest = edgeModelManifestText?.let { text ->
-    // Keep the APK manifest small and deterministic. The verifier's local manifest
-    // uses graphs + sha256 fields; runtime install.json uses direct graph names +
-    // digest/sha256 fields. A pre-existing install.json is already canonical.
-    if (edgeModelManifest?.name == "install.json") text else {
-        fun value(key: String): String = Regex("\\\"$key\\\"\\s*:\\s*\\\"([A-Za-z0-9_./-]+)\\\"")
-            .find(text)?.groupValues?.get(1) ?: error("manifest missing $key")
-        val graphs = Regex("\\\"graphs\\\"\\s*:\\s*\\{([^}]*)\\}")
-            .find(text)?.groupValues?.get(1) ?: error("manifest missing graphs")
-        fun graphValue(key: String): String = Regex("\\\"$key\\\"\\s*:\\s*\\\"([A-Za-z0-9_./-]+)\\\"")
-            .find(graphs)?.groupValues?.get(1) ?: error("manifest missing graph $key")
-        val id = value("model")
-        val revision = value("revision")
-        val fileBlocks = Regex("\\{[^{}]*\\\"path\\\"\\s*:\\s*\\\"[A-Za-z0-9_./-]+\\\"[^{}]*\\}")
-            .findAll(text).map { block ->
-                val body = block.value
-                val path = Regex("\\\"path\\\"\\s*:\\s*\\\"([A-Za-z0-9_./-]+)\\\"").find(body)!!.groupValues[1]
-                val bytes = Regex("\\\"bytes\\\"\\s*:\\s*(\\d+)").find(body)!!.groupValues[1]
-                val digest = Regex("\\\"sha256\\\"\\s*:\\s*\\\"([a-f0-9]{64})\\\"").find(body)?.groupValues?.get(1)
-                    ?: Regex("\\\"digest\\\"\\s*:\\s*\\\"([a-f0-9]{64})\\\"").find(body)?.groupValues?.get(1)
-                    ?: error("manifest file missing SHA-256: $path")
-                "{\"path\":\"$path\",\"bytes\":$bytes,\"digest\":\"$digest\",\"sha256\":true}"
-            }.toList()
-        require(fileBlocks.isNotEmpty()) { "manifest must declare files" }
-        "{\"model\":\"$id\",\"revision\":\"$revision\",\"vision\":\"${graphValue("vision")}\",\"embedding\":\"${graphValue("embedding")}\",\"decoder\":\"${graphValue("decoder")}\",\"files\":[${fileBlocks.joinToString(",")}] }"
+fun validEdgeModelPath(path: String): Boolean = path.matches(Regex("[A-Za-z0-9_./-]+")) &&
+    !path.startsWith("/") && path.split('/').none { it.isEmpty() || it == "." || it == ".." }
+val edgeModelFileRecords = edgeModelManifestData?.let { data ->
+    val files = data["files"] as? List<*> ?: error("edge model manifest must declare files")
+    require(files.isNotEmpty() && files.size <= 32) { "edge model manifest file count is invalid" }
+    files.map { value ->
+        val record = value as? Map<*, *> ?: error("invalid edge model file record")
+        val path = record["path"] as? String ?: error("manifest file missing path")
+        val bytes = (record["bytes"] as? Number)?.toLong() ?: error("manifest file missing size: $path")
+        val digest = record["digest"] as? String ?: record["sha256"] as? String
+            ?: error("manifest file missing digest: $path")
+        val sha256 = record["sha256"] as? Boolean ?: (digest.length == 64)
+        require(validEdgeModelPath(path) && bytes > 0 && digest.matches(Regex(if (sha256) "[a-f0-9]{64}" else "[a-f0-9]{40}"))) {
+            "invalid edge model file record: $path"
+        }
+        require(requireNotNull(edgeModelDir).resolve(path).isFile) { "edgeModelDir is missing $path" }
+        mapOf("path" to path, "bytes" to bytes, "digest" to digest, "sha256" to sha256)
+    }.also { records ->
+        require(records.map { it["path"] }.distinct().size == records.size) { "duplicate edge model file paths" }
     }
+}
+val edgeModelFilePaths = edgeModelFileRecords?.map { it.getValue("path") as String }
+val edgeModelCanonicalManifest = edgeModelManifestData?.let { data ->
+    // Accept both verifier graphs + sha256 strings and runtime direct graph names
+    // + digest/sha256 flags. The schema, rather than the filename, selects the form.
+    val graphs = data["graphs"] as? Map<*, *>
+    fun graph(name: String): String {
+        val path = data[name] as? String ?: graphs?.get(name) as? String
+            ?: error("edge model manifest missing $name graph")
+        require(path in requireNotNull(edgeModelFilePaths)) { "manifest $name graph must appear in files" }
+        return path
+    }
+    JsonOutput.toJson(mapOf(
+        "model" to data["model"], "revision" to data["revision"],
+        "vision" to graph("vision"), "embedding" to graph("embedding"), "decoder" to graph("decoder"),
+        "files" to requireNotNull(edgeModelFileRecords),
+    ))
 }
 val stageEdgeModelAssets = edgeModelDir?.let { source ->
     val destination = layout.projectDirectory.dir("src/main/assets/edge-models/$edgeModelAssetName").asFile
@@ -68,6 +83,8 @@ val stageEdgeModelAssets = edgeModelDir?.let { source ->
         // selected graphs. Keep only the manifest and model files in APK assets.
         exclude(".cache/**", "**/.cache/**", "street-snap-manifest.json", "install.json")
         include(*requireNotNull(edgeModelFilePaths).toTypedArray())
+        inputs.file(requireNotNull(edgeModelManifest))
+        inputs.property("canonicalManifest", requireNotNull(edgeModelCanonicalManifest))
         outputs.file(destination.resolve("install.json"))
         doLast {
             destination.resolve("install.json").writeText(requireNotNull(edgeModelCanonicalManifest))

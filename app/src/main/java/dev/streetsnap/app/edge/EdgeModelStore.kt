@@ -124,34 +124,24 @@ class EdgeModelStore(context: Context) {
     /**
      * Import a model that was deliberately staged in app assets at build time.
      *
-     * Assets are copied into the same private directory used by explicit downloads so
-     * the runtime has one source of truth. The manifest is parsed and validated before
-     * any weight is copied, and every copied file is checked against its declared hash.
+     * Assets are copied into the private model store. Different graph variants at the
+     * same revision have separate directories, preserving a previously installed model.
+     * The manifest is validated before copying and every file is checked by its hash.
      * Missing assets simply mean this APK has no bundled model; normal downloads remain
-     * available. The operation is idempotent and only runs when no valid install exists.
+     * available. A valid install with the same graph configuration is reused.
      */
     suspend fun installBundled(model: EdgeModelEntry): InstalledEdgeModel? = withContext(Dispatchers.IO) {
         require(model in EdgeModelCatalog.models) { "未知模型来源" }
-        installed(model)?.let { return@withContext it }
+        val bundledPlan = bundledPlan(model) ?: return@withContext null
+        installedModels(model).firstOrNull { sameVariant(it.plan, bundledPlan) }
+            ?.let { return@withContext it }
         val assetRoot = "edge-models/${model.id}-${model.revision}"
         val manifestPath = "$assetRoot/install.json"
-        if (!assetExists(manifestPath)) return@withContext null
-
         val manifestText = readAssetSmall(manifestPath)
-        val bundledPlan = try {
-            decode(JSONObject(manifestText))
-        } catch (error: Exception) {
-            throw IllegalArgumentException("内置模型安装清单无效", error)
-        }
-        validatePlan(bundledPlan)
-        require(bundledPlan.model == model && bundledPlan.revision == model.revision) {
-            "内置模型版本与应用目录不一致"
-        }
-        require(bundledPlan.totalBytes > 0) { "内置模型为空" }
 
         root.mkdirs()
         require(StatFs(root.absolutePath).availableBytes > bundledPlan.totalBytes + 64L * 1024 * 1024) { "可用空间不足" }
-        val folderName = "${model.id}-${model.revision}"
+        val folderName = bundledFolderName(bundledPlan)
         val folder = File(root, folderName)
         val staging = File(root, "$folderName.asset-part")
         if (staging.exists()) require(staging.deleteRecursively()) { "无法清理未完成的内置模型" }
@@ -187,9 +177,15 @@ class EdgeModelStore(context: Context) {
             val manifest = File(staging, "install.json.part")
             manifest.writeText(manifestText, Charsets.UTF_8)
             require(manifest.renameTo(File(staging, "install.json"))) { "无法保存内置模型清单" }
-            // A valid install wins races with another importer. An invalid stale folder
-            // can only be this app's private model directory, so replace it atomically.
-            if (folder.exists()) require(folder.deleteRecursively()) { "无法替换旧的内置模型" }
+            // Never replace another valid graph variant, including the legacy Q4
+            // directory. Only incomplete data at this variant's own path is replaced.
+            val existing = installedModel(folder, model)
+            if (existing != null) {
+                require(sameVariant(existing.plan, bundledPlan)) { "内置模型目录已被其他有效版本占用" }
+                require(staging.deleteRecursively()) { "无法清理内置模型临时文件" }
+                return@withContext existing
+            }
+            if (folder.exists()) require(folder.deleteRecursively()) { "无法替换未完成的内置模型" }
             require(staging.renameTo(folder)) { "无法完成内置模型安装" }
             InstalledEdgeModel(bundledPlan, folder)
         } catch (error: Throwable) {
@@ -198,18 +194,59 @@ class EdgeModelStore(context: Context) {
         }
     }
 
-    fun installed(model: EdgeModelEntry): InstalledEdgeModel? = root.listFiles()?.asSequence()
-        ?.filter { it.isDirectory && it.name.startsWith(model.id + "-") }
-        ?.mapNotNull { folder -> runCatching {
-            val manifest = File(folder, "install.json")
-            require(manifest.length() in 1..MAX_METADATA_BYTES.toLong())
-            val plan = decode(JSONObject(manifest.readText(Charsets.UTF_8)))
-            validatePlan(plan)
-            require(plan.model == model)
-            require(plan.files.all { File(folder, it.path).length() == it.bytes })
-            InstalledEdgeModel(plan, folder)
-        }.getOrNull() }
-        ?.firstOrNull()
+    fun installed(model: EdgeModelEntry): InstalledEdgeModel? {
+        val models = installedModels(model)
+        val bundled = bundledPlan(model)
+        // An APK upgrade may change quantization without changing the pinned revision.
+        // Prefer that APK's graphs; a normal APK can still use a previously imported model.
+        return bundled?.let { plan -> models.firstOrNull { sameVariant(it.plan, plan) } }
+            ?: models.firstOrNull()
+    }
+
+    private fun installedModels(model: EdgeModelEntry): List<InstalledEdgeModel> =
+        root.listFiles()?.asSequence()
+            ?.filter { it.isDirectory && it.name.startsWith(model.id + "-") &&
+                !it.name.endsWith(".asset-part") }
+            ?.sortedBy { it.name }
+            ?.mapNotNull { installedModel(it, model) }
+            ?.toList().orEmpty()
+
+    private fun installedModel(folder: File, model: EdgeModelEntry): InstalledEdgeModel? = runCatching {
+        val manifest = File(folder, "install.json")
+        require(manifest.length() in 1..MAX_METADATA_BYTES.toLong())
+        val plan = decode(JSONObject(manifest.readText(Charsets.UTF_8)))
+        validatePlan(plan)
+        require(plan.model == model)
+        require(plan.files.all { File(folder, it.path).isFile && File(folder, it.path).length() == it.bytes })
+        InstalledEdgeModel(plan, folder)
+    }.getOrNull()
+
+    private fun bundledPlan(model: EdgeModelEntry): ModelDownloadPlan? {
+        val manifestPath = "edge-models/${model.id}-${model.revision}/install.json"
+        if (!assetExists(manifestPath)) return null
+        val plan = try {
+            decode(JSONObject(readAssetSmall(manifestPath)))
+        } catch (error: Exception) {
+            throw IllegalArgumentException("内置模型安装清单无效", error)
+        }
+        validatePlan(plan)
+        require(plan.model == model && plan.revision == model.revision) { "内置模型版本与应用目录不一致" }
+        require(plan.totalBytes > 0) { "内置模型为空" }
+        return plan
+    }
+
+    private fun sameVariant(first: ModelDownloadPlan, second: ModelDownloadPlan): Boolean =
+        first.model == second.model && first.revision == second.revision &&
+            first.visionFile == second.visionFile && first.embeddingFile == second.embeddingFile &&
+            first.decoderFile == second.decoderFile
+
+    private fun bundledFolderName(plan: ModelDownloadPlan): String {
+        val key = listOf(plan.model.id, plan.revision, plan.visionFile, plan.embeddingFile, plan.decoderFile)
+            .joinToString("\n")
+        val digest = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        return "${plan.model.id}-${plan.revision}-bundle-${digest.take(24)}"
+    }
 
     /** Call after unloading this model's inference sessions. */
     suspend fun remove(model: EdgeModelEntry) = withContext(Dispatchers.IO) {

@@ -212,7 +212,7 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         if (landscape && maxWidth >= 600.dp) {
                             val sideWidth = minOf(356.dp, maxWidth * .48f)
                             Row(Modifier.fillMaxSize()) {
-                                Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay,
+                                Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay, compositionState,
                                     Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ })
                                 ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                     Modifier.width(sideWidth).fillMaxHeight(),
@@ -230,7 +230,7 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                             // Tiny split-screen windows can scroll instead of losing their viewfinder.
                             Column(if (compact) Modifier.fillMaxSize().verticalScroll(rememberScrollState())
                                 else Modifier.fillMaxSize()) {
-                                Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay,
+                                Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
                                     if (compact) Modifier.fillMaxWidth().height(previewHeight)
                                     else Modifier.weight(1f).fillMaxWidth(), onRetry = { retry++ })
                                 ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
@@ -276,6 +276,7 @@ private fun Viewfinder(
     landscape: Boolean,
     compositionSource: dev.streetsnap.camera.CompositionFrameSource?,
     compositionOverlay: CompositionOverlay?,
+    compositionState: CompositionUiState,
     modifier: Modifier,
     onRetry: () -> Unit,
 ) {
@@ -414,10 +415,10 @@ private fun Viewfinder(
                     if (right > left && bottom > top) {
                         drawRect(Color(0xFFE2FF79).copy(alpha = .86f), Offset(left, top),
                             androidx.compose.ui.geometry.Size(right - left, bottom - top), style = Stroke(2.dp.toPx()))
-                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(size.width / 2f, top),
-                            Offset(size.width / 2f, bottom), 1.dp.toPx())
-                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(left, size.height / 2f),
-                            Offset(right, size.height / 2f), 1.dp.toPx())
+                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset((left + right) / 2f, top),
+                            Offset((left + right) / 2f, bottom), 1.dp.toPx())
+                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(left, (top + bottom) / 2f),
+                            Offset(right, (top + bottom) / 2f), 1.dp.toPx())
                     }
                 }
             }
@@ -448,6 +449,12 @@ private fun Viewfinder(
                         else -> "固定焦点"
                     }, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
                 }
+            }
+            if (settings.compositionEnabled) {
+                Text(compositionTimingLabel(compositionState),
+                    Modifier.align(Alignment.BottomStart).padding(10.dp)
+                        .background(Color.Black.copy(alpha = .60f), RoundedCornerShape(5.dp)).padding(6.dp),
+                    color = Color.White, fontSize = 11.sp, maxLines = 2)
             }
             val focusHint = when {
                 state.isFocusing -> "对焦中"
@@ -1031,6 +1038,11 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
         Switch(settings.compositionEnabled, { model.setCompositionEnabled(it) },
             modifier = Modifier.semantics { contentDescription = "构图辅助开关" })
     }
+    Text(compositionTimingLabel(state), style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (state.status == AssistStatus.READY) Text(
+        "完成后休息 ${formatInferenceTime(state.sampleIntervalMs)} 再取新帧 · 单次最多 ${formatInferenceTime(state.inferenceBudgetMs)}",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1090,6 +1102,42 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
     bytes >= 1024L -> "%.0f KB".format(bytes / 1024f)
     else -> "$bytes B"
+}
+
+@Composable
+private fun compositionTimingLabel(state: CompositionUiState): String {
+    val started = state.inferenceStartedAtMs
+    var elapsedMs by remember(started) { mutableStateOf(0L) }
+    LaunchedEffect(started) {
+        if (started != null) while (true) {
+            elapsedMs = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+            delay(500L)
+        }
+    }
+    if (started != null) return "正在分析 · ${formatInferenceTime(elapsedMs)}"
+    val duration = state.lastInferenceMs?.let(::formatInferenceTime)
+    if (duration == null) return when (state.status) {
+        AssistStatus.LOADING -> "正在加载本地模型"
+        AssistStatus.OFF -> "构图辅助已关闭"
+        AssistStatus.PAUSED -> "构图辅助已暂停"
+        AssistStatus.UNINSTALLED -> "请先安装模型"
+        AssistStatus.FAILED -> "模型加载失败"
+        else -> "等待首帧分析"
+    }
+    return when (state.lastOutcome) {
+        CompositionOutcome.RETURNED -> "模型框已返回 · $duration"
+        CompositionOutcome.NO_RESULT -> "分析已返回 · $duration · 无有效框"
+        CompositionOutcome.TIMED_OUT -> "分析超时 · $duration"
+        CompositionOutcome.SCENE_CHANGED -> "分析已返回 · $duration · 画面已变"
+        CompositionOutcome.FAILED -> "分析失败 · $duration"
+        null -> "上次分析 · $duration"
+    }
+}
+
+private fun formatInferenceTime(milliseconds: Long): String = if (milliseconds >= 1_000L) {
+    "%.1f 秒".format(milliseconds / 1_000f)
+} else {
+    "$milliseconds ms"
 }
 
 @Composable

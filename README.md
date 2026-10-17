@@ -68,7 +68,7 @@
 
 #### Local-first composition · 本地构图（实验性）
 
-构图辅助采用可关闭的双支路本地通道：高频支路追踪主体，低频支路判断整体构图。两条支路共享一次相机分析采样，各自只保留最新帧，结果叠回当前取景作为参考，不自动改变曝光、对焦、变焦或快门。完整 SOP 见 [端侧构图双支路 SOP](docs/composition-pipeline-sop.md)。
+构图辅助的目标是可关闭的双支路本地通道：高频支路追踪主体，低频支路判断整体构图。两条支路共享一次相机分析采样，结果叠回当前取景作为参考，不自动改变曝光、对焦、变焦或快门。下图是目标架构，当前 APK 先运行 SmolVLM 单支路实验。完整 SOP 见 [端侧构图双支路 SOP](docs/composition-pipeline-sop.md)。
 
 ```text
 一次 ImageAnalysis ──> latest-frame 分流 ──┬─> 高频主体框（YOLO-Nano，目标 10–15fps）
@@ -76,18 +76,23 @@
                                                         └─> 中文提示与叠框
 ```
 
-取景帧率和模型处理速率分开：预览目标为 24–30 fps，检测器先以 10–15fps 做真机基准，构图支路目标为 1–2fps，不把预览帧率误写成模型推理次数。模型未安装、结果过期、运行失败或设备不支持并行分析时，不绘制假框，并回退到纯相机模式；分析不会拿走快门锁。
+取景帧率和模型处理速率分开：预览目标为 24–30 fps，检测器后续先以 10–15fps 做真机基准。当前 SmolVLM 一次只处理一帧，完成后按最近耗时休息 3–15 秒，再从相机取新帧；推理期间不排队下一张大图。首次请求预算为 30 秒，可自适应放宽至 60 秒，先验证一帧能否返回可用结果。构图面板显示本次等待时间、最近返回耗时、完成/无有效框/超时状态和下次冷却时间。结果还需通过坐标、帧年龄和场景一致性校验；模型失败或画面已变化时不绘制假框，拍摄与快门保持独立。
 
-当前可运行的低频回退仍是 `SmolVLM 256M`，`SmolVLM 500M` 作为可选对照；YOLOv11-Nano 和 `d1-omni-600M` 尚未锁定可再分发版本、运行时和真机基准。默认 Preview APK **不内置模型权重**，用户需在应用内主动查看固定版本、许可证、体积和 SHA-256 后安装；开发者也可以用项目外模型目录显式构建一个约 192 MB 的本地调试 APK，首次启动时自动导入同一私有模型目录。两种包都不承诺荣耀 Vs3 上的延迟、温升、中文质量或持续实时帧率。运行架构以[双支路 SOP](docs/composition-pipeline-sop.md)为准，模型候选与分发细节见其[模型评估附录](docs/edge-model-plan.md)。
+当前可运行的低频回退仍是 `SmolVLM 256M`，`SmolVLM 500M` 作为可选对照；YOLOv11-Nano 和 `d1-omni-600M` 尚未锁定可再分发版本、运行时和真机基准。本轮本地调试包选择同一固定 revision 的 `cpu-int8` 配置，7 个运行文件共 251.24 MiB；`compact` 配置保留为 173.9 MiB 的可选小包。默认 Preview APK **不内置模型权重**，用户可主动安装；显式内置包首次启动时自动导入应用私有目录。模型来源、版本、许可证和 SHA-256 随清单保留，荣耀 Vs3 延迟与温升仍待验证。运行架构以[双支路 SOP](docs/composition-pipeline-sop.md)为准，模型与分发细节见[模型评估附录](docs/edge-model-plan.md)。
 
 本地模型内置构建（权重不会进入 Git）需要先准备 `/Users/haoxuanli/Downloads/street-snap-models/smolvlm-256m/`，然后执行：
 
 ```sh
+mkdir -p .tooling
+python3 scripts/check_smolvlm_bundle.py \
+  "$HOME/Downloads/street-snap-models/smolvlm-256m" \
+  --profile cpu-int8 --manifest .tooling/first-frame-cpu-int8-manifest.json
 ./gradlew :app:assembleDebug \
-  -PedgeModelDir="$HOME/Downloads/street-snap-models/smolvlm-256m" --offline
+  -PedgeModelDir="$HOME/Downloads/street-snap-models/smolvlm-256m" \
+  -PedgeModelManifest=.tooling/first-frame-cpu-int8-manifest.json --offline
 ```
 
-`edgeModelDir` 只挑选清单中的 7 个 q4/配置文件，并把外部清单转换成运行时 `install.json`；普通 `assemblePreview` 会清理残留的本地 staging，因此不会意外携带模型。
+校验脚本只使用已有本地文件；`cpu-int8` 要求三张图均为 Int8，不会静默混入 Q4。`edgeModelDir` 配合 `edgeModelManifest` 只打包清单选中的 7 个运行文件，普通 `assemblePreview` 会清理残留 staging。模型、清单与 APK 均不提交 Git；较小的 `compact` 配置及复现细节见模型附录。
 
 ### 行色 / Xingse
 
@@ -149,7 +154,7 @@ Android 使用原生实现；iOS 暂留后续方案。首版不引入共享原�
 | Android | Kotlin + Jetpack Compose + CameraX / Camera2 interop | 界面、取景、拍照及设备支持的手动控制 |
 | 行色 | OpenGL ES 3.0 / GLSL | LUT、颗粒、暗角；预览与照片共用效果算法 |
 | 高频主体支路（目标） | YOLOv11-Nano Int8 + ARM64 ONNX Runtime | 320×320 主体检测、置信度筛选、平滑跟随框；具体导出版本与类别表待锁定 |
-| 低频构图支路（当前回退） | SmolVLM ONNX + ONNX Runtime（ARM64） | 抽样帧、归一化构图框与取景器叠加；权重由用户选择安装 |
+| 低频构图支路（当前回退） | SmolVLM ONNX + ONNX Runtime（ARM64）；本地包选 cpu-int8 | 单帧串行、耗时显示与结果校验；有效构图框尚未验收 |
 | 低频构图支路（目标） | d1-omni-600M Q4 ONNX | 384×384 构图建议、结构化 score/problem/bbox；来源、图结构与许可证待锁定 |
 | iOS（后续） | Swift + SwiftUI + AVFoundation；Core Image / Metal | 原生拍摄与实时调色 |
 | 预设文件 | `.cube` + JSON | LUT、影调参数与拍摄参数配置 |
@@ -166,7 +171,7 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
 - [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
-- [ ] **Edge model validation**：256M 固定 revision 的外置 bundle 已完成文件清单与 SHA-256 校验；模型内置调试 APK 已在 Android 35 AVD 完成首次导入并显示 `已安装 · 173.9 MB`。历史 AVD 基线为 19–21 秒且未得到可验收推荐框；当前已加入 24-token 上限、XNNPACK/线程优化、过期帧跳过和约 4.75 秒推理取消预算，优化后的设备延迟、失败恢复、包体与温升仍待荣耀 Vs3 真机验证。
+- [ ] **Edge model validation**：固定 revision、文件校验、模型导入和真实帧推理已跑通。同一通用框任务在 Android 35 AVD 上，`cpu-int8` 返回耗时为 4.3–6.4 秒（视觉编码 3.2–5.1 秒），原 Q4 方案为 16.4 / 17.5 秒；输出仍存在全零框、缺失坐标或只有描述，尚未验收有效框。语义探针能识别电视，图像描述也出现人物幻觉，不能视为可靠定位。下一步接入具有定位训练且许可证可核验的检测模型；荣耀 Vs3 性能与温升仍待真机验证。
 - [ ] **Dual-branch composition**：共享 latest-frame 分流总线；接入已核验的主体检测器与低频构图模型，完成坐标统一、框平滑、结构化输出校验、失败降级和真机负载基线。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
@@ -178,9 +183,9 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 
 | 取景与快拍 | 相机外观与持握 | 端侧模型选择 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和已安装 173.9 MB 状态"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含真实推理耗时、冷却时间和已安装 251.2 MB 状态"> |
 
-Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示端侧构图辅助的模型选择与“已安装 · 173.9 MB”状态。Preview APK 默认不带权重；本地 `edgeModelDir` 调试包已在同一模拟器验证自动导入、模型会话和失败降级；实拍效果和设备支持范围以真机为准。
+Android 15 模拟器实际截图，取景为内置测试场景。第一张和第三张来自本轮 CPU Int8 调试包，展示真实返回耗时、“无有效框”状态、冷却时间及“已安装 · 251.2 MB”；第二张展示相机外观和自动/横持/竖持方向。内置包约 300 MB，默认 Preview APK 仍不带权重；实拍效果和设备支持范围以真机为准。
 
 ## 安装与发布
 

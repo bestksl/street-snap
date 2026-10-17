@@ -30,6 +30,16 @@ GRAPH_CANDIDATES = {
         "onnx/decoder_model_merged_quantized.onnx",
     ),
 }
+GRAPH_PROFILES = {
+    "compact": GRAPH_CANDIDATES,
+    # CPU kernels can be faster with Int8 than Q4 even though the APK is larger.
+    # Explicit selection must fail when a graph is absent, never mix profiles.
+    "cpu-int8": {
+        "vision": ("onnx/vision_encoder_quantized.onnx",),
+        "embedding": ("onnx/embed_tokens_quantized.onnx",),
+        "decoder": ("onnx/decoder_model_merged_quantized.onnx",),
+    },
+}
 
 
 def sha256(path: Path) -> str:
@@ -70,6 +80,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path, help="external smolvlm-256m directory")
     parser.add_argument(
+        "--profile", choices=tuple(GRAPH_PROFILES), default="compact",
+        help="compact keeps the original graph preference; cpu-int8 requires all three Int8 graphs",
+    )
+    parser.add_argument(
         "--manifest",
         type=Path,
         help="manifest output path (default: <bundle>/street-snap-manifest.json)",
@@ -88,7 +102,7 @@ def main() -> int:
     try:
         config = json.loads((root / "config.json").read_text(encoding="utf-8"))
         processor = json.loads((root / "preprocessor_config.json").read_text(encoding="utf-8"))
-        graphs = {name: select_graph(root, candidates) for name, candidates in GRAPH_CANDIDATES.items()}
+        graphs = {name: select_graph(root, candidates) for name, candidates in GRAPH_PROFILES[args.profile].items()}
     except (OSError, ValueError, FileNotFoundError) as error:
         print(f"校验失败：{error}", file=sys.stderr)
         return 2
@@ -119,6 +133,7 @@ def main() -> int:
         "repository": "HuggingFaceTB/SmolVLM-256M-Instruct",
         "revision": REVISION,
         "model_type": model_type,
+        "profile": args.profile,
         "graphs": {name: path.relative_to(root).as_posix() for name, path in graphs.items()},
         "files": records,
         "total_bytes": total,
@@ -129,6 +144,7 @@ def main() -> int:
 
     print(f"OK: {root}")
     print(f"revision: {REVISION}")
+    print(f"profile: {args.profile}")
     print(f"files: {len(files)}")
     print(f"size: {total / (1024 * 1024):.1f} MiB")
     print(f"manifest: {manifest_path}")

@@ -46,7 +46,7 @@ internal class LatestFrameGate<T>(
 }
 
 /** Uses elapsed time, not wall time, and handles a new camera session explicitly. */
-internal class FrameSampleClock(private val minimumIntervalNs: Long) {
+internal class FrameSampleClock(private var minimumIntervalNs: Long) {
     private var lastAcceptedNs: Long? = null
 
     init { require(minimumIntervalNs > 0) }
@@ -59,4 +59,38 @@ internal class FrameSampleClock(private val minimumIntervalNs: Long) {
     }
 
     fun reset() { lastAcceptedNs = null }
+
+    fun setMinimumIntervalNs(value: Long) {
+        require(value > 0)
+        minimumIntervalNs = value
+    }
+}
+
+/** The next frame is captured after inference finishes and the device has had time to rest. */
+internal class SerialFrameClock(private var minimumIntervalNs: Long) {
+    private var inFlight = false
+    private var completedAtNs: Long? = null
+
+    init { require(minimumIntervalNs > 0) }
+
+    fun accept(nowNs: Long): Boolean {
+        if (inFlight) return false
+        val completed = completedAtNs
+        if (completed != null && nowNs >= completed && nowNs - completed < minimumIntervalNs) return false
+        inFlight = true
+        return true
+    }
+
+    fun complete(nowNs: Long) {
+        inFlight = false
+        completedAtNs = nowNs
+    }
+
+    // An invalidation must not allow a second bitmap while the previous inference is unwinding.
+    fun reset() { completedAtNs = null }
+
+    fun setMinimumIntervalNs(value: Long) {
+        require(value > 0)
+        minimumIntervalNs = value
+    }
 }

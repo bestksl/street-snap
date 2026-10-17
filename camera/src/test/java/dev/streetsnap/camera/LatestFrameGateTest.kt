@@ -103,4 +103,46 @@ class LatestFrameGateTest {
         clock.reset()
         assertTrue(clock.accept(1752))
     }
+
+    @Test
+    fun samplingIntervalCanBackOffWithoutRebuildingTheSource() {
+        val clock = FrameSampleClock(1_000)
+        assertTrue(clock.accept(0))
+        assertFalse(clock.accept(999))
+        clock.setMinimumIntervalNs(3_000)
+        assertFalse(clock.accept(2_999))
+        assertTrue(clock.accept(3_000))
+    }
+
+    @Test
+    fun slowInferenceDoesNotQueueFramesAndRestsAfterCompletion() {
+        val clock = SerialFrameClock(3_000)
+        assertTrue(clock.accept(0))
+        // A 20-second inference must never allocate another full-size input bitmap.
+        for (time in 100L..20_000L step 100) assertFalse(clock.accept(time))
+        clock.complete(20_000)
+        assertFalse(clock.accept(22_999))
+        assertTrue(clock.accept(23_000))
+    }
+
+    @Test
+    fun invalidationCannotOverlapAnInferenceThatIsStillUnwinding() {
+        val clock = SerialFrameClock(3_000)
+        assertTrue(clock.accept(0))
+        clock.reset()
+        assertFalse(clock.accept(20_000))
+        clock.complete(20_100)
+        assertFalse(clock.accept(23_099))
+        assertTrue(clock.accept(23_100))
+    }
+
+    @Test
+    fun measuredLatencyCanIncreaseTheRestPeriodWhileTheInferenceRuns() {
+        val clock = SerialFrameClock(3_000)
+        assertTrue(clock.accept(0))
+        clock.setMinimumIntervalNs(15_000)
+        clock.complete(20_000)
+        assertFalse(clock.accept(34_999))
+        assertTrue(clock.accept(35_000))
+    }
 }

@@ -8,6 +8,8 @@ import ai.onnxruntime.TensorInfo
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Process
+import android.os.SystemClock
+import android.util.Log
 import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
@@ -39,6 +41,7 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
     private val kvHeads: Int
     private val headSize: Int
     private val layers: Int
+    private val cacheOutputs: Map<String, String>
     private val lock = Any()
     private val closed = AtomicBoolean(false)
     private val running = AtomicBoolean(false)
@@ -88,7 +91,7 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
                             // XNNPACK is present in the trimmed ARM64 ORT runtime and
                             // is particularly effective for the FP32 vision encoder.
                             // Unsupported nodes are automatically kept on CPU.
-                            options.addXnnpack(emptyMap<String, String>())
+                            options.addXnnpack(mapOf("intra_op_num_threads" to intraOpThreads.toString()))
                         }
                         // XNNPACK owns its own worker pool; keeping ORT's pool at
                         // one avoids nested oversubscription in the vision graph.
@@ -114,6 +117,11 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
             require(decoder.inputNames.containsAll(listOf("inputs_embeds", "attention_mask", "position_ids"))) { "解码器接口不兼容" }
             require((decoder.inputInfo.getValue("inputs_embeds").info as TensorInfo).type == OnnxJavaType.FLOAT) { "需要 FP32 输入的 q4 模型" }
             require(decoder.inputNames.count { it.startsWith("past_key_values.") } == layers * 2) { "模型 KV 缓存接口不兼容" }
+            cacheOutputs = decoder.inputNames.filter { it.startsWith("past_key_values.") }.associateWith { input ->
+                val suffix = input.removePrefix("past_key_values.")
+                decoder.outputNames.singleOrNull { it.startsWith("present") && it.endsWith(".$suffix") }
+                    ?: error("模型缺少或含有重复 KV 缓存输出")
+            }
         } catch (error: Throwable) {
             opened.asReversed().forEach { runCatching { it.close() } }
             worker.shutdown()
@@ -185,6 +193,8 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
     }
 
     private fun infer(frame: ImageInput, prompt: String, options: OrtSession.RunOptions): CompositionSuggestion? {
+        val startedAt = SystemClock.elapsedRealtime()
+        Log.i(LOG_TAG, "stage=vision image=${frame.width}x${frame.height}")
         val pixelRank = (vision.inputInfo.getValue("pixel_values").info as TensorInfo).shape.size
         val maskRank = (vision.inputInfo.getValue("pixel_attention_mask").info as TensorInfo).shape.size
         require(pixelRank == 5 && maskRank == 4) { "视觉模型输入维度不兼容" }
@@ -199,17 +209,34 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
                 }
             }
         }
-        require(features.isNotEmpty() && features.size % hiddenSize == 0)
+        require(features.isNotEmpty() && features.size % hiddenSize == 0 && features.all { it.isFinite() }) {
+            "视觉特征无效"
+        }
         val imageTokens = features.size / hiddenSize
         require(imageTokens in 1..256) { "视觉 token 数超出限制" }
+        val visionMs = SystemClock.elapsedRealtime() - startedAt
+        Log.i(LOG_TAG, "vision_ms=$visionMs image_tokens=$imageTokens image=${frame.width}x${frame.height}")
         val imagePrompt = "<fake_token_around_image><global-img>" + "<image>".repeat(imageTokens) + "<fake_token_around_image>"
         var ids = tokenizer.encode("<|im_start|>User:$imagePrompt$prompt<end_of_utterance>\nAssistant:")
         require(ids.size <= 512 && ids.count { it == imageToken } == imageTokens) { "构图提示过长或图像 token 不匹配" }
         val generated = ArrayList<Int>()
         var past: OrtSession.Result? = null
         var position = 0
+        var prefillMs = 0L
+        var decodeMs = 0L
+        var completed = false
+        var valid = false
+        fun finish(): CompositionSuggestion? {
+            completed = true
+            val response = tokenizer.decode(generated)
+            // Raw generated text stays opt-in for local diagnostics, because it can
+            // describe a private camera scene. Normal logs contain only timings.
+            if (Log.isLoggable(LOG_TAG, Log.DEBUG)) Log.d(LOG_TAG, "answer=${response.take(256).replace('\n', ' ')}")
+            return remap(CompositionSuggestion.parse(response), frame).also { valid = it != null }
+        }
         try {
             for (step in 0 until MAX_OUTPUT_TOKENS) {
+                val stepStartedAt = SystemClock.elapsedRealtime()
                 val temporary = mutableListOf<OnnxTensor>()
                 var embeddingResult: OrtSession.Result? = null
                 try {
@@ -241,19 +268,22 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
                     for (layer in 0 until layers) for (kind in listOf("key", "value")) {
                         val name = "past_key_values.$layer.$kind"
                         val cached = past?.let { output ->
-                            val candidates = decoder.outputNames.filter { name ->
-                                name.contains("present") && name.endsWith(".$layer.$kind")
-                            } + listOf("present.$layer.$kind", "present_key_values.$layer.$kind")
-                            candidates.asSequence().distinct().firstNotNullOfOrNull {
-                                output.get(it).orElse(null) as? OnnxTensor
-                            }
-                                ?: error("模型缺少输出 KV 缓存")
+                            output.tensor(cacheOutputs.getValue(name))
                         } ?: emptyCacheTensor(name).also { temporary += it }
                         feeds[name] = cached
                     }
                     val next = decoder.run(feeds, options)
                     past?.close()
                     past = next
+                    val cacheShape = next.tensor(cacheOutputs.getValue("past_key_values.0.key")).info.shape
+                    require(cacheShape.size == 4 && cacheShape[2] == (position + ids.size).toLong()) {
+                        "模型 KV 缓存序列长度不匹配"
+                    }
+                    val stepMs = SystemClock.elapsedRealtime() - stepStartedAt
+                    if (step == 0) {
+                        prefillMs = stepMs
+                        Log.i(LOG_TAG, "prefill_ms=$prefillMs prompt_tokens=${ids.size}")
+                    } else decodeMs += stepMs
                     val logits = next.tensor("logits")
                     val shape = logits.info.shape
                     val vocabulary = shape.last().toInt()
@@ -269,7 +299,7 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
                     if (!value.isFinite() || best == endToken || best == 2) break
                     generated += best
                     val response = tokenizer.decode(generated)
-                    if (']' in response) return remap(CompositionSuggestion.parse(response), frame)
+                    if (']' in response) return finish()
                     position += ids.size
                     ids = longArrayOf(best.toLong())
                 } finally {
@@ -277,8 +307,12 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
                     embeddingResult?.close()
                 }
             }
-            return remap(CompositionSuggestion.parse(tokenizer.decode(generated)), frame)
-        } finally { past?.close() }
+            return finish()
+        } finally {
+            past?.close()
+            Log.i(LOG_TAG, "total_ms=${SystemClock.elapsedRealtime() - startedAt} vision_ms=$visionMs " +
+                "prefill_ms=$prefillMs decode_ms=$decodeMs output_tokens=${generated.size} completed=$completed valid=$valid")
+        }
     }
 
     private fun remap(suggestion: CompositionSuggestion?, frame: ImageInput): CompositionSuggestion? {
@@ -322,13 +356,13 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
         get(name).orElse(null) as? OnnxTensor ?: error("模型缺少 $name 输出")
 
     companion object {
-        // A crop box is a short coordinate tuple. Keeping malformed generations bounded
-        // prevents a slow phone from spending another dozen decoder passes producing
-        // prose that the UI cannot render. Valid SmolVLM answers normally finish well
-        // below this ceiling; the old 64-token limit could make one stale frame occupy
-        // the single inference worker for 20+ seconds.
-        const val MAX_OUTPUT_TOKENS = 24
-        const val DEFAULT_PROMPT = "Return only [left,top,right,bottom] integers 0-1000 " +
-            "relative to the full square image; keep the main subject and avoid padding."
+        private const val LOG_TAG = "StreetSnapVlm"
+        // Digits are separate tokens. Four coordinates plus spaces, punctuation,
+        // and a short answer prefix can exceed 24 tokens, so permit a complete
+        // tuple while the caller independently bounds each sampled-frame request.
+        const val MAX_OUTPUT_TOKENS = 40
+        const val DEFAULT_PROMPT = "Locate the main subject in this image. " +
+            "Return its bounding box as [left,top,right,bottom], using integers from 0 to 1000 " +
+            "relative to the full image. Return only the four coordinates."
     }
 }

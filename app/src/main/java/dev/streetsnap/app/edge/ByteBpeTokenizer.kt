@@ -14,6 +14,7 @@ internal class ByteBpeTokenizer(file: File) {
     private val special: Map<String, Int>
     private val specialPattern: Pattern
     private val pieces: Pattern
+    private val individualDigits: Boolean
     private val byteToChar: CharArray = byteAlphabet()
     private val charToByte = byteToChar.withIndex().associate { it.value to it.index }
     private val cache = object : LinkedHashMap<String, IntArray>(256, .75f, true) {
@@ -46,7 +47,7 @@ internal class ByteBpeTokenizer(file: File) {
         val preTokenizer = json.getJSONObject("pre_tokenizer")
         var regex: String? = null
         var byteLevelFound = false
-        var individualDigits = false
+        var splitDigits = false
         fun readPreTokenizer(node: JSONObject) {
             when (node.getString("type")) {
                 "Sequence" -> node.getJSONArray("pretokenizers").let { list ->
@@ -61,14 +62,13 @@ internal class ByteBpeTokenizer(file: File) {
                     // Keep the split explicit so runs such as "256" remain three
                     // byte-level pieces, matching the Rust tokenizer contract.
                     require(node.optBoolean("individual_digits")) { "不支持合并数字预处理" }
-                    individualDigits = true
+                    splitDigits = true
                 }
                 "ByteLevel" -> {
                     require(!node.optBoolean("add_prefix_space")) { "不支持自动添加前缀空格" }
                     byteLevelFound = true
                     if (regex == null && node.optBoolean("use_regex", true)) {
-                        val numbers = if (individualDigits) " ?[\\p{N}]" else " ?[\\p{N}]+"
-                        regex = "'s|'t|'re|'ve|'m|'ll|'d| ?[\\p{L}]+|$numbers| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
+                        regex = "'s|'t|'re|'ve|'m|'ll|'d| ?[\\p{L}]+| ?[\\p{N}]+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
                     }
                 }
                 else -> error("不支持的 tokenizer 预处理")
@@ -77,6 +77,7 @@ internal class ByteBpeTokenizer(file: File) {
         readPreTokenizer(preTokenizer)
         require(byteLevelFound && regex != null) { "Tokenizer 缺少字节预处理" }
         pieces = Pattern.compile(requireNotNull(regex))
+        individualDigits = splitDigits
     }
 
     fun specialId(token: String): Int = special[token] ?: error("模型缺少 $token")
@@ -95,6 +96,24 @@ internal class ByteBpeTokenizer(file: File) {
     }
 
     private fun encodePlain(text: String, output: MutableList<Long>) {
+        if (!individualDigits) {
+            encodePieces(text, output)
+            return
+        }
+        // Digits is a separate pre-tokenizer before ByteLevel, so neither a
+        // preceding space nor a following digit may merge with a numeric token.
+        // Combining both stages into one regex incorrectly allows " 1" merges.
+        val digits = DIGITS.matcher(text)
+        var previous = 0
+        while (digits.find()) {
+            encodePieces(text.substring(previous, digits.start()), output)
+            encodePieces(digits.group(), output)
+            previous = digits.end()
+        }
+        encodePieces(text.substring(previous), output)
+    }
+
+    private fun encodePieces(text: String, output: MutableList<Long>) {
         val matcher = pieces.matcher(text)
         var covered = 0
         while (matcher.find()) {
@@ -136,5 +155,9 @@ internal class ByteBpeTokenizer(file: File) {
         val printable = ((33..126) + (161..172) + (174..255)).toSet()
         var extra = 256
         return CharArray(256) { byte -> if (byte in printable) byte.toChar() else (extra++).toChar() }
+    }
+
+    companion object {
+        private val DIGITS = Pattern.compile("[\\p{N}]")
     }
 }
