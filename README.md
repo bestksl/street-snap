@@ -163,11 +163,11 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 
 ## Interface
 
-| 取景与快拍 | 行色 · 影调微调 | WB · 白平衡漂移 |
+| 取景与快拍 | 相机外观与持握 | 端侧模型选择 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧取景界面，包含 28 / 35 / 50mm 视角按钮、构图网格与快门"> | <img src="docs/images/color-controls.png" width="250" alt="行色调整面板，粉末蓝预设与饱和度调节"> | <img src="docs/images/white-balance.png" width="250" alt="白平衡预设与 A–B、G–M 漂移控制"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和安装状态"> |
 
-Android 15 模拟器中的实际 APK 截图，取景为内置测试场景。28 / 35 / 50mm 按钮固定显示，不支持的视角置灰；图中模拟器使用原生视角。实拍效果以设备为准。
+Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示可选端侧构图辅助的模型选择与“未安装”状态。模型权重不随当前 APK 分发，实拍效果和设备支持范围以真机为准。
 
 ## 安装与发布
 
