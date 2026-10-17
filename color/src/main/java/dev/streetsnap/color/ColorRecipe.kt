@@ -2,7 +2,10 @@ package dev.streetsnap.color
 
 enum class ColorPreset(val displayName: String) {
     ORIGINAL("原色"), POSITIVE("正片"), NEGATIVE("负片"), POWDER_BLUE("粉末蓝"),
-    MONO("黑白"), SUNNY("晴街"), CUSTOM("自定义")
+    MONO("高反差黑白"), SUNNY("晴街"), CUSTOM("自定义"),
+    CLASSIC_CHROME("CC · 经典正片"), CLASSIC_NEGATIVE("NC · 经典负片"),
+    NOSTALGIC_NEGATIVE("NA · 怀旧负片"), ACROS("ACROS · 黑白"),
+    LUMIX_NATURAL("自然"), LUMIX_MONO("L.单色")
 }
 
 /**

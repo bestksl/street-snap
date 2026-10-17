@@ -74,7 +74,9 @@ internal object ColorShaders {
 
         vec3 brightAt(vec2 uv) {
             vec3 color = grade(sourceAt(uv));
-            return color * smoothstep(0.58, 0.94, luminance(color));
+            // A soft high-light knee excludes middle gray, so wider diffusion does not wash
+            // an evenly lit scene with a gray veil. Exposure still determines light sources.
+            return color * smoothstep(0.66, 0.94, luminance(color));
         }
 
         float localLuma(vec2 uv, vec2 radius) {
@@ -128,7 +130,9 @@ internal object ColorShaders {
             if (uHdf > 0.0) {
                 // Diffuse bright light over the untouched center detail, instead of blurring it.
                 vec3 glow = texture(uBloom, vUv).rgb;
-                color += (1.0 - clamp(color, 0.0, 1.0)) * glow * uHdf * 0.60;
+                // Screen-style light scattering preserves the original bright center. The
+                // broader bloom is visible around lamps/windows even at the default 0.4.
+                color += (1.0 - clamp(color, 0.0, 1.0)) * glow * uHdf * 1.25;
             }
             vec2 centered = (vUv - 0.5) * 1.41421356;
             float falloff = smoothstep(0.25, 1.0, dot(centered, centered));

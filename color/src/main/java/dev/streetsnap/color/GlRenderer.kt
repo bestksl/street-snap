@@ -250,16 +250,21 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
 
         GLES30.glUniform1i(uniform("uPass"), 2)
-        val radius = minOf(bloomWidth, bloomHeight) * .006f
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[1])
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
-        GLES30.glUniform2f(uniform("uBloomStep"), radius / bloomWidth, 0f)
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        // Two successive scales widen the visible halo and soften sparse point highlights.
+        // Both run only on the bounded bloom textures, reusing the same two buffers.
+        for (pass in 0..1) {
+            val fraction = if (pass == 0) .008f else .014f
+            val radius = minOf(bloomWidth, bloomHeight) * fraction
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[1])
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
+            GLES30.glUniform2f(uniform("uBloomStep"), radius / bloomWidth, 0f)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
 
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[0])
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[1])
-        GLES30.glUniform2f(uniform("uBloomStep"), 0f, radius / bloomHeight)
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[0])
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[1])
+            GLES30.glUniform2f(uniform("uBloomStep"), 0f, radius / bloomHeight)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        }
         checkGl("扩散高光")
         bloomValid = true
     }

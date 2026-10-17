@@ -25,7 +25,8 @@ class PhotoSaver(private val context: Context) {
         "street-snap ${context.packageManager.getPackageInfo(context.packageName, 0).versionName}"
     }
     /** CameraX already crops the JPEG to the PreviewView viewport; only EXIF orientation is applied. */
-    suspend fun save(capture: CaptureResult, engine: ColorEngine, recipe: ColorRecipe, customLut: CubeLut?): Uri = withContext(Dispatchers.IO) {
+    suspend fun save(capture: CaptureResult, engine: ColorEngine, recipe: ColorRecipe, customLut: CubeLut?,
+        capturedAt: LocalDateTime = LocalDateTime.now()): Uri = withContext(Dispatchers.IO) {
         val sourceFile = capture.jpegFile
         val renderedFile = File.createTempFile("street-snap-render-", ".jpg", context.cacheDir)
         var input: Bitmap? = null
@@ -74,7 +75,7 @@ class PhotoSaver(private val context: Context) {
             destinationExif.setAttribute(ExifInterface.TAG_COLOR_SPACE, "1") // Output is explicitly converted to sRGB.
             destinationExif.saveAttributes()
 
-            val name = "STREET_${LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))}.jpg"
+            val name = "STREET_${capturedAt.format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss_SSS"))}.jpg"
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, name)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")

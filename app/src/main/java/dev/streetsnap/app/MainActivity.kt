@@ -1,9 +1,11 @@
 package dev.streetsnap.app
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ActivityInfo
 import android.graphics.Color as AndroidColor
 import android.net.Uri
 import android.os.Bundle
@@ -79,6 +81,17 @@ class MainActivity : ComponentActivity() {
         hasWindowFocus() && volumeShutter?.invoke(false) == true
 
     fun hasCameraPermission() = checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+
+    @SuppressLint("SourceLockedOrientationActivity")
+    fun applyCaptureOrientation(preference: String) {
+        val orientation = when (CameraPreferences.orientation(preference)) {
+            "LANDSCAPE" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            "PORTRAIT" -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            else -> ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
+        }
+        // Avoid repeated configuration requests during ordinary Compose state updates.
+        if (requestedOrientation != orientation) requestedOrientation = orientation
+    }
 
     fun openAppSettings() {
         startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))

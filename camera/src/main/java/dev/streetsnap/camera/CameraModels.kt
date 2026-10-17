@@ -13,7 +13,7 @@ enum class FocalLength(val equivalentMm: Int?) {
     }
 }
 
-/** Manual exposure is active only when both values are provided. Focus is in diopters, not metres. */
+/** Both exposure values mean M; time alone means supported S; neither means P. Focus is in diopters. */
 data class CaptureSettings(
     val focalLength: FocalLength = FocalLength.MM28,
     val exposureCompensationIndex: Int = 0,
@@ -22,17 +22,23 @@ data class CaptureSettings(
     val focusDistanceDiopters: Float? = null,
     val autoExposureLocked: Boolean = false,
     val whiteBalance: WhiteBalanceMode = WhiteBalanceMode.AUTO,
-)
+) {
+    val exposureMode: ExposureMode get() = ExposurePolicy.mode(iso, exposureTimeNs)
+}
 
 data class CameraState(
     val isBound: Boolean = false,
     val isReady: Boolean = false,
     val isCapturing: Boolean = false,
     val isFocusing: Boolean = false,
+    val focusResult: Boolean? = null,
+    val isFocusLocked: Boolean = false,
     val capabilities: CameraCapabilities? = null,
     val settings: CaptureSettings = CaptureSettings(),
     val zoomRatio: Float = 1f,
     val error: String? = null,
+    val compositionAnalysisActive: Boolean = false,
+    val compositionAnalysisError: String? = null,
 )
 
 data class CameraCapabilities(
@@ -54,11 +60,20 @@ data class CameraCapabilities(
     val supportsManualFocus: Boolean,
     val minimumFocusDistanceDiopters: Float?,
     val focusDistanceCalibration: String,
+    /** Device capability only; CameraX owns the active AF mode and tap-focus trigger. */
+    val autoFocusMode: Int? = null,
     val supportsAutoExposureLock: Boolean,
     val supportsFocusMetering: Boolean,
     val notes: List<String>,
     val whiteBalanceModes: List<WhiteBalanceMode> = listOf(WhiteBalanceMode.AUTO),
+    val supportsShutterPriority: Boolean = false,
+    val fixedAperture: Float? = null,
 ) {
+    val exposureModes: List<ExposureMode> get() = buildList {
+        add(ExposureMode.PROGRAM)
+        if (supportsShutterPriority) add(ExposureMode.SHUTTER_PRIORITY)
+        if (supportsManualExposure) add(ExposureMode.MANUAL)
+    }
     fun toJson(): String = CameraCapabilityJson.encode(this)
 }
 

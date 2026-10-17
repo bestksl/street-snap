@@ -28,8 +28,13 @@ internal object CameraCapabilityJson {
             put("exposureTimeMinNs", value.exposureTimeMinNs ?: JSONObject.NULL)
             put("exposureTimeMaxNs", value.exposureTimeMaxNs ?: JSONObject.NULL)
         })
+        put("exposureModes", JSONArray(value.exposureModes.map { it.label }))
+        put("shutterPrioritySupported", value.supportsShutterPriority)
+        put("fixedAperture", value.fixedAperture ?: JSONObject.NULL)
         put("focus", JSONObject().apply {
             put("manualSupported", value.supportsManualFocus)
+            put("autoSupported", value.autoFocusMode != null)
+            put("autoMode", value.autoFocusMode ?: JSONObject.NULL)
             put("maximumDiopters", value.minimumFocusDistanceDiopters ?: JSONObject.NULL)
             put("distanceCalibration", value.focusDistanceCalibration)
             put("meteringSupported", value.supportsFocusMetering)

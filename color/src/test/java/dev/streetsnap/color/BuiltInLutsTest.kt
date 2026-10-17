@@ -6,7 +6,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class BuiltInLutsTest {
-    private val looks = listOf(BuiltInLuts.positive, BuiltInLuts.negative, BuiltInLuts.powderBlue)
+    private val looks = listOf(
+        BuiltInLuts.positive, BuiltInLuts.negative, BuiltInLuts.powderBlue, BuiltInLuts.mono,
+        BuiltInLuts.sunny, BuiltInLuts.classicChrome, BuiltInLuts.classicNegative,
+        BuiltInLuts.nostalgicNegative, BuiltInLuts.acros, BuiltInLuts.lumixNatural, BuiltInLuts.lumixMono,
+    )
 
     @Test fun authoredLooksKeepTheEntireSdrCubeFiniteAndBounded() {
         for (lut in looks) {
@@ -23,8 +27,9 @@ class BuiltInLutsTest {
                 val neutral = step / 100f
                 val sample = lut.sample(neutral, neutral, neutral)
                 val brightness = luma(sample)
-                assertTrue("${lut.title} reverses the neutral ramp", brightness >= previous)
-                assertTrue("${lut.title} adds excessive neutral color", sample.max() - sample.min() < .055f)
+                assertTrue("${lut.title} reverses the neutral ramp at $step", brightness + .000001f >= previous)
+                val castLimit = if (lut === BuiltInLuts.sunny) .06f else .055f
+                assertTrue("${lut.title} adds excessive neutral color", sample.max() - sample.min() < castLimit)
                 previous = brightness
             }
         }
@@ -50,11 +55,10 @@ class BuiltInLutsTest {
         // Blue is selectively restrained, while a warm subject keeps a warm channel ordering.
         val warm = BuiltInLuts.powderBlue.sample(.72f, .48f, .36f)
         assertTrue(warm[0] > warm[1] && warm[1] > warm[2])
-        assertEquals(.72f - .48f, warm[0] - warm[1], .00001f)
-        assertEquals(.48f - .36f, warm[1] - warm[2], .00001f)
+        assertTrue(warm[0] - warm[2] > .28f)
     }
 
-    @Test fun powderBluePreservesBlackWhiteAndNeutralColorWhileLiftingMiddleTones() {
+    @Test fun powderBlueKeepsEndpointsAndLiftsMidtonesWithControlledCoolShadows() {
         val lut = BuiltInLuts.powderBlue
         assertArrayEquals(floatArrayOf(0f, 0f, 0f), lut.sample(0f, 0f, 0f), .00001f)
         assertArrayEquals(floatArrayOf(1f, 1f, 1f), lut.sample(1f, 1f, 1f), .00001f)
@@ -63,10 +67,59 @@ class BuiltInLutsTest {
         val high = lut.sample(.9f, .9f, .9f)
         assertTrue(luma(middle) - .5f > luma(low) - .1f)
         assertTrue(luma(middle) - .5f > luma(high) - .9f)
-        for (sample in listOf(low, middle, high)) {
-            assertEquals(sample[0], sample[1], .00001f)
-            assertEquals(sample[1], sample[2], .00001f)
+        assertTrue(low[2] > low[1] && low[1] > low[0])
+        assertTrue(middle[2] - middle[0] in .015f.. .04f)
+        assertEquals(high[0], high[2], .005f)
+    }
+
+    @Test fun powderBlueRespondsToMutedNavyAndDoesNotNeedAnAlreadyVividSky() {
+        val navy = floatArrayOf(.16f, .19f, .25f)
+        val result = BuiltInLuts.powderBlue.sample(navy[0], navy[1], navy[2])
+        assertTrue(luma(result) - luma(navy) > .05f)
+        assertTrue(result[2] > result[1] && result[1] > result[0])
+        // Cyan/blue separation from red must survive the midtone lift.
+        assertTrue(result[1] - result[0] > navy[1] - navy[0])
+        assertTrue(result[2] - result[0] > .09f)
+    }
+
+    @Test fun fujiStyleChoicesHaveDistinctMeasuredTonalDirections() {
+        val shadow = floatArrayOf(.20f, .20f, .20f)
+        val ccShadow = luma(BuiltInLuts.classicChrome.sample(shadow[0], shadow[1], shadow[2]))
+        assertTrue(ccShadow < .19f)
+        val red = floatArrayOf(.70f, .30f, .23f)
+        val ccRed = BuiltInLuts.classicChrome.sample(red[0], red[1], red[2])
+        assertTrue(ccRed.max() - ccRed.min() < .38f)
+        val ncShadow = luma(BuiltInLuts.classicNegative.sample(.20f, .20f, .20f))
+        val ncHighlight = luma(BuiltInLuts.classicNegative.sample(.80f, .80f, .80f))
+        assertTrue(ncHighlight - ncShadow > .67f)
+        val naHighlight = BuiltInLuts.nostalgicNegative.sample(.75f, .75f, .75f)
+        assertTrue(naHighlight[0] > naHighlight[1] && naHighlight[1] > naHighlight[2])
+        assertTrue(naHighlight[0] - naHighlight[2] > .03f)
+        assertTrue(luma(BuiltInLuts.nostalgicNegative.sample(.20f, .20f, .20f)) > .20f)
+    }
+
+    @Test fun threeMonochromeLooksAreNeutralAndKeepDifferentShadowSeparation() {
+        for (lut in listOf(BuiltInLuts.mono, BuiltInLuts.acros, BuiltInLuts.lumixMono)) {
+            for (rgb in listOf(floatArrayOf(.7f,.3f,.1f), floatArrayOf(.1f,.2f,.9f))) {
+                val value = lut.sample(rgb[0], rgb[1], rgb[2])
+                assertEquals(value[0], value[1], .00001f)
+                assertEquals(value[1], value[2], .00001f)
+            }
         }
+        val hard = luma(BuiltInLuts.mono.sample(.20f, .20f, .20f))
+        val acros = luma(BuiltInLuts.acros.sample(.20f, .20f, .20f))
+        val lumix = luma(BuiltInLuts.lumixMono.sample(.20f, .20f, .20f))
+        assertTrue(hard + .04f < acros)
+        assertTrue(acros + .01f < lumix)
+    }
+
+    @Test fun lumixNaturalKeepsNeutralBalanceAndGentleColor() {
+        val gray = BuiltInLuts.lumixNatural.sample(.5f, .5f, .5f)
+        assertEquals(gray[0], gray[1], .00001f)
+        assertEquals(gray[1], gray[2], .00001f)
+        assertTrue(gray[0] in .51f.. .53f)
+        val red = BuiltInLuts.lumixNatural.sample(.7f, .3f, .2f)
+        assertTrue(red[0] - red[2] in .45f.. .49f)
     }
 
     private fun luma(rgb: FloatArray) = rgb[0] * .2126f + rgb[1] * .7152f + rgb[2] * .0722f

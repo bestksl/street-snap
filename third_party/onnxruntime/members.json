@@ -1,0 +1,56 @@
+[
+  {
+    "name": "AndroidManifest.xml",
+    "compressed": 145,
+    "size": 196,
+    "method": 8,
+    "crc32": 3830050791,
+    "offset": 495,
+    "sha256": "2dfe40ce07fea84e4f3f79b70467cb53f4146951dde91a11c104a13aa8fb9574"
+  },
+  {
+    "name": "META-INF/com/android/build/gradle/aar-metadata.properties",
+    "compressed": 85,
+    "size": 121,
+    "method": 8,
+    "crc32": 4276349967,
+    "offset": 709,
+    "sha256": "1a8a8d22989d9e2cc01fc939068f7f96dad91b3d2630715d070cefc57be53809"
+  },
+  {
+    "name": "R.txt",
+    "compressed": 2,
+    "size": 0,
+    "method": 8,
+    "crc32": 0,
+    "offset": 901,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "name": "classes.jar",
+    "compressed": 104726,
+    "size": 110932,
+    "method": 8,
+    "crc32": 3897937385,
+    "offset": 958,
+    "sha256": "32eaa4b185ab1935dc80ae034c8fbf8a140633268a7eaed98fc65fb25f337835"
+  },
+  {
+    "name": "jni/arm64-v8a/libonnxruntime.so",
+    "compressed": 6560686,
+    "size": 18214224,
+    "method": 8,
+    "crc32": 2435166433,
+    "offset": 220808,
+    "sha256": "999ecfdb5b5a13e4097487773b6d71ce8a075408a237daab072e8f5e817bd78e"
+  },
+  {
+    "name": "jni/arm64-v8a/libonnxruntime4j_jni.so",
+    "compressed": 29109,
+    "size": 100600,
+    "method": 8,
+    "crc32": 3444035234,
+    "offset": 6781575,
+    "sha256": "5614bd018cca9031c4dbcfc2a3bece42fae52861a92ff09c4bd2491bd93ac758"
+  }
+]

@@ -1,6 +1,6 @@
 # Android 开发与试拍
 
-当前为 v0.2 开发版，支持 Android 12（API 31）及以上、后置相机和 OpenGL ES 3.0。首测设备为荣耀 Vs3，具体 Android / MagicOS 版本、镜头能力和性能数据待连接真机记录。本版功能见 [影调与操作说明](android-v0.2-notes.md)。
+当前源码版本为 v0.3.0-dev，支持 Android 12（API 31）及以上、后置相机和 OpenGL ES 3.0；构图辅助使用可选的 ARM64 端侧模型，模型权重由用户在手机内主动下载。本页后续表格保留 v0.2 发布包的历史验证记录，不能替代 v0.3 真机验收。首测设备为荣耀 Vs3，具体 Android / MagicOS 版本、镜头能力和性能数据待连接真机记录。本版功能见 [胶片与对焦说明](film-and-focus.md)。
 
 ## 构建
 

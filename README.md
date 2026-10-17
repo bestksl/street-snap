@@ -5,7 +5,7 @@
 **street-snap: Open-source cross-platform documentary camera (iOS/Android), crafted for the serendipity of street capture.**
 
 [![Status: Development](https://img.shields.io/badge/status-development-f59e0b?style=flat-square)](#roadmap)
-[![Android: v0.2 dev](https://img.shields.io/badge/Android-v0.2%20dev-3DDC84?style=flat-square&logo=android&logoColor=white)](#安装与发布)
+[![Android: v0.3 dev](https://img.shields.io/badge/Android-v0.3%20dev-3DDC84?style=flat-square&logo=android&logoColor=white)](#安装与发布)
 [![iOS: Later](https://img.shields.io/badge/iOS-later-64748b?style=flat-square&logo=apple&logoColor=white)](#安装与发布)
 [![License: MIT](https://img.shields.io/badge/license-MIT-3b82f6?style=flat-square)](LICENSE)
 
@@ -39,6 +39,12 @@
 - **Small footprint**：精简依赖，结合代码裁剪与资源压缩，尽可能缩小安装包体积。
 - **Fork & tweak**：拍摄、调色代码和内置预设一同开源，欢迎修改代码、制作预设、提交 PR。
 
+### 当前 Android 预览
+
+`v0.3.0-dev` 已把拍摄前的主要决定收进取景界面：28 / 35 / 50mm 视角、P / S / M 曝光档、EV、AF / MF、白平衡与 A–B / G–M 漂移、HDF 柔光和按相机分类的影调。**复位**会回到 P、EV 0、解除焦点锁并在设备支持时恢复 AF，同时保留焦段、白平衡和当前影调。固定光圈的手机不会伪造 A 档；S / M 也只在 Camera2 报告相应能力时出现。取景方向可以在自动、横持和竖持之间选择，横持布局会把主要控制集中到侧边，方便街拍时单手触达。
+
+拍摄完成后直接保存带 EXIF 的 JPEG，不再叠加边框、日期或“已保存”确认流程。影调卡片使用真实存在的胶片型号作为风格参考，包装图形和配方由项目独立绘制，不代表厂商原厂输出。
+
 项目坚持免费、无广告、无内购。
 
 > **Android 一期开发中，最低支持 Android 12。** 仓库已包含应用源码，首测设备为荣耀 Vs3；相机、GPU 与折叠屏行为仍需真机验证。iOS 后续启动。详见 [一期计划](docs/android-v0.1-plan.md) 与 [开发说明](docs/android-development.md)。
@@ -55,10 +61,23 @@
 - **预设对焦与景深**：规划支持区域对焦的使用方式，让预先选定的距离范围保持可接受的清晰度；可用的对焦设置与实际清晰范围需按镜头验证。
 - **三档视角**：28mm / 35mm / 50mm 等效焦段，一键切换。
 - **盲拍与单手操作**：音量键快门、ADJ 式参数快调，减少对屏幕操作的依赖。
-- **构图辅助**：规划与三档视角对应的参考框、三分线、黄金分割网格与水平仪。
+- **构图辅助**：已接入可选的端侧实验闭环；取景抽样、归一化参考框和失败回退已实现，模型权重与真机质量/延迟仍待验证。
 - **对焦辅助**：规划实时黑白取景与峰值对焦，帮助观察光影和判断手动对焦范围。
 
 手机同样有景深与超焦距的概念，部分广角镜头可以利用较大景深获得近似“泛焦”的效果。Snap 指预设后快速拍摄的方式；泛焦描述较大范围内可接受清晰的效果，实际范围取决于镜头、对焦设置与清晰度要求。
+
+#### Local-first composition · 本地构图（实验性）
+
+构图辅助是一个可以关闭的本地通道：取景器提供独立 RGB 抽样帧，端侧视觉语言模型返回一个归一化矩形 `[left, top, right, bottom]`，再叠回当前取景作为参考框。它不自动改变曝光、对焦、变焦或快门。
+
+```text
+取景帧 ──> KEEP_ONLY_LATEST ──> SmolVLM ONNX ──> [x0,y0,x1,y1] ──> 取景器叠框
+             latest-frame-wins / 有界队列 / 过期结果丢弃
+```
+
+取景帧率和模型处理速率分开：当前实现按节流策略抽样，模型空闲时才接收最新帧，不把 60 fps 误写成 60 次多模态推理。模型未安装、结果过期、运行失败或设备不支持并行分析时，不绘制假框，并回退到纯相机模式；分析不会拿走快门锁。
+
+模型目录默认 `SmolVLM 256M`，`SmolVLM 500M` 作为可选对照。当前 APK **不内置模型权重**，用户需在应用内主动查看固定版本、许可证、体积和 SHA-256 后安装；开发机尚未完成真实权重下载与端到端推理，因此不承诺荣耀 Vs3 上的延迟、温升、中文质量或持续实时帧率。实现边界和后续验证见 [端侧模型说明](docs/edge-model-plan.md)。
 
 ### 行色 / Xingse
 
@@ -94,6 +113,8 @@ Android 开发版提供原色、正片、负片、粉末蓝、黑白、晴街六
 - 保存处理后的照片，并在设备及系统 API 支持时提供 RAW / DNG 输出。
 - 写入系统可提供的 EXIF 拍摄元数据；位置等敏感信息的写入方式将在权限设计中明确。
 - 规划使用 JSON 保存和分享拍摄参数方案；导入时根据设备能力检查适配情况。
+- P / S / M 映射到真实 Camera2 曝光控制；固定光圈设备不模拟 A 档，设备不支持的档位不会显示。
+- 「复位」恢复 P、EV 0、焦点锁和 AF（设备支持时），保留焦段、白平衡与影调配方。
 
 ### Native camera APIs
 
@@ -117,6 +138,7 @@ Android 使用原生实现；iOS 暂留后续方案。首版不引入共享原�
 | --- | --- | --- |
 | Android | Kotlin + Jetpack Compose + CameraX / Camera2 interop | 界面、取景、拍照及设备支持的手动控制 |
 | 行色 | OpenGL ES 3.0 / GLSL | LUT、颗粒、暗角；预览与照片共用效果算法 |
+| 端侧构图（实验） | SmolVLM ONNX + ONNX Runtime（ARM64） | 抽样帧、归一化构图框与取景器叠加；权重由用户选择安装 |
 | iOS（后续） | Swift + SwiftUI + AVFoundation；Core Image / Metal | 原生拍摄与实时调色 |
 | 预设文件 | `.cube` + JSON | LUT、影调参数与拍摄参数配置 |
 
@@ -126,33 +148,36 @@ Rust 可作为后续共享模块的候选，用于 LUT 解析、配方校验或�
 
 ## Roadmap
 
-Android v0.2 开发预览已提供可安装 APK。接下来完善拍照体验与设备验证，再推进 iOS。
+Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验与设备验证，再推进 iOS。
 
 - [x] **Design**：确认 Android 一期范围、最低系统版本与首测设备。
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
-- [x] **Android Preview**：[v0.2.0-dev · SNAP/02](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)，支持 Android 12 及以上版本。
+- [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
+- [ ] **Edge model validation**：锁定可再分发的 256M 权重后完成真实端到端推理、帧抽样共存、失败恢复、包体与真机温升基准；当前开发环境尚未下载权重。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
 - [ ] **iOS**：复用产品交互与配方规范，接入 iOS 原生相机和调色实现。
 
+当前源码已增加 AF/MF 明确切换、点按对焦反馈、P/S/M 曝光档、7 套胶片配方与可选端侧构图辅助。边框和日期打印已移除，照片直接保存为带 EXIF 的 JPEG；实现记录见 [胶片与对焦说明](docs/film-and-focus.md)，模型边界见 [端侧模型说明](docs/edge-model-plan.md)。
+
 ## Interface
 
-| 取景与快拍 | 行色 · 影调微调 | WB · 白平衡漂移 |
+| 取景与快拍 | 相机外观与持握 | 端侧模型选择 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧取景界面，包含 28 / 35 / 50mm 视角按钮、构图网格与快门"> | <img src="docs/images/color-controls.png" width="250" alt="行色调整面板，粉末蓝预设与饱和度调节"> | <img src="docs/images/white-balance.png" width="250" alt="白平衡预设与 A–B、G–M 漂移控制"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和安装状态"> |
 
-Android 15 模拟器中的实际 APK 截图，取景为内置测试场景。28 / 35 / 50mm 按钮固定显示，不支持的视角置灰；图中模拟器使用原生视角。实拍效果以设备为准。
+Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示可选端侧构图辅助的模型选择与“未安装”状态。模型权重不随当前 APK 分发，实拍效果和设备支持范围以真机为准。
 
 ## 安装与发布
 
 **Android 版已可安装，最低支持 Android 12。**
 
-[下载 APK · v0.2.0-dev](https://github.com/bestksl/street-snap/releases/download/v0.2.0-dev/street-snap-v0.2.0-dev.apk) · [Release 说明 · SNAP/02](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)
+[获取 APK](#ci--apk) · [Android 构建说明](docs/android-development.md)
 
 下载后在手机上打开 APK，按系统提示允许本次安装。已安装同签名开发版时，直接覆盖安装可保留拍摄参数与影调设置，无需卸载。
 
-这是用于试拍与反馈的 **Preview 开发预览**：采用开发测试签名、非调试构建，启用 R8 与资源裁剪。机型兼容性、预览与成片一致性、折叠屏行为及性能仍需真机验证，详见 [v0.2 试拍说明](docs/android-v0.2-notes.md)。
+这是用于试拍与反馈的 **Preview 开发预览**：采用开发测试签名、非调试构建，启用 R8 与资源裁剪。v0.3 构建先通过 CI 或本地 Build 产出，真机验证后再创建 Release；机型兼容性、预览与成片一致性、折叠屏行为及性能仍需验证，详见 [Android 试拍说明](docs/android-v0.2-notes.md)。
 
 **iOS** 后续开发，TestFlight 入口将在可用时公布。
 
