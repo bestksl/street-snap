@@ -12,6 +12,29 @@
 
 本轮已建立可选模型目录和用户主动下载接口，但没有把权重放进 APK，也没有在开发机下载权重。首选 `HuggingFaceTB/SmolVLM-256M-Instruct` 的固定 revision `7e3e67edbbed1bf9888184d9df282b700a323964`；官方 ONNX q4 图、嵌入图和视觉图合计约 179 MiB（精确大小以应用读取的 revision 元数据为准）。`SmolVLM-500M-Instruct` 以固定 revision `a588b6298f96d180aff4c31e259409d106b5571e` 作为可选大模型，约 347 MiB 级别。用户必须先查看官方版本、文件大小、许可证和 SHA，再单独点安装；小 APK 不会自动拉取这些权重。
 
+模型下载后可以放在项目外的专属目录，例如 `/Users/haoxuanli/Downloads/street-snap-models/smolvlm-256m/`。使用仓库内的 `scripts/check_smolvlm_bundle.py` 可在不联网的情况下检查配置、三张 ONNX 图、外部数据文件并生成本地 SHA-256 清单；清单只证明本地文件完整，不替代固定 revision 的来源核验。模型文件和生成的清单都不提交 Git。
+
+如果本机已经有 Hugging Face CLI，可用下面的固定 revision 命令下载最小闭环所需文件；`HF_HOME` 也放在项目外，便于缓存和复用：
+
+```sh
+MODEL_DIR="$HOME/Downloads/street-snap-models/smolvlm-256m"
+REV="7e3e67edbbed1bf9888184d9df282b700a323964"
+HF_HOME="$HOME/Downloads/street-snap-models/hf-cache" \
+hf download HuggingFaceTB/SmolVLM-256M-Instruct \
+  --revision "$REV" \
+  --include config.json tokenizer.json tokenizer_config.json preprocessor_config.json \
+  "onnx/vision_encoder_q4*" "onnx/vision_encoder_quantized*" \
+  "onnx/embed_tokens_quantized*" "onnx/embed_tokens_q4*" \
+  "onnx/decoder_model_merged_q4*" "onnx/decoder_model_merged_quantized*" \
+  --local-dir "$MODEL_DIR" --max-workers 2
+```
+
+下载结束后运行：
+
+```sh
+python3 scripts/check_smolvlm_bundle.py "$MODEL_DIR"
+```
+
 ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。没有端到端真实权重测试前，应用将模型状态显示为未验证，不承诺荣耀设备上的延迟、温升、中文质量或持续实时帧率。
 
 需要把两个速度分开：取景帧率由相机和渲染维持，模型按自己的速度处理抽样帧。流式输出文字不等于逐帧视频理解；在荣耀设备上达到多低的延迟，要等实际模型、分辨率和加速后端确定后测量。现阶段不能承诺 30 fps 多模态推理或“完全不影响拍照”。
