@@ -2,7 +2,7 @@
 
 > 本文不是第二套产品路线。唯一的运行架构见 [端侧构图双支路 SOP](composition-pipeline-sop.md)；本文只记录候选模型、运行时、分发方式和验证顺序。当前最小闭环先使用 SmolVLM 低频回退，YOLO 主体支路与 d1-omni 构图支路属于后续目标。
 
-状态：Android 首个实验闭环已接入；SmolVLM 256M 外置权重已完成固定 revision 校验，并在 Android 35 AVD 的独立调试包中完成加载与取帧尝试；荣耀 Vs3 真机基准和可验收构图框仍未完成。资料核对日期：2026-10-17。
+状态：Android 首个实验闭环已接入；SmolVLM 256M 固定 revision 已完成文件校验，并在 Android 35 AVD 的模型内置调试 APK 中完成首次导入、私有目录校验和 ONNX 会话启动；荣耀 Vs3 真机基准和可验收构图框仍未完成。资料核对日期：2026-10-17。
 
 双支路路线已确定：高频主体框与低频构图建议共享一次 `ImageAnalysis` 采样，各自使用有界 latest-only 队列。目标检测器为 YOLOv11-Nano Int8（320×320，先以 10–15fps 做真机基准），目标构图模型为 d1-omni-600M Q4 ONNX（384×384，目标 1–2fps）；当前可运行回退仍是 SmolVLM ONNX。YOLO 和 d1-omni 的具体 revision、图结构、类别表、许可证、SHA-256 和 Android 后端尚未锁定，不列为已支持模型。完整数据流和验收标准见 [端侧构图双支路 SOP](composition-pipeline-sop.md)。
 
@@ -10,7 +10,7 @@
 
 **目标是双支路闭环：共享取景帧 → 高频主体检测 + 低频本地 VLM → 两类归一化构图框。** 在 YOLO 与 d1-omni 的模型契约完成前，应用继续使用已接入的 SmolVLM 低频回退；所有结果只给取景器提供实验性参考，不自动改变曝光、对焦或快门，也不开放网络 API。
 
-本轮已建立可选模型目录和用户主动下载接口，但没有把权重放进 APK，也没有在开发机下载权重。首选 `HuggingFaceTB/SmolVLM-256M-Instruct` 的固定 revision `7e3e67edbbed1bf9888184d9df282b700a323964`；官方 ONNX q4 图、嵌入图和视觉图合计约 179 MiB（精确大小以应用读取的 revision 元数据为准）。`SmolVLM-500M-Instruct` 以固定 revision `a588b6298f96d180aff4c31e259409d106b5571e` 作为可选大模型，约 347 MiB 级别。用户必须先查看官方版本、文件大小、许可证和 SHA，再单独点安装；小 APK 不会自动拉取这些权重。
+本轮已建立可选模型目录、用户主动下载接口和显式本地内置构建。首选 `HuggingFaceTB/SmolVLM-256M-Instruct` 的固定 revision `7e3e67edbbed1bf9888184d9df282b700a323964`；官方 ONNX q4 图、嵌入图和视觉图合计 `182,318,056` bytes（173.9 MiB）。`SmolVLM-500M-Instruct` 以固定 revision `a588b6298f96d180aff4c31e259409d106b5571e` 作为可选大模型，约 347 MiB 级别。默认 Preview APK 不带权重；本地显式 `-PedgeModelDir=...` 构建会把已校验的 7 个文件打入 debug APK，首次启动再导入应用私有目录。用户主动安装和本地内置构建都必须保留来源、版本、体积、许可证和 SHA 记录。
 
 模型下载后可以放在项目外的专属目录，例如 `/Users/haoxuanli/Downloads/street-snap-models/smolvlm-256m/`。使用仓库内的 `scripts/check_smolvlm_bundle.py` 可在不联网的情况下检查配置、三张 ONNX 图、外部数据文件并生成本地 SHA-256 清单；清单只证明本地文件完整，不替代固定 revision 的来源核验。模型文件和生成的清单都不提交 Git。
 
@@ -35,7 +35,7 @@ hf download HuggingFaceTB/SmolVLM-256M-Instruct \
 python3 scripts/check_smolvlm_bundle.py "$MODEL_DIR"
 ```
 
-ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。外置 256M bundle 已通过离线清单校验，模拟器加载时发现官方 tokenizer 的 `Digits(individual_digits=true)` 预处理并补上 Android 解析支持；在没有重新构建调试包的条件下用等字节兼容副本完成了模型会话与取帧尝试，但 AVD 推理超过 5 秒新鲜度窗口，未得到可验收的推荐框。仍不承诺荣耀设备上的延迟、温升、中文质量或持续实时帧率。
+ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。外置 256M bundle 已通过离线清单校验；模型内置 debug APK 已验证 assets 首次导入到 `files/edge-models/...`、7 个文件的 bytes/SHA-256 校验和三张 ONNX 图会话创建。Android 35 AVD 单次推理约 19–21 秒，反复输出无效 token 序列，结果门闸正确丢弃并保持“未返回可靠构图建议”。仍不承诺荣耀设备上的延迟、温升、中文质量或持续实时帧率。
 
 需要把两个速度分开：取景帧率由相机和渲染维持，模型按自己的速度处理抽样帧。流式输出文字不等于逐帧视频理解；在荣耀设备上达到多低的延迟，要等实际模型、分辨率和加速后端确定后测量。现阶段不能承诺 30 fps 多模态推理或“完全不影响拍照”。
 

@@ -78,7 +78,16 @@
 
 取景帧率和模型处理速率分开：预览目标为 24–30 fps，检测器先以 10–15fps 做真机基准，构图支路目标为 1–2fps，不把预览帧率误写成模型推理次数。模型未安装、结果过期、运行失败或设备不支持并行分析时，不绘制假框，并回退到纯相机模式；分析不会拿走快门锁。
 
-当前可运行的低频回退仍是 `SmolVLM 256M`，`SmolVLM 500M` 作为可选对照；YOLOv11-Nano 和 `d1-omni-600M` 尚未锁定可再分发版本、运行时和真机基准。当前 APK **不内置模型权重**，用户需在应用内主动查看固定版本、许可证、体积和 SHA-256 后安装；不承诺荣耀 Vs3 上的延迟、温升、中文质量或持续实时帧率。运行架构以[双支路 SOP](docs/composition-pipeline-sop.md)为准，模型候选与分发细节见其[模型评估附录](docs/edge-model-plan.md)。
+当前可运行的低频回退仍是 `SmolVLM 256M`，`SmolVLM 500M` 作为可选对照；YOLOv11-Nano 和 `d1-omni-600M` 尚未锁定可再分发版本、运行时和真机基准。默认 Preview APK **不内置模型权重**，用户需在应用内主动查看固定版本、许可证、体积和 SHA-256 后安装；开发者也可以用项目外模型目录显式构建一个约 192 MB 的本地调试 APK，首次启动时自动导入同一私有模型目录。两种包都不承诺荣耀 Vs3 上的延迟、温升、中文质量或持续实时帧率。运行架构以[双支路 SOP](docs/composition-pipeline-sop.md)为准，模型候选与分发细节见其[模型评估附录](docs/edge-model-plan.md)。
+
+本地模型内置构建（权重不会进入 Git）需要先准备 `/Users/haoxuanli/Downloads/street-snap-models/smolvlm-256m/`，然后执行：
+
+```sh
+./gradlew :app:assembleDebug \
+  -PedgeModelDir="$HOME/Downloads/street-snap-models/smolvlm-256m" --offline
+```
+
+`edgeModelDir` 只挑选清单中的 7 个 q4/配置文件，并把外部清单转换成运行时 `install.json`；普通 `assemblePreview` 会清理残留的本地 staging，因此不会意外携带模型。
 
 ### 行色 / Xingse
 
@@ -157,7 +166,7 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
 - [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
-- [ ] **Edge model validation**：256M 固定 revision 的外置 bundle 已完成文件清单与 SHA-256 校验，并在 Android 35 AVD 独立调试包中完成模型加载与取帧尝试；AVD 推理超过 5 秒新鲜度窗口，尚未得到可验收推荐框，荣耀 Vs3 真机、失败恢复、包体与温升基准仍待完成。
+- [ ] **Edge model validation**：256M 固定 revision 的外置 bundle 已完成文件清单与 SHA-256 校验；模型内置调试 APK 已在 Android 35 AVD 完成首次导入并显示 `已安装 · 173.9 MB`，真实会话可启动但 AVD 推理约 19–21 秒、未得到可验收推荐框。荣耀 Vs3 真机、失败恢复、包体与温升基准仍待完成。
 - [ ] **Dual-branch composition**：共享 latest-frame 分流总线；接入已核验的主体检测器与低频构图模型，完成坐标统一、框平滑、结构化输出校验、失败降级和真机负载基线。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
@@ -169,9 +178,9 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 
 | 取景与快拍 | 相机外观与持握 | 端侧模型选择 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和安装状态"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和已安装 173.9 MB 状态"> |
 
-Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示可选端侧构图辅助的模型选择与“未安装”状态（Preview APK 本身不带权重）。本轮另用独立 `dev.streetsnap.app.modeltest` 调试包验证了外置 256M bundle 的安装与模型会话；实拍效果和设备支持范围以真机为准。
+Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示端侧构图辅助的模型选择与“已安装 · 173.9 MB”状态。Preview APK 默认不带权重；本地 `edgeModelDir` 调试包已在同一模拟器验证自动导入、模型会话和失败降级；实拍效果和设备支持范围以真机为准。
 
 ## 安装与发布
 

@@ -76,6 +76,14 @@ val stageEdgeModelAssets = edgeModelDir?.let { source ->
 }
 if (stageEdgeModelAssets != null) {
     tasks.named("preBuild").configure { dependsOn(stageEdgeModelAssets) }
+} else {
+    // A previous local model build may have left ignored assets in the source tree.
+    // Clear them for ordinary Preview/CI builds so the default APK never inherits
+    // a developer's private model weights.
+    val clearStagedEdgeModelAssets = tasks.register<Delete>("clearStagedEdgeModelAssets") {
+        delete(layout.projectDirectory.dir("src/main/assets/edge-models"))
+    }
+    tasks.named("preBuild").configure { dependsOn(clearStagedEdgeModelAssets) }
 }
 val distributionSigning = listOf(
     "ANDROID_KEYSTORE_PATH", "ANDROID_KEYSTORE_PASSWORD", "ANDROID_KEY_ALIAS", "ANDROID_KEY_PASSWORD",
