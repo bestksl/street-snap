@@ -564,11 +564,18 @@ private fun ShootingControls(
         if (adjustmentTab != AdjustmentTab.LOOK) {
             Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "胶片", settings.filmId != null,
+                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "影调", settings.filmId != null,
                     enabled = loaded, onClick = { onTab(AdjustmentTab.FILM) })
-                val quickPresets = (listOf(ColorPreset.ORIGINAL, ColorPreset.POSITIVE, ColorPreset.NEGATIVE,
-                    ColorPreset.POWDER_BLUE, ColorPreset.MONO) +
-                    ColorPreset.entries.filter { it.name == settings.preset }).distinct()
+                // Keep the collapsed surface camera-like: a few high-frequency choices
+                // are visible, while the complete recipe catalog remains in the panel.
+                val quickPresets = buildList {
+                    add(ColorPreset.ORIGINAL)
+                    add(ColorPreset.POSITIVE)
+                    add(ColorPreset.NEGATIVE)
+                    ColorPreset.entries.firstOrNull { it.name == settings.preset }?.let { selected ->
+                        if (selected !in this) add(selected)
+                    }
+                }
                 quickPresets.forEach { preset ->
                     ControlButton(preset.displayName, settings.filmId == null && settings.preset == preset.name,
                         enabled = loaded, onClick = { model.setPreset(preset) })
