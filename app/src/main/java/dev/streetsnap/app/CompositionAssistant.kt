@@ -191,7 +191,16 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 var runtime: SmolVlmRuntime? = null
                 var frames: CompositionFrameSource? = null
                 try {
-                    val installed = withContext(Dispatchers.IO) { store.installed(requireNotNull(EdgeModelCatalog.find(config.id))) }
+                    val model = requireNotNull(EdgeModelCatalog.find(config.id))
+                    val installed = withContext(Dispatchers.IO) {
+                        // A bundled model is imported once into the same private store as
+                        // an explicit download. APKs without assets keep the old path.
+                        // Do not copy a 174 MB asset while the optional assistant is off
+                        // or the app is backgrounded; import it on the first active use.
+                        store.installed(model) ?: if (config.enabled && config.foreground) {
+                            store.installBundled(model)
+                        } else null
+                    }
                     currentCoroutineContext().ensureActive()
                     // A running download owns its install state; a resume must not overwrite its progress.
                     if (_state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
