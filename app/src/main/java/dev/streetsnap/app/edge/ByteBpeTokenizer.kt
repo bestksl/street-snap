@@ -46,6 +46,7 @@ internal class ByteBpeTokenizer(file: File) {
         val preTokenizer = json.getJSONObject("pre_tokenizer")
         var regex: String? = null
         var byteLevelFound = false
+        var individualDigits = false
         fun readPreTokenizer(node: JSONObject) {
             when (node.getString("type")) {
                 "Sequence" -> node.getJSONArray("pretokenizers").let { list ->
@@ -55,11 +56,19 @@ internal class ByteBpeTokenizer(file: File) {
                     require(node.optString("behavior") == "Isolated" && !node.optBoolean("invert")) { "不支持此 tokenizer split" }
                     regex = node.getJSONObject("pattern").getString("Regex")
                 }
+                "Digits" -> {
+                    // SmolVLM's official tokenizer applies Digits before ByteLevel.
+                    // Keep the split explicit so runs such as "256" remain three
+                    // byte-level pieces, matching the Rust tokenizer contract.
+                    require(node.optBoolean("individual_digits")) { "不支持合并数字预处理" }
+                    individualDigits = true
+                }
                 "ByteLevel" -> {
                     require(!node.optBoolean("add_prefix_space")) { "不支持自动添加前缀空格" }
                     byteLevelFound = true
                     if (regex == null && node.optBoolean("use_regex", true)) {
-                        regex = "'s|'t|'re|'ve|'m|'ll|'d| ?[\\p{L}]+| ?[\\p{N}]+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
+                        val numbers = if (individualDigits) " ?[\\p{N}]" else " ?[\\p{N}]+"
+                        regex = "'s|'t|'re|'ve|'m|'ll|'d| ?[\\p{L}]+|$numbers| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+"
                     }
                 }
                 else -> error("不支持的 tokenizer 预处理")
