@@ -2,7 +2,7 @@
 
 > 本文不是第二套产品路线。唯一的运行架构见 [端侧构图双支路 SOP](composition-pipeline-sop.md)；本文只记录候选模型、运行时、分发方式和验证顺序。当前最小闭环先使用 SmolVLM 低频回退，YOLO 主体支路与 d1-omni 构图支路属于后续目标。
 
-状态：Android 首个实验闭环已接入；尚未完成真实权重端到端推理和荣耀 Vs3 真机基准测试。资料核对日期：2026-10-17。
+状态：Android 首个实验闭环已接入；SmolVLM 256M 外置权重已完成固定 revision 校验，并在 Android 35 AVD 的独立调试包中完成加载与取帧尝试；荣耀 Vs3 真机基准和可验收构图框仍未完成。资料核对日期：2026-10-17。
 
 双支路路线已确定：高频主体框与低频构图建议共享一次 `ImageAnalysis` 采样，各自使用有界 latest-only 队列。目标检测器为 YOLOv11-Nano Int8（320×320，先以 10–15fps 做真机基准），目标构图模型为 d1-omni-600M Q4 ONNX（384×384，目标 1–2fps）；当前可运行回退仍是 SmolVLM ONNX。YOLO 和 d1-omni 的具体 revision、图结构、类别表、许可证、SHA-256 和 Android 后端尚未锁定，不列为已支持模型。完整数据流和验收标准见 [端侧构图双支路 SOP](composition-pipeline-sop.md)。
 
@@ -35,7 +35,7 @@ hf download HuggingFaceTB/SmolVLM-256M-Instruct \
 python3 scripts/check_smolvlm_bundle.py "$MODEL_DIR"
 ```
 
-ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。没有端到端真实权重测试前，应用将模型状态显示为未验证，不承诺荣耀设备上的延迟、温升、中文质量或持续实时帧率。
+ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。外置 256M bundle 已通过离线清单校验，模拟器加载时发现官方 tokenizer 的 `Digits(individual_digits=true)` 预处理并补上 Android 解析支持；在没有重新构建调试包的条件下用等字节兼容副本完成了模型会话与取帧尝试，但 AVD 推理超过 5 秒新鲜度窗口，未得到可验收的推荐框。仍不承诺荣耀设备上的延迟、温升、中文质量或持续实时帧率。
 
 需要把两个速度分开：取景帧率由相机和渲染维持，模型按自己的速度处理抽样帧。流式输出文字不等于逐帧视频理解；在荣耀设备上达到多低的延迟，要等实际模型、分辨率和加速后端确定后测量。现阶段不能承诺 30 fps 多模态推理或“完全不影响拍照”。
 
@@ -60,7 +60,7 @@ ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.
 | **Gemma 3n E2B** | LiteRT-LM 的 Android/Kotlin 接口，选择配套 `.litertlm` 模型包；本轮先测图像 + 文本 | 模型包实际包含的模态、首次加载、视觉编码耗时、GPU 与相机预览的资源竞争；NPU 仅在后端和设备明确支持时比较 | LiteRT-LM 为 Apache-2.0，Gemma 权重遵循独立的 Gemma 条款，不能套用途帧 MIT。[运行时](https://github.com/google-ai-edge/LiteRT-LM) · [Android 指南](https://ai.google.dev/edge/litert-lm/android) · [模型卡](https://ai.google.dev/gemma/docs/gemma-3n/model_card) · [Gemma 条款](https://ai.google.dev/gemma/terms) |
 | **Qwen2.5-VL-7B-Instruct**，作为质量对照 | llama.cpp 支持相应 GGUF + projector；可量化，但服务器 AWQ 包不等于 Android 可直接加载的模型包 | 中文、细节理解与前两者相比是否值得更高的存储、内存和计算开销；不作为首个常驻模型 | 7B 模型卡标注 Apache-2.0；Qwen 各尺寸/版本须逐个核对，不能把这一结论推广到 3B/72B。[模型卡](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) · [运行时支持清单](https://github.com/ggml-org/llama.cpp/blob/master/docs/multimodal.md) |
 
-本次已读取 LiteRT-LM、llama.cpp、SmolVLM 的官方 GitHub 文档与 SmolVLM 发布说明；部分模型卡站点连接超时。表中模型卡和条款保留为选型入口，正式下载/分发前必须锁定具体版本、量化方式、视觉编码器、tokenizer 和许可证。本次没有下载模型，也没有把候选权重列为已验证可分发资源。
+本次已读取 LiteRT-LM、llama.cpp、SmolVLM 的官方 GitHub 文档与 SmolVLM 发布说明；部分模型卡站点连接超时。表中模型卡和条款保留为选型入口，正式下载/分发前必须锁定具体版本、量化方式、视觉编码器、tokenizer 和许可证。256M 外置 bundle 已锁定 revision、文件清单与本地 SHA-256；YOLO、d1-omni 和其他候选权重仍未下载或列为已验证可分发资源。
 
 权重体积不能直接当运行内存：视觉编码器、projector、KV cache、运行时缓冲与 GPU 分配都要计入。也不能把 Gemma 3n 的 E2B 名称简单换算成整个包的参数量或下载大小。
 

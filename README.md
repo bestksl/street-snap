@@ -157,7 +157,7 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
 - [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
-- [ ] **Edge model validation**：锁定可再分发的 256M 权重后完成真实端到端推理、帧抽样共存、失败恢复、包体与真机温升基准；当前开发环境尚未下载权重。
+- [ ] **Edge model validation**：256M 固定 revision 的外置 bundle 已完成文件清单与 SHA-256 校验，并在 Android 35 AVD 独立调试包中完成模型加载与取帧尝试；AVD 推理超过 5 秒新鲜度窗口，尚未得到可验收推荐框，荣耀 Vs3 真机、失败恢复、包体与温升基准仍待完成。
 - [ ] **Dual-branch composition**：共享 latest-frame 分流总线；接入已核验的主体检测器与低频构图模型，完成坐标统一、框平滑、结构化输出校验、失败降级和真机负载基线。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
@@ -171,7 +171,7 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 | :---: | :---: | :---: |
 | <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和安装状态"> |
 
-Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示可选端侧构图辅助的模型选择与“未安装”状态。模型权重不随当前 APK 分发，实拍效果和设备支持范围以真机为准。
+Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示可选端侧构图辅助的模型选择与“未安装”状态（Preview APK 本身不带权重）。本轮另用独立 `dev.streetsnap.app.modeltest` 调试包验证了外置 256M bundle 的安装与模型会话；实拍效果和设备支持范围以真机为准。
 
 ## 安装与发布
 
