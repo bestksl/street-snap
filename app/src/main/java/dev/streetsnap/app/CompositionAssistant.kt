@@ -10,7 +10,10 @@ import dev.streetsnap.app.composition.CompositionCandidate
 import dev.streetsnap.app.composition.FastCompositionAdvisor
 import dev.streetsnap.app.edge.CompositionSuggestion
 import dev.streetsnap.app.edge.CropRanking
+import dev.streetsnap.app.edge.CandidateRanker
+import dev.streetsnap.app.edge.D1OmniRuntime
 import dev.streetsnap.app.edge.EdgeModelCatalog
+import dev.streetsnap.app.edge.EdgeModelKind
 import dev.streetsnap.app.edge.EdgeModelStore
 import dev.streetsnap.app.edge.ModelDownloadPlan
 import dev.streetsnap.app.edge.SmolVlmRuntime
@@ -63,12 +66,34 @@ internal data class CompositionOverlay(
     val suggestion: CompositionSuggestion,
     val expiresAtMs: Long,
     val origin: AdviceOrigin = AdviceOrigin.IMAGE_ANALYSIS,
+    /** Rare, light-hearted wide-angle nudge. Never participates in ranking or gates. */
+    val easterEgg: String? = null,
 )
+
+/**
+ * Rule analysis runs several times per second. When the same scene yields the same crop,
+ * wording and origin (and no easter egg is present on either side), republishing would
+ * allocate an overlay and recompose the camera for zero visual change; the caller keeps
+ * the existing object and only extends its lifetime.
+ */
+internal fun CompositionOverlay.carriesSameGuidance(
+    origin: AdviceOrigin,
+    candidate: CompositionCandidate,
+    newEasterEgg: String?,
+): Boolean = newEasterEgg == null && easterEgg == null && this.origin == origin &&
+    suggestion.modelText == candidate.reason &&
+    suggestion.left == candidate.crop.left && suggestion.top == candidate.crop.top &&
+    suggestion.right == candidate.crop.right && suggestion.bottom == candidate.crop.bottom
 private data class CompletedRanking(val first: CropRanking?, val validation: CropRanking?)
 
 /** Optional inference has its own lifetime and never takes the camera's controls or shutter locks. */
 internal class CompositionAssistant(context: Context, private val scope: CoroutineScope) : AutoCloseable {
     private data class Configuration(val id: String, val enabled: Boolean, val foreground: Boolean, val realtime: Boolean)
+
+    /** Focal length changes must not restart the camera session; the egg reads it live. */
+    @Volatile private var focalLengthMm: Int = 28
+    @Volatile private var adviceCount: Int = 0
+    @Volatile private var lastEasterEggAtMs: Long = 0L
     private val store = EdgeModelStore(context)
     private val modelPreferences = context.getSharedPreferences("composition-models", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(CompositionUiState())
@@ -100,8 +125,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         }
     }
 
-    fun configure(id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false) {
+    fun configure(id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false, focalLengthMm: Int = 28) {
         if (closed) return
+        this.focalLengthMm = focalLengthMm.takeIf { it > 0 } ?: 28
         val next = Configuration(EdgeModelCatalog.find(id)?.id ?: "smolvlm-256m", enabled, foreground, realtime)
         if (configuration == next) return
         val changedModel = configuration?.id != next.id
@@ -112,6 +138,11 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
             _state.value = CompositionUiState(modelId = next.id)
         }
         restartSession()
+    }
+
+    /** Live focal-length updates for the rare wide-angle egg; sessions are not restarted for this. */
+    fun updateFocalLength(equivalentMm: Int) {
+        if (equivalentMm > 0) focalLengthMm = equivalentMm
     }
 
     fun invalidateView() {
@@ -144,24 +175,48 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     }
 
     /** UI-thread only: every visible rectangle has an origin and a bounded lifetime. */
-    private fun showAdvice(candidate: CompositionCandidate, origin: AdviceOrigin) {
+    private fun showAdvice(candidate: CompositionCandidate, origin: AdviceOrigin, subjectLooksDistant: Boolean = false) {
         val crop = candidate.crop
+        val now = SystemClock.elapsedRealtime()
+        val draw = adviceCount++
+        val egg = easterEgg(subjectLooksDistant, origin, draw, now)
+        if (egg != null) lastEasterEggAtMs = now
+        // Rule analysis now runs several times per second. On a static scene the same
+        // crop comes back every time: republishing it allocates an overlay, emits a
+        // StateFlow value and recomposes the camera ~4x/s for zero visual change.
+        // Keep the existing overlay object (and its origin tint, which must change on
+        // a rule/model handover), only extending its lifetime when it runs low.
+        val current = _overlay.value
+        if (current != null && current.carriesSameGuidance(origin, candidate, egg)) {
+            if (current.expiresAtMs - now < 10_000L) scheduleOverlayExpiry(current, now + 30_000L)
+            return
+        }
         val answer = CompositionOverlay(
             CompositionSuggestion(crop.left, crop.top, crop.right, crop.bottom, candidate.reason),
-            SystemClock.elapsedRealtime() + 30_000L,
+            now + 30_000L,
             origin,
+            egg,
         )
         _overlay.value = answer
         _state.update { it.copy(adviceOrigin = origin) }
+        scheduleOverlayExpiry(answer, answer.expiresAtMs)
+    }
+
+    /** Publish null once this exact overlay reaches its (possibly extended) lifetime. */
+    private fun scheduleOverlayExpiry(overlay: CompositionOverlay, expiresAtMs: Long) {
         expiryJob?.cancel()
         expiryJob = scope.launch(Dispatchers.Main.immediate) {
-            delay((answer.expiresAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
-            if (_overlay.value === answer) {
+            delay((expiresAtMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            if (_overlay.value === overlay) {
                 _overlay.value = null
                 _state.update { it.copy(adviceOrigin = null) }
             }
         }
     }
+
+    /** Rare, gentle wide-angle nudge. Pure UI flavour: it never changes a crop, score or gate. */
+    private fun easterEgg(subjectLooksDistant: Boolean, origin: AdviceOrigin, draw: Int, nowMs: Long): String? =
+        CompositionEasterEgg.decide(subjectLooksDistant, origin, focalLengthMm, draw, nowMs, lastEasterEggAtMs)
 
     /** Metadata only. A second, explicit install action is required after the size is visible. */
     fun prepareInstall() {
@@ -276,10 +331,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         sessionJob = scope.launch(Dispatchers.Main.immediate) {
             sessionMutex.withLock {
                 val sessionScope = CoroutineScope(currentCoroutineContext())
-                val runtimeReady = CompletableDeferred<SmolVlmRuntime?>()
+                val runtimeReady = CompletableDeferred<CandidateRanker?>()
                 val cadence = CompositionCadence()
                 val selectionGate = CandidateSelectionGate(listOf(1, 2, 0))
-                var runtime: SmolVlmRuntime? = null
+                var runtime: CandidateRanker? = null
                 var frames: CompositionFrameSource? = null
                 var modelJob: Job? = null
                 var rankingDisabled = false
@@ -402,7 +457,12 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 try {
                     val model = requireNotNull(EdgeModelCatalog.find(config.id))
                     if (config.enabled && config.foreground) {
-                        frames = CompositionFrameSource(minimumIntervalMs = 1_000L, maximumEdge = 384,
+                        // Rule advice runs in single-digit milliseconds, so the cadence is
+                        // set by the frame clocks, not by compute: ~4 advice refreshes/s.
+                        // Model ranking stays on its own 3-15 s cadence gate below and is
+                        // unaffected by this interval.
+                        frames = CompositionFrameSource(minimumIntervalMs = 250L, maximumEdge = 384,
+                            sceneIntervalMs = 250L,
                             shouldCaptureFrame = { isCurrentSession() && (manualRequestPending || config.realtime) },
                             onSceneChanged = {
                                 scope.launch(Dispatchers.Main.immediate) {
@@ -435,7 +495,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                     val bitmap = frame.bitmap
                                     val pixels = IntArray(bitmap.width * bitmap.height)
                                     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-                                    val candidates = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
+                                    val advice = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
+                                    val candidates = advice.candidates
                                     val first = candidates.firstOrNull() ?: error("当前画面无法生成构图建议")
                                     val fastMs = SystemClock.elapsedRealtime() - started
                                     val frameCurrent = { frame.isCurrent }
@@ -456,7 +517,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                             selectedScene = null
                                             selectedCandidate = null
                                             visibleScene = sceneCurrent
-                                            showAdvice(first, AdviceOrigin.IMAGE_ANALYSIS)
+                                            showAdvice(first, AdviceOrigin.IMAGE_ANALYSIS, advice.subjectLooksDistant)
                                         }
                                         _state.update { it.copy(status = AssistStatus.READY, fastAdviceMs = fastMs) }
                                         Log.i("StreetSnapComposition", "fast_ms=$fastMs manual=$manual candidates=" +
@@ -511,6 +572,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         // Publish input before copying assets or creating native sessions.
                         _source.value = frames
                         _state.update { it.copy(status = AssistStatus.READY, statusText = "点击构图获取画面建议") }
+                        // Show the first photographic suggestion automatically, so enabling the
+                        // feature always produces a visible frame without hunting for the button.
+                        requestAdvice()
                     }
                     try {
                         val installed = withContext(Dispatchers.IO) {
@@ -532,7 +596,12 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             runtimeReady.complete(null)
                             _state.update { it.copy(statusText = "图像构图建议可用，可安装模型进行择优") }
                         } else {
-                            withContext(Dispatchers.IO) { runtime = SmolVlmRuntime(installed) }
+                            withContext(Dispatchers.IO) {
+                                runtime = when (model.kind) {
+                                    EdgeModelKind.D1_OMNI_CHOICE -> D1OmniRuntime(installed)
+                                    EdgeModelKind.SMOLVLM_CHOICE -> SmolVlmRuntime(installed)
+                                }
+                            }
                             currentCoroutineContext().ensureActive()
                             runtimeReady.complete(requireNotNull(runtime))
                         }

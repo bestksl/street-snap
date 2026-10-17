@@ -17,6 +17,9 @@ import android.view.Surface
 import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ViewPort
 import androidx.camera.view.PreviewView
@@ -120,7 +123,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
@@ -362,6 +367,9 @@ private fun Viewfinder(
                 height = it.height
             })
             val roll = rememberLevelAngle(settings.level, preview)
+            // Rule advice refreshes several times per second; ease the rectangle so the
+            // guide tracks the scene without visibly jumping between nearby crops.
+            val smoothCrop = rememberSmoothCrop(compositionOverlay)
             Canvas(Modifier.fillMaxSize().pointerInput(preview, canTapFocus) {
                 detectTapGestures(
                     onTap = { position ->
@@ -408,11 +416,14 @@ private fun Viewfinder(
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
                 compositionOverlay?.let { overlay ->
-                    val suggestion = overlay.suggestion
-                    val left = (suggestion.left.coerceIn(0f, 1f) * size.width)
-                    val top = (suggestion.top.coerceIn(0f, 1f) * size.height)
-                    val right = (suggestion.right.coerceIn(0f, 1f) * size.width)
-                    val bottom = (suggestion.bottom.coerceIn(0f, 1f) * size.height)
+                    // Reading the animated values here (inside the draw scope) means
+                    // animation ticks only redraw this canvas, not recompose the screen.
+                    val crop = smoothCrop.crop
+                    if (crop != null) {
+                    val left = (crop.left.coerceIn(0f, 1f) * size.width)
+                    val top = (crop.top.coerceIn(0f, 1f) * size.height)
+                    val right = (crop.right.coerceIn(0f, 1f) * size.width)
+                    val bottom = (crop.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
                         val tint = if (overlay.origin == AdviceOrigin.MODEL_SELECTION) Color(0xFFE2FF79) else Color(0xFFB7E3F6)
                         val shade = Color.Black.copy(alpha = .26f)
@@ -428,6 +439,7 @@ private fun Viewfinder(
                             drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
                             drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
                         }
+                    }
                     }
                 }
             }
@@ -476,6 +488,9 @@ private fun Viewfinder(
                     .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)) {
                     compositionOverlay?.suggestion?.modelText?.let {
                         Text(it, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    compositionOverlay?.easterEgg?.let {
+                        Text(it, color = Color(0xFFE2FF79), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                     Text(compositionTimingLabel(compositionState), color = Color.White.copy(alpha = .78f), fontSize = 10.sp, maxLines = 2)
                 }
@@ -1229,3 +1244,66 @@ private fun CapabilitiesDialog(capabilities: CameraCapabilities?, error: String?
 
 private fun shutterLabel(timeNs: Long): String = if (timeNs < 1_000_000_000L)
     "1/${(1_000_000_000.0 / timeNs).roundToInt()} s" else "%.1f s".format(timeNs / 1_000_000_000.0)
+
+/** Normalized crop rectangle eased toward each incoming rule suggestion. */
+private data class SmoothCrop(val left: Float, val top: Float, val right: Float, val bottom: Float)
+
+/**
+ * Holds the four eased crop edges. The values are read inside the Canvas draw scope,
+ * so animation ticks trigger a redraw only, not recomposition of the camera screen.
+ */
+private class SmoothCropState {
+    // Order: left, top, right, bottom.
+    val edges = Array(4) { Animatable(0f) }
+    var ready by mutableStateOf(false)
+    var snappedOrigin: AdviceOrigin? = null
+
+    val crop: SmoothCrop?
+        get() = if (ready) {
+            SmoothCrop(edges[0].value, edges[1].value, edges[2].value, edges[3].value)
+        } else {
+            null
+        }
+}
+
+/**
+ * Rule advice refreshes several times per second; ease the rectangle so nearby crops
+ * glide instead of jumping. The first target, a rule/model handover (origin change),
+ * and recovery after the overlay was invalidated snap immediately — we never slide
+ * across a zoom/rotation/model change. Degenerate rectangles keep the previous frame.
+ */
+@Composable
+private fun rememberSmoothCrop(overlay: CompositionOverlay?): SmoothCropState {
+    val state = remember { SmoothCropState() }
+    LaunchedEffect(overlay) {
+        val current = overlay
+        if (current == null) {
+            // Zoom, rotation or model switch invalidated the guide; next guidance snaps.
+            state.ready = false
+            state.snappedOrigin = null
+            return@LaunchedEffect
+        }
+        val suggestion = current.suggestion
+        if (suggestion.right <= suggestion.left || suggestion.bottom <= suggestion.top) return@LaunchedEffect
+        val targets = floatArrayOf(suggestion.left, suggestion.top, suggestion.right, suggestion.bottom)
+        if (!state.ready || state.snappedOrigin != current.origin) {
+            state.edges.forEachIndexed { index, animatable -> animatable.snapTo(targets[index]) }
+            state.ready = true
+            state.snappedOrigin = current.origin
+        } else {
+            // Each new overlay cancels the previous tween mid-flight; animate from the
+            // current position so 250 ms cadence updates form one continuous glide.
+            coroutineScope {
+                state.edges.forEachIndexed { index, animatable ->
+                    launch {
+                        animatable.animateTo(
+                            targets[index],
+                            tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        )
+                    }
+                }
+            }
+        }
+    }
+    return state
+}

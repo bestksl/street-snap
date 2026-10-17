@@ -7,6 +7,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CompositionFrameSourceLifecycleTest {
+    @Test(expected = IllegalArgumentException::class)
+    fun minimumIntervalBelowLowerBoundIsRejected() {
+        CompositionFrameSource(minimumIntervalMs = 99L, onFrame = {})
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun sceneIntervalBelowLowerBoundIsRejected() {
+        CompositionFrameSource(sceneIntervalMs = 99L, onFrame = {})
+    }
+
     @Test
     fun aLiveSourceCanReuseItsExecutorAfterCameraRebinding() {
         val source = CompositionFrameSource(onFrame = {})

@@ -10,7 +10,6 @@ import android.os.Build
 import android.os.Process
 import android.os.SystemClock
 import android.util.Log
-import java.io.Closeable
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.FloatBuffer
@@ -28,7 +27,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 /** Real image + text inference through the three official SmolVLM ONNX graphs, on CPU. */
-class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
+class SmolVlmRuntime(private val installed: InstalledEdgeModel) : CandidateRanker {
     private val environment: OrtEnvironment
     private val vision: OrtSession
     private val embeddings: OrtSession
@@ -134,7 +133,7 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
         runImageTask(bitmap) { frame, options -> infer(frame, prompt.take(800), options) }
 
     /** One image pass and one prefill; a null selection means the model abstained. */
-    suspend fun rankCandidates(sheet: Bitmap): CropRanking? =
+    override suspend fun rankCandidates(sheet: Bitmap): CropRanking? =
         runImageTask(sheet, ::rank)
 
     private suspend fun <T> runImageTask(bitmap: Bitmap, action: (ImageInput, OrtSession.RunOptions) -> T?): T? {

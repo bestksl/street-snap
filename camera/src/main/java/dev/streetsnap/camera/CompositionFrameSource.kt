@@ -35,6 +35,7 @@ class CompositionFrame internal constructor(
 class CompositionFrameSource(
     minimumIntervalMs: Long = 750L,
     private val maximumEdge: Int = 384,
+    sceneIntervalMs: Long = 500L,
     onError: (Throwable) -> Unit = {},
     private val onSceneChanged: () -> Unit = {},
     /** Read-only, thread-safe demand check on the camera executor, before copying a full RGB frame. */
@@ -44,6 +45,7 @@ class CompositionFrameSource(
     init {
         require(minimumIntervalMs in 100L..60_000L)
         require(maximumEdge in 64..640)
+        require(sceneIntervalMs in 100L..60_000L)
     }
 
     internal val executor = Executors.newSingleThreadExecutor { task ->
@@ -52,7 +54,7 @@ class CompositionFrameSource(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lock = Any()
     private val sampling = SerialFrameClock(minimumIntervalMs * 1_000_000L)
-    private val sceneSampling = FrameSampleClock(500_000_000L)
+    private val sceneSampling = FrameSampleClock(sceneIntervalMs * 1_000_000L)
     private val sceneTracker = FrameSceneTracker()
     private var generation = 0L
     private var frameEpoch = 0L

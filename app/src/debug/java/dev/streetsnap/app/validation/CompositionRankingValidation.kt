@@ -91,13 +91,15 @@ class CompositionRankingValidation : Instrumentation() {
         val startedAt = SystemClock.elapsedRealtimeNanos()
         val pixels = IntArray(source.width * source.height)
         source.getPixels(pixels, 0, source.width, 0, 0, source.width, source.height)
-        val candidates = FastCompositionAdvisor.suggest(source.width, source.height, pixels)
+        val advice = FastCompositionAdvisor.suggest(source.width, source.height, pixels)
+        val candidates = advice.candidates
         require(candidates.size == 3) { "Fast advisor did not return three candidates" }
         val elapsedMs = (SystemClock.elapsedRealtimeNanos() - startedAt) / 1_000_000.0
-        emit("case=$case rule_ms=$elapsedMs candidates=" + candidates.mapIndexed { index, candidate ->
-            val crop = candidate.crop
-            "$index:[${crop.left},${crop.top},${crop.right},${crop.bottom}],rule_score=${candidate.score}"
-        }.joinToString(";"))
+        emit("case=$case rule_ms=$elapsedMs distant_subject=${advice.subjectLooksDistant} candidates=" +
+            candidates.mapIndexed { index, candidate ->
+                val crop = candidate.crop
+                "$index:[${crop.left},${crop.top},${crop.right},${crop.bottom}],rule_score=${candidate.score},style=${candidate.style}"
+            }.joinToString(";"))
         return candidates
     }
 
