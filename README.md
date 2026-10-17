@@ -166,7 +166,7 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
 - [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
-- [ ] **Edge model validation**：256M 固定 revision 的外置 bundle 已完成文件清单与 SHA-256 校验；模型内置调试 APK 已在 Android 35 AVD 完成首次导入并显示 `已安装 · 173.9 MB`，真实会话可启动但 AVD 推理约 19–21 秒、未得到可验收推荐框。荣耀 Vs3 真机、失败恢复、包体与温升基准仍待完成。
+- [ ] **Edge model validation**：256M 固定 revision 的外置 bundle 已完成文件清单与 SHA-256 校验；模型内置调试 APK 已在 Android 35 AVD 完成首次导入并显示 `已安装 · 173.9 MB`。历史 AVD 基线为 19–21 秒且未得到可验收推荐框；当前已加入 24-token 上限、XNNPACK/线程优化、过期帧跳过和约 4.75 秒推理取消预算，优化后的设备延迟、失败恢复、包体与温升仍待荣耀 Vs3 真机验证。
 - [ ] **Dual-branch composition**：共享 latest-frame 分流总线；接入已核验的主体检测器与低频构图模型，完成坐标统一、框平滑、结构化输出校验、失败降级和真机负载基线。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。

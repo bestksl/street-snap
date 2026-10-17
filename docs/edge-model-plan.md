@@ -35,7 +35,7 @@ hf download HuggingFaceTB/SmolVLM-256M-Instruct \
 python3 scripts/check_smolvlm_bundle.py "$MODEL_DIR"
 ```
 
-ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。外置 256M bundle 已通过离线清单校验；模型内置 debug APK 已验证 assets 首次导入到 `files/edge-models/...`、7 个文件的 bytes/SHA-256 校验和三张 ONNX 图会话创建。Android 35 AVD 单次推理约 19–21 秒，反复输出无效 token 序列，结果门闸正确丢弃并保持“未返回可靠构图建议”。仍不承诺荣耀设备上的延迟、温升、中文质量或持续实时帧率。
+ONNX Runtime 仅随 ARM64 构建提供。官方 Maven `onnxruntime-android:1.22.0` 的完整四 ABI AAR 为 28,515,295 字节；当前仓库的复现脚本按固定 ETag 和每个 ZIP 成员 SHA-256 提取 ARM64 Java/native 成员，产物约 6.7 MiB，不携带 NDK。这个裁剪 AAR 的许可和第三方声明位于 `third_party/onnxruntime/`。外置 256M bundle 已通过离线清单校验；模型内置 debug APK 已验证 assets 首次导入到 `files/edge-models/...`、7 个文件的 bytes/SHA-256 校验和三张 ONNX 图会话创建。历史 Android 35 AVD 基线为单次推理约 19–21 秒，主要来自 decoder 最多 64 个自回归 token；当前运行时已将上限降为 24，视觉会话优先尝试 XNNPACK（intra-op=1，失败回退 CPU），decoder/embedding 使用 2–4 个线程并启用 ALL_OPT，推理线程不再使用后台优先级，且超过帧年龄预算会取消。优化后的新设备延迟仍需恢复 AVD 或在荣耀 Vs3 真机复测，不能把取消预算当成模型质量或实时帧率结论。
 
 需要把两个速度分开：取景帧率由相机和渲染维持，模型按自己的速度处理抽样帧。流式输出文字不等于逐帧视频理解；在荣耀设备上达到多低的延迟，要等实际模型、分辨率和加速后端确定后测量。现阶段不能承诺 30 fps 多模态推理或“完全不影响拍照”。
 

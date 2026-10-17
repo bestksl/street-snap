@@ -44,7 +44,11 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
     private val running = AtomicBoolean(false)
     private val activeOptions = AtomicReference<OrtSession.RunOptions?>()
     private val worker = Executors.newSingleThreadExecutor { runnable ->
-        Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND); runnable.run() }, "street-snap-vlm")
+        // This is a user-visible, on-demand action. BACKGROUND priority makes the
+        // native ORT kernels inherit a large scheduler penalty on big.LITTLE phones
+        // (and was especially costly on the AVD). The work is already isolated from
+        // the main thread and the camera keeps its own executor, so keep normal priority.
+        Thread({ Process.setThreadPriority(Process.THREAD_PRIORITY_DEFAULT); runnable.run() }, "street-snap-vlm")
     }
 
     init {
@@ -74,15 +78,37 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
         environment = OrtEnvironment.getEnvironment()
         val opened = mutableListOf<OrtSession>()
         try {
-            // Keep CPU concurrency small so inference does not occupy every camera/UI core.
-            OrtSession.SessionOptions().use { options ->
-                options.setIntraOpNumThreads(2)
-                options.setInterOpNumThreads(1)
-                options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.BASIC_OPT)
-                vision = environment.createSession(File(installed.directory, installed.plan.visionFile).absolutePath, options).also { opened += it }
-                embeddings = environment.createSession(File(installed.directory, installed.plan.embeddingFile).absolutePath, options).also { opened += it }
-                decoder = environment.createSession(File(installed.directory, installed.plan.decoderFile).absolutePath, options).also { opened += it }
+            // Keep a bounded pool: two threads on a four-core emulator, up to four
+            // on modern phones. The old fixed value of two underused the big cores.
+            val intraOpThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+            fun session(path: String, useXnnpack: Boolean, threads: Int): OrtSession {
+                return try {
+                    OrtSession.SessionOptions().use { options ->
+                        if (useXnnpack) {
+                            // XNNPACK is present in the trimmed ARM64 ORT runtime and
+                            // is particularly effective for the FP32 vision encoder.
+                            // Unsupported nodes are automatically kept on CPU.
+                            options.addXnnpack(emptyMap<String, String>())
+                        }
+                        // XNNPACK owns its own worker pool; keeping ORT's pool at
+                        // one avoids nested oversubscription in the vision graph.
+                        options.setIntraOpNumThreads(threads)
+                        options.setInterOpNumThreads(1)
+                        // Extended/all graph fusions are paid once at session creation
+                        // and reduce work on every sampled frame, including KV-cache.
+                        options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                        environment.createSession(path, options)
+                    }
+                } catch (error: Throwable) {
+                    // Some vendor ORT builds reject XNNPACK for a graph with an
+                    // unsupported dynamic op. Retry that session with CPU only; this
+                    // keeps model installation and inference fail-closed on such devices.
+                    if (useXnnpack) session(path, useXnnpack = false, threads = intraOpThreads) else throw error
+                }
             }
+            session(File(installed.directory, installed.plan.visionFile).absolutePath, useXnnpack = true, threads = 1).also { vision = it; opened += it }
+            session(File(installed.directory, installed.plan.embeddingFile).absolutePath, useXnnpack = false, threads = intraOpThreads).also { embeddings = it; opened += it }
+            session(File(installed.directory, installed.plan.decoderFile).absolutePath, useXnnpack = false, threads = intraOpThreads).also { decoder = it; opened += it }
             require(vision.inputNames.containsAll(listOf("pixel_values", "pixel_attention_mask"))) { "视觉模型接口不兼容" }
             require(embeddings.inputNames == setOf("input_ids")) { "文本嵌入接口不兼容" }
             require(decoder.inputNames.containsAll(listOf("inputs_embeds", "attention_mask", "position_ids"))) { "解码器接口不兼容" }
@@ -296,9 +322,13 @@ class SmolVlmRuntime(private val installed: InstalledEdgeModel) : Closeable {
         get(name).orElse(null) as? OnnxTensor ?: error("模型缺少 $name 输出")
 
     companion object {
-        const val MAX_OUTPUT_TOKENS = 64
-        const val DEFAULT_PROMPT = "Suggest one photographic crop that improves this composition. " +
-            "Return only [left, top, right, bottom] using integer coordinates from 0 to 1000 " +
-            "relative to the entire square image. Keep the main subject and avoid the padded area."
+        // A crop box is a short coordinate tuple. Keeping malformed generations bounded
+        // prevents a slow phone from spending another dozen decoder passes producing
+        // prose that the UI cannot render. Valid SmolVLM answers normally finish well
+        // below this ceiling; the old 64-token limit could make one stale frame occupy
+        // the single inference worker for 20+ seconds.
+        const val MAX_OUTPUT_TOKENS = 24
+        const val DEFAULT_PROMPT = "Return only [left,top,right,bottom] integers 0-1000 " +
+            "relative to the full square image; keep the main subject and avoid padding."
     }
 }

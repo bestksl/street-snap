@@ -25,6 +25,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 internal enum class ModelInstallStatus { CHECKING, ABSENT, PREPARING, AVAILABLE, DOWNLOADING, INSTALLED, REMOVING, FAILED }
 internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAILED }
@@ -221,10 +222,24 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             if (isCurrentSession()) _state.update { it.copy(statusText = error.message ?: "无法分析当前画面") }
                         }, onFrame = frameCallback@{ frame ->
                         val ticket = resultGate.ticket(frame.receivedAtElapsedRealtimeMs) ?: return@frameCallback
-                        if (!frame.isCurrent || !isCurrentSession()) return@frameCallback
+                        // The gate keeps only the latest waiting frame. A frame may still
+                        // have waited longer than the result window while a previous model
+                        // call was running; skip it before touching ONNX Runtime instead
+                        // of spending another full inference only to discard the answer.
+                        if (!resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime()) ||
+                            !frame.isCurrent || !isCurrentSession()) return@frameCallback
                         val started = SystemClock.elapsedRealtime()
                         try {
-                            val suggestion = inferenceMutex.withLock { engine.suggest(frame.bitmap) }
+                            // Once this budget expires the result gate would reject the
+                            // answer anyway. Cancelling the suspend call also terminates
+                            // ONNX Runtime through SmolVlmRuntime's cancellation hook,
+                            // keeping a slow device from burning CPU on stale output.
+                            val budgetMs = resultGate.remainingMs(ticket, started)
+                                .coerceAtMost(4_750L)
+                            if (budgetMs < 250L) return@frameCallback
+                            val suggestion = withTimeoutOrNull(budgetMs) {
+                                inferenceMutex.withLock { engine.suggest(frame.bitmap) }
+                            }
                             val now = SystemClock.elapsedRealtime()
                             if (!isCurrentSession() || !frame.isCurrent) return@frameCallback
                             val fresh = resultGate.accepts(ticket, now, frame.isCurrent)
