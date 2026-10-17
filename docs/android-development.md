@@ -24,7 +24,7 @@ GitHub Actions 的 **Android** 工作流在推送到 `main`、PR 或手动触发
 
 ## 本地验证 · 2026-10-16
 
-以下记录对应已发布的 [v0.2.0-dev APK](https://github.com/bestksl/street-snap/releases/tag/v0.2.0-dev)，保留为该版本的验证记录。后续源码重新构建的大小和哈希可能不同，CI 产物以随包生成的 `SHA256SUMS` 为准。
+以下记录对应已发布的 [v0.2.0-dev APK](https://github.com/light-witness-lab/street-snap/releases/tag/v0.2.0-dev)，保留为该版本的验证记录。后续源码重新构建的大小和哈希可能不同，CI 产物以随包生成的 `SHA256SUMS` 为准。
 
 | 检查 | 结果 |
 | --- | --- |

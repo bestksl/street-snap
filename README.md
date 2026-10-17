@@ -199,20 +199,20 @@ Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测�
 
 ### CI → APK
 
-[![Android CI](https://github.com/bestksl/street-snap/actions/workflows/android.yml/badge.svg)](https://github.com/bestksl/street-snap/actions/workflows/android.yml)
+[![Android CI](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml/badge.svg)](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml)
 
 | 触发 | 产出 |
 | --- | --- |
 | 推送到 `main` / PR / 手动运行 | 构建、测试、Lint；提供 Preview / Debug APK 与 SHA-256 |
 | `v*` 版本标签 / 手动指定标签 | 固定签名 APK、SHA-256 与 Release 草稿 |
 
-体验最新代码：打开 [Actions → Android](https://github.com/bestksl/street-snap/actions/workflows/android.yml)，选择成功的运行，在摘要下载 **Preview APK**，解压后安装。CI 制品保留 30 天，下载需要登录 GitHub。
+体验最新代码：打开 [Actions → Android](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml)，选择成功的运行，在摘要下载 **Preview APK**，解压后安装。CI 制品保留 30 天，下载需要登录 GitHub。
 
-CI 包使用独立包名，显示为「途帧 CI」，可与公开版并存；临时签名变化时需卸载旧 CI 包。长期使用请下载 [Releases](https://github.com/bestksl/street-snap/releases)。标签发布需要先配置签名 Secrets，步骤见 [CI 与版本发布](docs/ci-and-releases.md)。
+CI 包使用独立包名，显示为「途帧 CI」，可与公开版并存；临时签名变化时需卸载旧 CI 包。长期使用请下载 [Releases](https://github.com/light-witness-lab/street-snap/releases)。标签发布需要先配置签名 Secrets，步骤见 [CI 与版本发布](docs/ci-and-releases.md)。
 
 ## Contributing
 
-欢迎通过 [Issue](https://github.com/bestksl/street-snap/issues) 讨论方案，通过 PR 贡献实现。当前优先完善 Android 一期拍摄流程、设备适配与行色效果。
+欢迎通过 [Issue](https://github.com/light-witness-lab/street-snap/issues) 讨论方案，通过 PR 贡献实现。当前优先完善 Android 一期拍摄流程、设备适配与行色效果。
 
 - **Camera**：原生相机接入、参数控制、设备适配。
 - **Color**：独立创作的 LUT、影调配方与调色代码。
