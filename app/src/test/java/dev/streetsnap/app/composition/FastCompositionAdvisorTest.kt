@@ -209,6 +209,122 @@ class FastCompositionAdvisorTest {
         assertFalse(FastCompositionAdvisor.suggest(96, 64, uniform).subjectLooksDistant)
     }
 
+    // --- T32: third wave of composition language ---
+
+    @Test
+    fun aHorizonStrandedInTheMiddleReadsAsBisectedFrame() {
+        val result = FastCompositionAdvisor.suggest(96, 64, centeredHorizonSplit())
+        val first = result.candidates.first()
+        assertEquals(CompositionStyle.HORIZON_SPLIT, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.HORIZON_SPLIT.title))
+        assertTrue("copy must offer a vertical move", first.reason.contains("抬高") || first.reason.contains("压低"))
+    }
+
+    @Test
+    fun aThirdLineHorizonStaysHorizonNotBisected() {
+        val styles = FastCompositionAdvisor.suggest(96, 64, horizonBands()).candidates.map { it.style }
+        assertEquals(CompositionStyle.HORIZON, styles.first())
+        assertTrue("a third-line horizon must not be called a split, got $styles",
+            styles.none { it == CompositionStyle.HORIZON_SPLIT })
+    }
+
+    @Test
+    fun anEdgeFilledBusyFrameReadsAsTooTight() {
+        val first = FastCompositionAdvisor.suggest(96, 64, crowdedTexture()).candidates.first()
+        assertEquals(CompositionStyle.TOO_TIGHT, first.style)
+        assertTrue(first.reason.contains("退后"))
+    }
+
+    @Test
+    fun aCenteredColumnIsNotTooTightOrEdgeCut() {
+        val pixels = IntArray(96 * 64) { 0xFF262626.toInt() }
+        for (y in 0 until 64) for (x in 38..58) pixels[y * 96 + x] = 0xFFE6E6E6.toInt()
+        val styles = FastCompositionAdvisor.suggest(96, 64, pixels).candidates.map { it.style }
+        assertTrue("got $styles", styles.none { it == CompositionStyle.TOO_TIGHT })
+        assertTrue("a column that nearly spans the frame is not a sideways cut, got $styles",
+            styles.none { it == CompositionStyle.EDGE_CUT })
+    }
+
+    @Test
+    fun aRegularGridIsNeitherTooTightNorMinimal() {
+        val styles = FastCompositionAdvisor.suggest(96, 64, dotGrid()).candidates.map { it.style }
+        assertTrue("got $styles", styles.none { it == CompositionStyle.TOO_TIGHT })
+        assertTrue("got $styles", styles.none { it == CompositionStyle.MINIMAL })
+    }
+
+    @Test
+    fun aSubjectRunningOffTheLeftEdgeReadsAsEdgeCutWithDirection() {
+        val result = FastCompositionAdvisor.suggest(96, 64, leftEdgeSubject())
+        val styles = result.candidates.map { it.style }
+        val edge = result.candidates.first { it.style == CompositionStyle.EDGE_CUT }
+        assertTrue("edge-cut candidate must keep the full frame",
+            edge.crop.right - edge.crop.left >= 0.95f)
+        assertTrue(edge.reason.contains("左边缘") && edge.reason.contains("向右"))
+        // The opposite side carries a secondary mass, so this is not a negative-space reading.
+        assertTrue(styles.none { it == CompositionStyle.NEGATIVE_SPACE })
+    }
+
+    @Test
+    fun anOffCenterStripDoesNotReadAsEdgeCut() {
+        val styles = FastCompositionAdvisor.suggest(96, 64, scene(0.24f)).candidates.map { it.style }
+        assertTrue("strip starts at x≈0.17, well inside the rim, got $styles",
+            styles.none { it == CompositionStyle.EDGE_CUT })
+    }
+
+    @Test
+    fun oneSmallMassOnAQuietFieldReadsAsMinimal() {
+        val result = FastCompositionAdvisor.suggest(96, 64, minimalField())
+        val minimal = result.candidates.firstOrNull { it.style == CompositionStyle.MINIMAL }
+        assertTrue("minimal candidate expected among ${result.candidates.map { it.style }}", minimal != null)
+        assertTrue(minimal!!.reason.startsWith(CompositionStyle.MINIMAL.title))
+    }
+
+    @Test
+    fun newWaveStylesNeverAppearOnFeaturelessOrTonalSplitFrames() {
+        val uniform = IntArray(96 * 64) { 0xFF707070.toInt() }
+        assertTrue(FastCompositionAdvisor.suggest(96, 64, uniform).candidates
+            .all { it.style == CompositionStyle.CONSERVATIVE })
+        val verticalSplit = IntArray(96 * 64) { index ->
+            if (index % 96 < 44) 0xFF242424.toInt() else 0xFFE6E6E6.toInt()
+        }
+        val splitStyles = FastCompositionAdvisor.suggest(96, 64, verticalSplit).candidates.map { it.style }
+        assertTrue("tonal split must not trigger edge/split/crowd language, got $splitStyles",
+            splitStyles.none {
+                it == CompositionStyle.EDGE_CUT || it == CompositionStyle.HORIZON_SPLIT ||
+                    it == CompositionStyle.TOO_TIGHT
+            })
+    }
+
+    private fun centeredHorizonSplit(): IntArray = IntArray(96 * 64) { index ->
+        if (index / 96 < 32) 0xFFD8D8D8.toInt() else 0xFF303030.toInt()
+    }
+
+    /** Aperiodic 4px texture blocks filling the whole frame (a crowded, over-full scene). */
+    private fun crowdedTexture(): IntArray = IntArray(96 * 64) { index ->
+        // Per-block hash keyed on block coordinates, so blocks stay contiguous without
+        // producing the column/row periodicity the REPETITION detector keys on.
+        val block = ((index % 96) / 4) * 73 + (index / 96 / 4) * 101
+        // Use the TOP bit of the multiplicative hash: the low bit just mirrors
+        // (col + row) parity and collapses the blocks into a checkerboard.
+        val v = if (((block * 2654435761.toInt()) ushr 31) == 0) 0x2C else 0xD8
+        0xFF000000.toInt() or (v shl 16) or (v shl 8) or v
+    }
+
+    /** Bright mass spilling out of the left rim; a smaller mass on the right denies negative space. */
+    private fun leftEdgeSubject(): IntArray {
+        val pixels = IntArray(96 * 64) { 0xFF262626.toInt() }
+        for (y in 8..56) for (x in 0..21) pixels[y * 96 + x] = 0xFFE8E8E8.toInt()
+        for (y in 22..44) for (x in 62..80) pixels[y * 96 + x] = 0xFF8A8A8A.toInt()
+        return pixels
+    }
+
+    /** One small warm mass on a flat dark field: minimalism, not a featureless frame. */
+    private fun minimalField(): IntArray {
+        val pixels = IntArray(96 * 64) { 0xFF202020.toInt() }
+        for (y in 25..37) for (x in 41..53) pixels[y * 96 + x] = 0xFFF2D26C.toInt()
+        return pixels
+    }
+
     private fun terracedBands(): IntArray = IntArray(96 * 64) { index ->
         val x = index % 96
         val y = index / 96

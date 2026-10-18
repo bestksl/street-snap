@@ -178,11 +178,16 @@ internal object FastCompositionAdvisor {
         CompositionStyle.REPETITION -> f.repetition
         CompositionStyle.CONTRAST -> f.contrast
         CompositionStyle.CONVERGENCE -> f.convergence
+        // The cut-edge detector already folds in coverage span, end insets and the
+        // opposite-side negative-space gate, so the raw reading is the scene evidence.
+        CompositionStyle.EDGE_CUT -> f.cutEdge.max()
         else -> 0.0
     }
 
     /** Styles whose claim is carried by a scene detector rather than by crop geometry. */
     private val evidenceStyles = listOf(
+        // Tied with another saturated reading, the actionable edge warning gets the seed.
+        CompositionStyle.EDGE_CUT,
         CompositionStyle.SYMMETRY,
         CompositionStyle.VERTICAL,
         CompositionStyle.HORIZON,
@@ -227,6 +232,18 @@ internal object FastCompositionAdvisor {
         val convergenceGeometry = (1 - abs(centreU - 0.5) / 0.30).coerceIn(0.0, 1.0) *
             ((scale - 0.84) / 0.08).coerceIn(0.0, 1.0) *
             (1 - crop.top / 0.25).coerceIn(0.0, 1.0)
+        // A bisected horizon: the dividing line sits in the middle band of BOTH the frame
+        // and the crop. Tight crops that cut the line away score nothing, and a line already
+        // near a third belongs to HORIZON instead.
+        val splitLine = (f.horizonY - crop.top) / scale
+        val horizonSplitGeometry = if (splitLine in 0.30..0.70 && f.horizonY in 0.40..0.60) {
+            (1.0 - abs(f.horizonY - 0.5) / 0.10).coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        // "Step back" advice is scene-level and pairs with a near-full-frame crop: no tighter
+        // cut can solve content pressing against the edges.
+        val fullFrameGeometry = ((scale - 0.90) / 0.10).coerceIn(0.0, 1.0)
         return mapOf(
             CompositionStyle.THIRDS to thirdsGeometry,
             CompositionStyle.CENTERED to f.centered *
@@ -255,7 +272,10 @@ internal object FastCompositionAdvisor {
                 f.negSpace[3] * ((v - 0.45) / 0.35).coerceIn(0.0, 1.0),
             ),
             CompositionStyle.WIDE_CONTEXT to f.scattered *
-                ((scale - 0.88) / 0.08).coerceIn(0.0, 1.0),
+                ((scale - 0.88) / 0.08).coerceIn(0.0, 1.0) *
+                // Content pressing on the rims is the stronger "step back" reading; let
+                // TOO_TIGHT own it instead of the milder "keep the context" wording.
+                (1.0 - 0.75 * f.edgeCrowd),
             CompositionStyle.SYMMETRY to
                 sceneEvidence(CompositionStyle.SYMMETRY, f) * symmetryGeometry,
             CompositionStyle.VERTICAL to f.verticalStrength *
@@ -268,8 +288,23 @@ internal object FastCompositionAdvisor {
             // Chiaroscuro without a clean dividing line: hard light that splits the frame
             // into tonal blocks is claimed by HORIZON/VERTICAL, contrast keeps the rest.
             CompositionStyle.CONTRAST to f.contrast *
-                (1 - abs(scale - 0.88) / 0.20).coerceIn(0.0, 1.0),
+                (1 - abs(scale - 0.88) / 0.20).coerceIn(0.0, 1.0) *
+                // A frame packed edge to edge with small tonal blocks is bimodal noise, not
+                // a subject straddling a tonal boundary — TOO_TIGHT owns that reading.
+                (1.0 - 0.85 * f.edgeCrowd),
             CompositionStyle.CONVERGENCE to f.convergence * convergenceGeometry,
+            CompositionStyle.HORIZON_SPLIT to f.horizontalSplit * horizonSplitGeometry *
+                ((scale - 0.84) / 0.08).coerceIn(0.0, 1.0),
+            CompositionStyle.TOO_TIGHT to f.edgeCrowd * fullFrameGeometry,
+            // "Step sideways" is advice about the current framing: only a near-full-frame
+            // crop may carry it (the style-seed path injects that exact crop), otherwise
+            // the warning would be paired with a crop that already hides the problem.
+            CompositionStyle.EDGE_CUT to f.cutEdge.max() *
+                ((scale - 0.94) / 0.06).coerceIn(0.0, 1.0),
+            // Minimalism is about NOT enlarging the one mass, so the claim must survive even
+            // tight energy-chasing crops — no near-full-frame gate here.
+            CompositionStyle.MINIMAL to f.minimal *
+                ((scale - 0.55) / 0.20).coerceIn(0.0, 1.0),
         )
     }
 
@@ -289,21 +324,29 @@ internal object FastCompositionAdvisor {
         features: SceneFeatures,
     ): List<ScoredCrop> {
         if (selected.size < 3) return selected
-        val represented = evidenceStyles.any { style ->
-            selected.maxOf { affinities(it, features)[style] ?: 0.0 } >= 0.18
-        }
-        if (represented) return selected
+        // A seed is a strong scene language the chosen crops do not already express; only
+        // the strongest missing one replaces the third proposal. Checking representation
+        // PER STYLE matters: a crop can express CONTRAST strongly while the same frame's
+        // cut-edge warning stays completely unrepresented.
         val seed = evidenceStyles
             .associateWith { sceneEvidence(it, features) }
             .filterValues { it >= 0.60 }
+            .filterKeys { style ->
+                selected.maxOf { affinities(it, features)[style] ?: 0.0 } < 0.18
+            }
             .maxByOrNull { it.value }
             ?: return selected
         val seedStyle = seed.key
-        val replacement = ranked
-            .filter { crop -> selected.all { intersectionOverUnion(crop, it) < 0.80 } }
-            .filter { it.score >= selected.last().score - 0.10 && it.score >= 0.45 }
-            .maxByOrNull { (affinities(it, features)[seedStyle] ?: 0.0) * 0.7 + it.score * 0.3 }
-            ?: return selected
+        // A crossed-edge warning is advice about the CURRENT framing, so pair it with the
+        // full-frame crop; the generic IoU (<0.80) diversity gate would reject exactly that.
+        val replacement = if (seedStyle == CompositionStyle.EDGE_CUT) {
+            ranked.firstOrNull { it.left == 0.0 && it.top == 0.0 && it.scale == 1.0 }
+        } else {
+            ranked
+                .filter { crop -> selected.all { intersectionOverUnion(crop, it) < 0.80 } }
+                .filter { it.score >= selected.last().score - 0.10 && it.score >= 0.45 }
+                .maxByOrNull { (affinities(it, features)[seedStyle] ?: 0.0) * 0.7 + it.score * 0.3 }
+        } ?: return selected
         if ((affinities(replacement, features)[seedStyle] ?: 0.0) < 0.35) return selected
         return selected.take(2) + replacement
     }
@@ -353,6 +396,21 @@ internal object FastCompositionAdvisor {
             else "明暗对比 · 画面亮暗分明，让主体压在亮暗交界处"
         CompositionStyle.CONVERGENCE ->
             "汇聚线构图 · 两侧线条向远处收拢，把主体放在汇聚点上"
+        CompositionStyle.HORIZON_SPLIT -> when {
+            features.horizonY < 0.47 -> "水平腰斩 · 分界线卡在正中略偏上，压低机位让地面成为主角"
+            features.horizonY > 0.53 -> "水平腰斩 · 分界线卡在正中略偏下，抬高机位给天空让出空间"
+            else -> "水平腰斩 · 分界线横在正中把画面一分为二，抬高机位要天空、压低要地面"
+        }
+        CompositionStyle.TOO_TIGHT ->
+            "取景太满 · 内容顶到画面边缘，退后半步，给主体四周留出呼吸的空间"
+        CompositionStyle.EDGE_CUT -> when (features.cutEdge.withIndex().maxByOrNull { it.value }?.index) {
+            0 -> "主体贴边 · 主体顶住左边缘，向右平移半步，给视线前方留出空间"
+            1 -> "主体贴边 · 主体顶住右边缘，向左平移半步，给视线前方留出空间"
+            2 -> "主体贴边 · 主体顶到下边缘，向上平移或退后半步，避免把脚裁掉"
+            else -> "主体贴边 · 主体顶到上边缘，向下平移或退后半步，给头顶留出空间"
+        }
+        CompositionStyle.MINIMAL ->
+            "极简留白 · 大面积素净区域本身就是语言，保持留白，别把主体拍大"
         CompositionStyle.CONSERVATIVE -> "纹理与对比较少，保留完整画面更稳妥"
         CompositionStyle.GENERIC -> when {
             crop.scale >= 0.92 -> "保留更多环境与明暗结构，避免过度裁切"
@@ -471,6 +529,12 @@ internal class SceneFeatures private constructor(
     val foreground: DoubleArray,
     /** Empty-band strength: index 0 = left, 1 = right, 2 = bottom, 3 = top. */
     val negSpace: DoubleArray,
+    /** Content reaches at least three outer rims while the middle stays busy (frame is overfull). */
+    val edgeCrowd: Double,
+    /** One edge alone is crossed by content; index 0 = left, 1 = right, 2 = bottom, 3 = top. */
+    val cutEdge: DoubleArray,
+    /** One small mass on a predominantly quiet field (minimalism, not a featureless frame). */
+    val minimal: Double,
 ) {
     val foregroundBottomStrong: Boolean get() = foreground[0] >= foreground[1]
 
@@ -701,6 +765,27 @@ internal class SceneFeatures private constructor(
                 ((minorityShare - 0.14) / 0.10).coerceIn(0.0, 1.0) *
                 (1.0 - 0.9 * horizontalSplit) * (1.0 - 0.8 * singleSlope)
 
+            // Overfull frame (TOO_TIGHT): content fills the outer 8% rims on at least three
+            // sides, the middle cell is not hollow and most grid cells are busy. The gate is
+            // absolute density (edges simply do not breathe), not edges-vs-centre contrast:
+            // an evenly busy texture stays "too tight", while FRAME (busy border, quiet
+            // middle) and four-corner scenes fail the centre/cell-count gates instead.
+            // Computed before the rhythm detector so a packed texture field can yield.
+            val rimRegions = arrayOf(
+                doubleArrayOf(0.0, 0.0, 0.08, 1.0), doubleArrayOf(0.92, 0.0, 1.0, 1.0),
+                doubleArrayOf(0.0, 0.92, 1.0, 1.0), doubleArrayOf(0.0, 0.0, 1.0, 0.08),
+            )
+            val rimDensities = rimRegions.map { sigDensity(it[0], it[1], it[2], it[3]) }
+            val crowdedRims = rimDensities.count { it >= meanDensity * 0.9 }
+            val busyCells = cells.sumOf { column -> column.count { it >= meanDensity * 0.85 } }
+            val edgeCrowd = ((crowdedRims - 2.5) / 0.5).coerceIn(0.0, 1.0) *
+                (cells[1][1] / (meanDensity * 0.9)).coerceIn(0.0, 1.0) *
+                ((busyCells - 6) / 2.0).coerceIn(0.0, 1.0) *
+                // A directional field (diagonal stripes, a horizon) fills every rim by
+                // geometry, not because a subject crowds the frame — that language wins.
+                (1.0 - 0.85 * singleSlope.coerceAtMost(1.0)) *
+                (1.0 - 0.85 * horizontalSplit)
+
             // Rhythm: a sharp non-zero autocorrelation lag with at least three repetitions.
             // The half-lag correlation must be negative (alternating bands/blocks); a single
             // wide pulse whose autocorrelation only decays does not count as rhythm. Diagonal
@@ -711,7 +796,11 @@ internal class SceneFeatures private constructor(
                 val energy = centered.sumOf { it * it }
                 if (energy < 1e-9) return 0.0
                 var best = 0.0
-                for (lag in 3..n / 3) {
+                // Rhythm means recognisable repeated ELEMENTS (railings, columns): at 96px
+                // the lag must span at least an eighth of the frame. A finer-period peak
+                // (a few-pixel texture or grain) reads as an over-full frame, not rhythm.
+                val minLag = maxOf(3, n / 8)
+                for (lag in minLag..n / 3) {
                     fun normalizedAt(offset: Int): Double {
                         var acc = 0.0
                         for (i in 0 until n - offset) acc += centered[i] * centered[i + offset]
@@ -741,7 +830,11 @@ internal class SceneFeatures private constructor(
             }
             val repetition = ((maxOf(periodicStrength(columnProjection),
                 periodicStrength(rowProjection)) - 0.45) / 0.30).coerceIn(0.0, 1.0) *
-                (1.0 - 0.85 * singleSlope)
+                (1.0 - 0.85 * singleSlope) *
+                // A fine texture packed against every edge (edgeCrowd saturated) is an
+                // over-full frame, not a rhythm of distinct elements — railings and columns
+                // leave breathing gaps, so true rhythm keeps this gate open.
+                (1.0 - 0.9 * edgeCrowd)
 
             // Convergence: strong diagonal edges in the left half lean "/" while the right
             // half leans "\", both groups heading inward toward the upper centre. A single
@@ -840,9 +933,91 @@ internal class SceneFeatures private constructor(
             val activeCells = cells.sumOf { column -> column.count { it > meanDensity * 1.5 } }
             val scattered = ((activeCells - 3).toDouble() / 2.0).coerceIn(0.0, 1.0)
 
+            // One crossed edge (EDGE_CUT): a content mass runs out of one frame side. Band
+            // density alone mistakes a horizon or a tonal split crossing the edge for this,
+            // so the signal is coverage ALONG the edge: a cropped subject fills a 30..90%
+            // stretch of both the outer 7% rim and the band just inside it, whereas a
+            // horizontal/vertical boundary occupies either a single thin line or 100% of the
+            // side (a background field). When the opposite edge is genuinely empty the
+            // reading already belongs to NEGATIVE_SPACE / thirds, so yield there.
+            fun sideCoverage(side: Int): Double {
+                // Walk along the edge; a line position counts when both its outer-rim segment
+                // and its inner-band segment carry above-average signal. The rim spans 7% of
+                // the cross-edge dimension (w for L/R, h for T/B).
+                val verticalEdge = side <= 1
+                val across = if (verticalEdge) w else h
+                val rim = max(2, (0.07 * across).toInt())
+                val outer = IntArray(2)
+                val inner = IntArray(2)
+                val along: Int
+                when (side) {
+                    0 -> { outer[0] = 0; outer[1] = rim; inner[0] = rim; inner[1] = 2 * rim; along = h }
+                    1 -> { outer[0] = w - rim; outer[1] = w; inner[0] = w - 2 * rim; inner[1] = w - rim; along = h }
+                    2 -> { outer[0] = h - rim; outer[1] = h; inner[0] = h - 2 * rim; inner[1] = h - rim; along = w }
+                    else -> { outer[0] = 0; outer[1] = rim; inner[0] = rim; inner[1] = 2 * rim; along = w }
+                }
+                var covered = 0
+                var firstCovered = along
+                var lastCovered = -1
+                for (a in 0 until along) {
+                    var outerSum = 0.0
+                    var innerSum = 0.0
+                    for (c in outer[0] until outer[1]) {
+                        val idx = if (side <= 1) a * w + c else c * w + a
+                        outerSum += signal[idx]
+                    }
+                    for (c in inner[0] until inner[1]) {
+                        val idx = if (side <= 1) a * w + c else c * w + a
+                        innerSum += signal[idx]
+                    }
+                    val segLen = (outer[1] - outer[0]).coerceAtLeast(1)
+                    if (outerSum / segLen >= meanDensity * 1.1 &&
+                        innerSum / segLen >= meanDensity * 1.1) {
+                        covered++
+                        firstCovered = minOf(firstCovered, a)
+                        lastCovered = a
+                    }
+                }
+                val coverage = covered.toDouble() / along
+                if (coverage <= 0.0) return 0.0
+                // A tonal split starts at a corner and runs the whole edge; a cropped subject
+                // leaves breathing room at BOTH ends along the edge it crosses.
+                val inset = minOf(firstCovered.toDouble(), along - 1.0 - lastCovered) / along
+                val insetGate = ((inset - 0.04) / 0.06).coerceIn(0.0, 1.0)
+                return coverage * insetGate
+            }
+            // negSpace order is L, R, B, T — the opposite edge of each cut side.
+            val oppositeOf = intArrayOf(1, 0, 3, 2)
+            val cutEdge = DoubleArray(4) { side ->
+                val coverage = sideCoverage(side)
+                // Ramp up from ~30% coverage, ramp back to zero past ~90% (full-bleed field).
+                val spanGate = ((coverage - 0.30) / 0.25).coerceIn(0.0, 1.0) *
+                    (1.0 - ((coverage - 0.90) / 0.10).coerceIn(0.0, 1.0))
+                spanGate * (1.0 - negSpace[oppositeOf[side]])
+            }
+
+            // Minimalism: a very large share of pixels is near-silent while exactly one grid
+            // cell carries a concentrated mass. Featureless frames never get here (they bail
+            // out before feature extraction); a quiet field around one mass is not "no scene".
+            var quietPixels = 0
+            for (i in signal.indices) if (signal[i] < meanDensity * 0.25) quietPixels++
+            val quietShare = ((quietPixels.toDouble() / (w * h) - 0.72) / 0.18).coerceIn(0.0, 1.0)
+            val topCellShare = cells.flatMap { it.toList() }.max() / (9.0 * meanDensity)
+            val minimal = if (activeCells <= 1) {
+                quietShare * ((topCellShare - 0.28) / 0.22).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
+            // Minimalism is the stronger reading of a one-mass-on-quiet-field frame: once it
+            // fires, the same quiet bands must not also sell the shot as "negative space".
+            if (minimal > 0.0) {
+                for (i in negSpace.indices) negSpace[i] *= (1.0 - 0.85 * minimal)
+            }
+
             return SceneFeatures(symmetry, diagonal, orientationSign >= 0.0, slopePurity, leading,
                 centered, scattered, frame, triangle, verticalStrength, horizontalSplit, horizonY,
-                repetition, contrast, darkShare, convergence, lateralTexture, foreground, negSpace)
+                repetition, contrast, darkShare, convergence, lateralTexture, foreground, negSpace,
+                edgeCrowd, cutEdge, minimal)
         }
     }
 }
