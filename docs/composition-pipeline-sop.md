@@ -146,6 +146,15 @@ T28 §2.2 标准 3 的落地。纯逻辑在 `composition/AlignmentFeedback.kt`�
 - 测试：新增 `AlignmentFeedbackTest` 10 测（阈值 3% 边界含单边、问题风格四不触发、开机即好帧不夸、8 帧连续才发且之后不重发、单帧闪烁打断后 streak 归零重数、latch 后 1–2 帧偏离不误 rearm、持续偏离 3 帧后可再确认一次、无动作需求不武装、reset 重来）；CompositionActions 12 + advisor 32 等全量 app/color/camera 测试绿，assemblePreview 通过。
 - AVD（emulator-5580，loaded-only）：VirtualScene 站位仍不可经 adb 驱动，走 T31 路线一次性注入合成轨迹（前 4 帧非到位且带真实动作句、第 5 帧起到位）：logcat 实测事件在连续第 8 帧单发一次（draw=11 ALIGNED、其后全部 null），截图确认整框转绿 + 小勾渲染；随后删除全部临时代码（`grep T34-TEMP/T34TEMP` 源码零命中），全量重测重包，逐 dex `strings | grep` 零命中。设置面板实测开关可切、force-stop 重启后 checked=true 持久化（已关回默认 false）。正式包冒烟 8s 实时建议正常无 FATAL。真实「人按句子走到位」的端到端反馈仍受站位限制，not-verified，留真机；审美质量不由此特性声称。
 
+### T35：长按建议卡「试取景」（纯显示变换，照片永远全幅）
+
+T28 §2.2 标准 4 的落地。纯逻辑在 `composition/CropTrial.kt`：`CropTrial.from(crop)` 把建议框换算成预览变换——等比 scale 取 `max(1/width, 1/height)`（cover，短边撑满、长边溢出裁切，绝不拉伸），变换原点取框中心 `(centerU, centerV)`；四边最大 inset ≤ `AlignmentFeedback.FRAME_TOLERANCE`（即全幅）返回 null，全幅建议没有可试的景。与 T34 共用同一「等于全幅」阈值。
+
+接线（`CameraScreen` Viewfinder）：预览 Box 加 `clipToBounds()` 防止放大后画出 3:4 画面；`AndroidView` 用 `graphicsLayer` 在长按期间设 scaleX/scaleY + TransformOrigin(框中心) + translation 把框中心移到屏中心。建议卡 Column 挂自定义 `pointerInput`（`awaitEachGesture` + `awaitFirstDown` 消费 down + `awaitLongPressOrCancellation`），长按成立才进入试取景并循环等到手指全部抬起还原；消费 down 也挡住了下层 Canvas 的点按对焦/AF-L。试取景期间：隐藏蓝色推荐框/遮罩/三分线（框已铺满整个取景器，再画是遮黑）、隐藏顶部 pill 行（避免与提示条重叠）、顶部居中显示黑底胶囊「试取景 · 松开还原」。场景切换发布不同 suggestion 时，持有的 trialCrop 与当前框不等即自动结束（`activeTrial = trialCrop?.takeIf { it == suggestedBox }`）。**铁律**：这是 PreviewView 单一 use case 的显示层变换，ImageCapture 是独立 use case，不碰拍照链路、不改规则/模型框坐标；松手即还原。
+
+- 测试：`CropTrialTest` 7 测（全幅与 3% 容差 null、居中 .92 框等比 1/.92 且中心不变、偏置框中心随动、cover 取短边、最紧 .68 档缩放上界、窄条沿薄边缩放、合法框约束下的退化情形——NormalizedBoundingBox 契约禁止零/逆序尺寸）；全量 app/color/camera 测试绿，assemblePreview 通过。
+- AVD（emulator-5580，loaded-only）：用 `input motionevent DOWN/UP` 保持长按态截图——长按中预览按 1/.92 放大、框线遮罩隐去、提示条出现（初版与「构图」pill 重叠，改为长按期隐藏顶部行后复测干净），抬手后蓝框/遮罩/三分线完整还原；**试取景长按保持中用音量键拍照**，MediaStore 实测产物 `STREET_...jpg` 为 960×1280 全幅 3:4（测试后删除），证明显示放大不影响成像；无 FATAL。站位移动限制同前，但本特性不依赖站位。审美质量不由此特性声称。
+
 ## 历史诊断：为什么先前没有框
 
 此前直接让通用 SmolVLM 生成裁切坐标，实际输出包含 `[0,0,0,0]`、残缺坐标或普通描述，被合法性检查拒绝。相机输入与 ONNX 推理已打通；未经过本项目构图/定位训练的模型不能仅凭提示词保证坐标和审美能力。此前 Q4 语义探针曾连续两次正确识别画面右侧电视，描述任务也出现人物幻觉，不能据此证明可靠定位。

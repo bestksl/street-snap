@@ -29,6 +29,9 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -87,6 +90,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -119,9 +125,11 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.streetsnap.app.composition.CropTrial
 import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.ExposureMode
+import dev.streetsnap.camera.NormalizedBoundingBox
 import dev.streetsnap.camera.FocalLength
 import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorPreset
@@ -459,10 +467,29 @@ private fun Viewfinder(
         // Framed fills its box. The floating portrait path pins to TopCenter; landscape
         // keeps the 3:4 picture centred beside/below its chrome.
         val previewAlignment = if (framed || maxWidth > maxHeight) Alignment.Center else Alignment.TopCenter
-        Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment)) {
+        // clipToBounds keeps the T35 long-press trial zoom from painting outside the 3:4 picture.
+        Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment).clipToBounds()) {
+            // T35: while the advice card is long-pressed, the preview zooms to the suggested
+            // crop. Display-only: ImageCapture is a separate use case, photos stay full frame.
+            var trialCrop by remember { mutableStateOf<NormalizedBoundingBox?>(null) }
+            val suggestedBox = compositionOverlay?.suggestion?.let {
+                NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
+            }
+            // A scene change publishes a different suggestion (or null); the held trial then
+            // ends visually even before the finger lifts.
+            val activeTrial = trialCrop?.takeIf { it == suggestedBox }?.let(CropTrial::from)
             AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().onSizeChanged {
                 width = it.width
                 height = it.height
+            }.graphicsLayer {
+                val trial = activeTrial
+                if (trial != null) {
+                    scaleX = trial.scale
+                    scaleY = trial.scale
+                    transformOrigin = TransformOrigin(trial.centerU, trial.centerV)
+                    translationX = (0.5f - trial.centerU) * size.width
+                    translationY = (0.5f - trial.centerV) * size.height
+                }
             })
             val roll = rememberLevelAngle(settings.level, preview)
             // Rule advice refreshes several times per second; ease the rectangle so the
@@ -545,7 +572,9 @@ private fun Viewfinder(
                     drawRect(color, Offset(x - radius, y - radius),
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
-                compositionOverlay?.let { overlay ->
+                // While the T35 trial zoom fills the screen the guide rectangle and shade
+                // are the whole viewfinder, so hide them instead of masking the preview.
+                if (activeTrial == null) compositionOverlay?.let { overlay ->
                     // Reading the animated values here (inside the draw scope) means
                     // animation ticks only redraw this canvas, not recompose the screen.
                     val crop = smoothCrop.crop
@@ -592,7 +621,16 @@ private fun Viewfinder(
                     }
                 }
             }
-            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (activeTrial != null) {
+                Text("试取景 · 松开还原",
+                    Modifier.align(Alignment.TopCenter).padding(top = 14.dp)
+                        .background(Color.Black.copy(alpha = .62f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                    color = Color.White, fontSize = 12.sp)
+            }
+            // The top pill row would collide with the "试取景 · 松开还原" label; it is
+            // transient anyway (finger still down), so hide the whole row during the trial.
+            if (activeTrial == null) Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 // Single quiet corner entry: off -> histogram -> histogram + exposure readout -> off.
                 OsdCycleButton(osdMode, model::cycleViewfinderOsd)
                 Spacer(Modifier.weight(1f))
@@ -677,7 +715,27 @@ private fun Viewfinder(
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
-                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)) {
+                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)
+                    // T35: long-press the card to preview the suggested framing; releasing restores.
+                    // Consuming the down also stops the canvas underneath from tapping focus / AF-L.
+                    .pointerInput(compositionOverlay) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            val held = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            val box = compositionOverlay?.suggestion?.let {
+                                NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
+                            }
+                            if (box != null && CropTrial.from(box) != null) {
+                                trialCrop = box
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    if (event.changes.none { it.pressed }) break
+                                }
+                                trialCrop = null
+                            }
+                        }
+                    }) {
                     compositionOverlay?.suggestion?.let { s ->
                         // T33: the executable move is the headline; terminology ("三分构图 · …")
                         // stays as the supporting line. Styles whose copy is already a move
