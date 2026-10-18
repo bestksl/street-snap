@@ -138,7 +138,7 @@
 
 - 取景器常驻一键开关 `HdrToggleButton`（38dp 圆形，与 OSD 角钮同规格）：落在取景器**左上、OSD 角钮正下方（top=52dp）**，与右侧直方图/PARAMS 卡左右对称、不重叠，且把右上区域留给 T27 胶片徽章；关时安静深底白字、开时主色高亮；contentDescription「HDR 效果开关」+ stateDescription 已开启/关闭。
 - 持久化/默认关/JSON 往返/legacy 恢复/越界夹取随 T24 一并落地（SettingsJsonTest 已覆盖，默认值向后兼容无需 version bump）；开启时进 ActiveOverride 药丸（点击进影调面板、长按复位）；面板内 HDR 按钮（柔光参数行）保留为第二入口。
-- AVD：默认关、常驻钮始终可见；一键开/关即时生效（以药丸存在与否判状态，uiautomator 的 selected 标志对自定义钮不可靠）；force-stop 重启后开启态保持；竖屏与横屏 fallback 布局均无遮挡；OSD PARAMS 卡与 HDR 钮左右分列不撞。viewfinder.png 待与 T27 胶片徽章一并重截。
+- AVD：默认关、常驻钮始终可见；一键开/关即时生效（以药丸存在与否判状态，uiautomator 的 selected 标志对自定义钮不可靠）；force-stop 重启后开启态保持；竖屏与横屏 fallback 布局均无遮挡；OSD PARAMS 卡与 HDR 钮左右分列不撞。viewfinder.png 已随 T27 胶片徽章重截（2026-10-19，TRI-X 默认态）。
 
 ### T26 胶片颗粒强化（color 模块）
 
@@ -161,6 +161,14 @@
 - 跟随当前 look/film 切换（复用 FilmRegistry / basePreset 族映射）；点按直达影调面板；contentDescription 报当前影调名。
 - 与三胶囊、PARAMS 卡（top=106dp）、水平仪重新排布：候选把三胶囊保持顶行、小画落在其下方右上角（与左侧 OSD 角钮纵向呼应），PARAMS 态时小画让位/下移；AVD 逐影调截图核对不重叠；宽横屏/小横屏同步评估。
 - 重截 viewfinder.png 与 images README；只用配色意象，不用任何厂方图像/商标素材。
+
+#### 实现与验证记录（2026-10-19，loaded-only：软件渲染 AVD）
+
+- 新增 `app/.../FilmBadge.kt`：`FilmFrameBadge`（48dp 圆角 12dp、黑 32% 底托）内绘 40×27dp 原创 35mm 片格——暖黑/近黑片边、上下各三片孔（perf，随片基冷暖取色）、画格为 look 特征色对角线性渐变，彩色款右下一枚 ≤画格 1/9 面积的饱和小方块，原色款改画格中部 RGB 三点，黑白款（MONO/ACROS/L.单色/TRI-X）纯灰阶无彩点。`LookBadgePalette.of(filmId, preset)` 覆盖全部 7 胶片 + 13 preset（含 CUSTOM 中性板、未知 filmId 回退 preset），20 种身份无空窗；配色全部取自第三节原创估色表。
+- 挂载点在**取景器内右上**（`Viewfinder` 预览 Box 的 TopEnd），而非取景器外的铭牌条：与左列 HDR 圆钮（top=52dp）顶对齐；`animateDpAsState` 按 osdMode 自动避让——OFF top=52dp（与 HDR 同行）、HISTOGRAM top=106dp（让到直方图卡下）、PARAMS top=180dp（让到参数卡下）；三种布局路径（竖屏 framed、宽横屏 side rail、小横屏 floating）均挂载，点按一律打开影调面板（AdjustmentTab.LOOK）；contentDescription「胶片小画：<名>，点按调整影调」。
+- 单测 `FilmBadgePaletteTest`：七卷胶片与全部 preset（含 CUSTOM）均解析、gate 非空板；未知 filmId 回退等价；四个黑白身份 mono 且无 accent、gate 通道差 <0.05；原色 original 且无 accent。`:app:testDebugUnitTest`、`:app:assemblePreview` 通过。
+- AVD（emulator-5580）逐影调截图核对：TRI-X 灰阶片格、正片高密度反转蓝+小红块、负片奶白→灰蓝+砖红、原色灰底 RGB 三点、晴街晴空蓝+阳光黄、500T 深钨蓝+小红、C200 冷绿+极小红点，48dp 下片孔/渐变/彩点均可辨；点击 (938,473) 直达影调面板且落在影调 tab；OSD 三档徽章平滑下移、与直方图/PARAMS 卡零重叠；宽横屏 side rail 落在取景器右上 AF 胶囊下方、不压侧栏控件。
+- 重截 `docs/images/viewfinder.png`（720×1560，TRI-X 默认态、OSD 关、HDR 关），同步更新 images/README 与根 README alt（补胶片小画与 HDR 钮、影调改为 TRI-X）。**仍 not-verified：真机肉眼可辨度（高分屏 48dp 片孔 2.6dp）、真机 GPU 渐变观感**。
 
 ## 五、主要参考
 

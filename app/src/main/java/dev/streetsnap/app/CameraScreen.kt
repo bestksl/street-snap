@@ -18,6 +18,7 @@ import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.activity.result.contract.ActivityResultContracts
@@ -217,7 +218,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         val sideWidth = minOf(356.dp, maxWidth * .48f)
                         Row(Modifier.fillMaxSize()) {
                             Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay, compositionState,
-                                Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ })
+                                Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ },
+                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
                             ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                 Modifier.width(sideWidth).fillMaxHeight(),
                                 adjustmentTab, { adjustmentTab = it }, sidePanel = true,
@@ -271,7 +273,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                                     modifier = Modifier.fillMaxWidth().height(nameplateHeight))
                             }
                             Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
-                                Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ })
+                                Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ },
+                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
                             ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
                                 Modifier.fillMaxWidth().weight(1f), framed = true,
                                 onTab = { adjustmentTab = it },
@@ -289,7 +292,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // Small landscape / split-screen: the viewfinder owns the space and
                         // shutter/focal controls float over its lower edge.
                         Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
-                            Modifier.fillMaxSize(), onRetry = { retry++ })
+                            Modifier.fillMaxSize(), onRetry = { retry++ },
+                            onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
                         ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                             onTab = { adjustmentTab = it },
@@ -342,6 +346,7 @@ private fun Viewfinder(
     // Portrait camera-back layout: the caller already sizes this composable to the exact
     // 3:4 screen, so overlays only need a small lift off its bottom edge.
     framed: Boolean = false,
+    onOpenLooks: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -581,9 +586,21 @@ private fun Viewfinder(
                     })
             }
             // Persistent HDR toggle, stacked under the OSD corner button; the right column
-            // stays reserved for the histogram/readout card and the future film badge.
+            // hosts the histogram/readout card, so the film badge steps below whichever
+            // OSD card is showing (OFF: beside HDR, HISTOGRAM: under it, PARAMS: lowest).
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
+            val badgeTop by animateDpAsState(
+                when (osdMode) {
+                    ViewfinderOsd.HISTOGRAM -> 106.dp
+                    ViewfinderOsd.PARAMS -> 180.dp
+                    else -> 52.dp
+                }, label = "filmBadgeTop")
+            val badgePreset = settings.colorRecipe().preset
+            val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
+                ?: badgePreset.displayName
+            FilmFrameBadge(settings.filmId, badgePreset, badgeLabel, onOpenLooks,
+                Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop))
             // DSLR-style readout under the histogram. Every value is reported by the
             // camera: automatic slots read AUTO rather than a guessed number, aperture is
             // shown only when the device actually reports a fixed one (most phones do not).

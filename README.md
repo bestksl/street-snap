@@ -30,7 +30,7 @@
 
 | 竖屏取景与构图建议（铭牌跟随影调族） | 取景器相机：跟随影调 / 固定 / 隐藏 | 构图辅助与端侧模型管理 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧竖屏取景界面：顶部镜头标铭牌、3:4 取景屏内三分网格与画面分析蓝框中文建议卡、底部实体控制簇内焦段条、居中快门与调整入口"> | <img src="docs/images/camera-picker.png" width="250" alt="取景器相机弹窗：跟随影调为首卡共六卡、五款固定机身、不显示切换与取景方向"> | <img src="docs/images/edge-models.png" width="250" alt="构图辅助设置：推荐框与实时开关、三个可选端侧模型、已安装 417.7MB 的 d1 决策 600M"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧竖屏取景界面（TRI-X 黑白胶片）：顶部跟随影调的 GR 铭牌、3:4 取景屏内三分网格、右上角 35mm 片格胶片小画与左侧 HDR 常驻钮、底部实体控制簇内焦段条、居中快门与调整入口"> | <img src="docs/images/camera-picker.png" width="250" alt="取景器相机弹窗：跟随影调为首卡共六卡、五款固定机身、不显示切换与取景方向"> | <img src="docs/images/edge-models.png" width="250" alt="构图辅助设置：推荐框与实时开关、三个可选端侧模型、已安装 417.7MB 的 d1 决策 600M"> |
 
 <p align="center">
 <img src="docs/images/model-adoption.png" width="660" alt="横屏取景：端侧模型通过门闸后推荐框升级为黄色 AI 选择，附中文建议卡与来源、耗时"><br>
