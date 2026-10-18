@@ -49,7 +49,7 @@ GitHub Actions 的 **Android** 工作流在推送到 `main`、PR 或手动触发
 - 普通构建与 `-PciBuild=true` 构建通过；CI 包名为 `dev.streetsnap.app.ci`，显示名为「途帧 CI」。
 - 使用一次性测试密钥验证 Release 签名构建与 `apksigner verify`，随后删除测试密钥并恢复未签名 Release 输出。
 - 32 项单元测试通过，Debug Lint 无错误；Actions 工作流通过 `actionlint` 检查，APK 打包脚本与校验文件已本地验证。
-- Android 15 模拟器已验证普通版和 CI 版并存、实时取景、拍照保存、影调调节与白平衡漂移；README 的三张图片来自实际 APK，详见 [截图说明](images/README.md)。
+- Android 15 模拟器已验证普通版和 CI 版并存、实时取景、拍照保存、影调调节与白平衡漂移；README 的界面截图来自实际 APK，详见 [截图说明](images/README.md)。
 
 以上不代替 GitHub Actions 远端运行或荣耀 Vs3 真机验收。固定发布签名仍需按 [发布文档](ci-and-releases.md) 配置。
 
