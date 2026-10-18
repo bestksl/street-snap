@@ -8,6 +8,8 @@ import dev.streetsnap.app.composition.CandidateContactSheet
 import dev.streetsnap.app.composition.CandidateSelectionGate
 import dev.streetsnap.app.composition.CompositionCandidate
 import dev.streetsnap.app.composition.FastCompositionAdvisor
+import dev.streetsnap.app.composition.SceneReading
+import dev.streetsnap.app.composition.SceneReadings
 import dev.streetsnap.app.edge.CompositionSuggestion
 import dev.streetsnap.app.edge.CropRanking
 import dev.streetsnap.app.edge.CandidateRanker
@@ -102,6 +104,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     val source = _source.asStateFlow()
     private val _overlay = MutableStateFlow<CompositionOverlay?>(null)
     val overlay = _overlay.asStateFlow()
+    /** Coarse colour/light statistics from the latest rule-analysis frame; consumed later by look/exposure advice. */
+    private val _sceneReading = MutableStateFlow<SceneReading?>(null)
+    val sceneReading = _sceneReading.asStateFlow()
     private val resultGate = CompositionResultGate(maximumAgeMs = 65_000L)
     private val sessionMutex = Mutex()
     private val inferenceMutex = Mutex()
@@ -149,6 +154,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         resultGate.invalidate(SystemClock.elapsedRealtime())
         _source.value?.invalidateFrames()
         _overlay.value = null
+        _sceneReading.value = null
         expiryJob?.cancel()
         _state.update { it.copy(adviceOrigin = null) }
     }
@@ -349,6 +355,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     selectedScene = null
                     selectedCandidate = null
                     _overlay.value = null
+                    _sceneReading.value = null
                     expiryJob?.cancel()
                     _state.update { it.copy(adviceOrigin = null, lastOutcome = null,
                         lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
@@ -496,6 +503,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                     val pixels = IntArray(bitmap.width * bitmap.height)
                                     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
                                     val advice = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
+                                    // Same frame, same pixels: a single extra <=96px statistics pass.
+                                    val reading = SceneReadings.read(bitmap.width, bitmap.height, pixels)
                                     val candidates = advice.candidates
                                     val first = candidates.firstOrNull() ?: error("当前画面无法生成构图建议")
                                     val fastMs = SystemClock.elapsedRealtime() - started
@@ -519,6 +528,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                             visibleScene = sceneCurrent
                                             showAdvice(first, AdviceOrigin.IMAGE_ANALYSIS, advice.subjectLooksDistant)
                                         }
+                                        _sceneReading.value = reading
                                         _state.update { it.copy(status = AssistStatus.READY, fastAdviceMs = fastMs) }
                                         Log.i("StreetSnapComposition", "fast_ms=$fastMs manual=$manual candidates=" +
                                             candidates.joinToString(";") { "${it.crop.left},${it.crop.top},${it.crop.right},${it.crop.bottom}" })
