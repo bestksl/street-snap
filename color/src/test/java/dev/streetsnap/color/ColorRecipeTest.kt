@@ -60,4 +60,18 @@ class ColorRecipeTest {
         assertTrue(ColorRecipe(hdfEnabled = true, hdfStrength = 0f).isIdentity)
         assertFalse(ColorRecipe(hdfEnabled = true, hdfStrength = .01f).isIdentity)
     }
+
+    @Test fun hdrRejectsOutOfRangeStrengthButIsIndependentOfHdf() {
+        assertThrows(IllegalArgumentException::class.java) { ColorRecipe(hdrStrength = Float.NaN) }
+        assertThrows(IllegalArgumentException::class.java) { ColorRecipe(hdrStrength = -.1f) }
+        assertThrows(IllegalArgumentException::class.java) { ColorRecipe(hdrStrength = 1.1f) }
+        assertTrue(ColorRecipe(hdrEnabled = false, hdrStrength = 1f).isIdentity)
+        assertTrue(ColorRecipe(hdrEnabled = true, hdrStrength = 0f).isIdentity)
+        val hdrOnly = ColorRecipe(hdrEnabled = true, hdrStrength = .6f)
+        assertFalse(hdrOnly.isIdentity)
+        assertFalse(hdrOnly.hdfEnabled)
+        val both = ColorRecipe(hdfEnabled = true, hdrEnabled = true)
+        assertFalse(both.isIdentity)
+        assertTrue(both.hdfEnabled)
+    }
 }

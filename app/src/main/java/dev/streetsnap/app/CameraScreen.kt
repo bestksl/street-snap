@@ -807,6 +807,7 @@ private fun ViewfinderOverlayBar(
             })
         }
         if (settings.hdfEnabled) add(ActiveOverride("柔光", AdjustmentTab.LOOK, "关闭柔光") { model.toggleHdf() })
+        if (settings.hdrEnabled) add(ActiveOverride("HDR", AdjustmentTab.LOOK, "关闭 HDR") { model.toggleHdr() })
         if (state.settings.focusDistanceDiopters != null)
             add(ActiveOverride("MF", AdjustmentTab.SHOOTING, "恢复自动对焦") { model.autoFocus() })
         if (exposureMode != ExposureMode.PROGRAM) add(ActiveOverride(
@@ -997,6 +998,16 @@ private fun ShootingControls(
                 }, contentAlignment = Alignment.Center) {
                 Text("HDF", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
                     color = if (settings.hdfEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Box(Modifier.width(56.dp).height(48.dp).clip(RoundedCornerShape(10.dp))
+                .background(if (settings.hdrEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
+                .toggleable(value = settings.hdrEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdr() }
+                .semantics {
+                    contentDescription = "HDR 效果开关"
+                    stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
+                }, contentAlignment = Alignment.Center) {
+                Text("HDR", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                    color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         if (focalHint != null) Text(focalHint, Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 4.dp),
@@ -1209,11 +1220,20 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
     }
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
         if (parameter == LookParameter.DIFFUSION) {
-            Text(if (settings.hdfEnabled) "全局柔光已开启" else "点 HDF 开启柔光",
+            Text(if (settings.hdfEnabled) "全局柔光已开启" else "高光柔化 · 外层光晕",
                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(onClick = model::toggleHdf, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text(if (settings.hdfEnabled) "关闭" else "开启")
+            TextButton(onClick = model::toggleHdr, enabled = true,
+                modifier = Modifier.heightIn(min = 48.dp).semantics {
+                    contentDescription = "HDR 效果开关"
+                    stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
+                }) {
+                Text(if (settings.hdrEnabled) "HDR · 关" else "HDR", fontSize = 12.sp,
+                    color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            TextButton(onClick = model::toggleHdf, modifier = Modifier.heightIn(min = 48.dp)
+                .semantics { contentDescription = "柔光开关" }) {
+                Text(if (settings.hdfEnabled) "柔光 · 关" else "柔光", fontSize = 12.sp)
             }
         } else {
             TextButton(onClick = importLut, enabled = !importing, modifier = Modifier.heightIn(min = 48.dp)) {

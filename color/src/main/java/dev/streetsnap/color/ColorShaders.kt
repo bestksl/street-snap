@@ -30,6 +30,9 @@ internal object ColorShaders {
         uniform vec4 uColor; // saturation, hue, contrast, brightness
         uniform vec4 uDetail; // highlights, shadows, sharpness, clarity
         uniform float uHdf;
+        // 0 = HDR look off (identical output); >0 = strength, driving the highlight
+        // shoulder amount, the wider bloom passes and the halo weight.
+        uniform float uHdr;
         uniform vec3 uWhiteBalanceGain;
         uniform vec2 uHueRotation; // precomputed cosine/sine, +/-20 degrees
         uniform vec2 uImageSize;
@@ -72,8 +75,24 @@ internal object ColorShaders {
             return clamp(color + tonal, 0.0, 1.0);
         }
 
+        // Narkowicz ACES filmic fit: keeps hue in the highlight roll-off (UE4 default).
+        vec3 acesFilm(vec3 x) {
+            const float a = 2.51;
+            const float b = 0.03;
+            const float c = 2.43;
+            const float d = 0.59;
+            const float e = 0.14;
+            return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+        }
+
         vec3 brightAt(vec2 uv) {
             vec3 color = grade(sourceAt(uv));
+            if (uHdr > 0.0) {
+                // HDR path keys on the brightest channel (colored neon keeps its color)
+                // with a lower, tighter knee so the wide halo has something to spread.
+                float key = max(color.r, max(color.g, color.b));
+                return color * smoothstep(0.57, 0.72, key);
+            }
             // A soft high-light knee excludes middle gray, so wider diffusion does not wash
             // an evenly lit scene with a gray veil. Exposure still determines light sources.
             return color * smoothstep(0.66, 0.94, luminance(color));
@@ -127,12 +146,33 @@ internal object ColorShaders {
                 float midtone = smoothstep(0.0, 0.2, y) * (1.0 - smoothstep(0.8, 1.0, y));
                 color += clamp(detail * uDetail.w * 0.8, -0.10, 0.10) * midtone;
             }
-            if (uHdf > 0.0) {
-                // Diffuse bright light over the untouched center detail, instead of blurring it.
+            if (uHdr > 0.0) {
+                // LDR has no headroom above 1.0: lift only the bright region first, then
+                // roll it through the ACES shoulder so clipped whites keep soft color.
+                // Midtones/shadows stay untouched; strength grows shoulder and lift together.
+                float shoulderMask = smoothstep(0.50, 0.90, y);
+                float shoulderAmount = mix(0.45, 0.85, uHdr) * shoulderMask;
+                float headroom = 1.0 + (mix(1.10, 1.60, uHdr) - 1.0) * shoulderMask;
+                vec3 toned = acesFilm(color * headroom);
+                color = mix(color, toned, shoulderAmount);
+            }
+            if (uHdf > 0.0 || uHdr > 0.0) {
                 vec3 glow = texture(uBloom, vUv).rgb;
-                // Screen-style light scattering preserves the original bright center. The
-                // broader bloom is visible around lamps/windows even at the default 0.4.
-                color += (1.0 - clamp(color, 0.0, 1.0)) * glow * uHdf * 1.25;
+                // Screen-style light scattering preserves the original bright center and
+                // keeps the dark regions clean (the 1-color factor is load-bearing).
+                vec3 scatterGap = 1.0 - clamp(color, 0.0, 1.0);
+                if (uHdf > 0.0) {
+                    // Diffuse bright light over the untouched center detail, instead of blurring it.
+                    // The broader bloom is visible around lamps/windows even at the default 0.4.
+                    // HDF-only output stays exactly as before (no HDR desaturation applied).
+                    color += scatterGap * glow * uHdf * 1.25;
+                }
+                if (uHdr > 0.0) {
+                    // Slight desaturation keeps the wide outer halo from staining midtones;
+                    // wide and deliberately stronger than HDF's default as asked.
+                    vec3 halo = mix(vec3(luminance(glow)), glow, 0.85);
+                    color += scatterGap * halo * mix(0.90, 1.90, uHdr);
+                }
             }
             vec2 centered = (vUv - 0.5) * 1.41421356;
             float falloff = smoothstep(0.25, 1.0, dot(centered, centered));

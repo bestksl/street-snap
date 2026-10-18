@@ -86,6 +86,23 @@ class SettingsJsonTest {
         settings.colorRecipe() // Validation must succeed for repaired settings.
     }
 
+    @Test fun hdrDefaultsOffSurvivesRoundTripAndRecoversFromLegacyOrBadJson() {
+        assertFalse(AppSettings().hdrEnabled)
+        assertEquals(.6f, AppSettings().hdrStrength, 0f)
+        val enabled = AppSettings(hdrEnabled = true, hdrStrength = .85f)
+        assertEquals(enabled, SettingsJson.decode(SettingsJson.encode(enabled)))
+        // Legacy document without HDR fields: look stays off.
+        val legacy = SettingsJson.decode("""{"version":2,"preset":"POSITIVE"}""")
+        assertFalse(legacy.hdrEnabled)
+        assertEquals(.6f, legacy.hdrStrength, 0f)
+        // Out-of-range strength is clamped; malformed documents recover to defaults.
+        val repaired = SettingsJson.decode("""{"hdrEnabled":true,"hdrStrength":5}""")
+        assertTrue(repaired.hdrEnabled)
+        assertEquals(1f, repaired.hdrStrength, 0f)
+        assertEquals(AppSettings(), SettingsJson.decode("{broken"))
+        assertTrue(enabled.colorRecipe().hdrEnabled)
+    }
+
     @Test fun malformedDocumentsRecoverAndUnrelatedValidFieldsSurviveBadLookEntries() {
         assertEquals(AppSettings(), SettingsJson.decode("{broken"))
         assertEquals(AppSettings(), SettingsJson.decode(null))

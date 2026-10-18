@@ -243,6 +243,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         applyColor()
     }
 
+    fun toggleHdr() {
+        update { it.copy(hdrEnabled = !it.hdrEnabled) }
+        applyColor()
+    }
+
+    fun setHdrStrength(strength: Float) {
+        update { it.copy(hdrStrength = strength.coerceIn(0f, 1f)) }
+        applyColor()
+    }
+
     fun focus(point: MeteringPoint, lock: Boolean = false) = latestCameraAction("tapFocus") { camera.focus(point, lock) }
 
     fun autoFocus() = latestCameraAction("focus") {

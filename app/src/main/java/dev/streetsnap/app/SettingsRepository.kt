@@ -65,6 +65,9 @@ data class AppSettings(
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
     val hdfStrength: Float = .4f,
+    // Independent HDR look (filmic highlight shoulder + wide halo), off by default.
+    val hdrEnabled: Boolean = false,
+    val hdrStrength: Float = .6f,
     val whiteBalance: String = "AUTO",
     val whiteBalanceAmber: Int = 0,
     val whiteBalanceGreen: Int = 0,
@@ -87,6 +90,7 @@ data class AppSettings(
             brightness = look.brightness, highlights = look.highlights, shadows = look.shadows,
             sharpness = look.sharpness, clarity = look.clarity,
             hdfEnabled = hdfEnabled, hdfStrength = hdfStrength,
+            hdrEnabled = hdrEnabled, hdrStrength = hdrStrength,
             whiteBalanceAmber = whiteBalanceAmber, whiteBalanceGreen = whiteBalanceGreen,
         )
     }
@@ -183,6 +187,8 @@ internal object SettingsJson {
         })
         put("hdfEnabled", settings.hdfEnabled)
         put("hdfStrength", settings.hdfStrength.toDouble())
+        put("hdrEnabled", settings.hdrEnabled)
+        put("hdrStrength", settings.hdrStrength.toDouble())
         put("whiteBalance", settings.whiteBalance)
         put("whiteBalanceAmber", settings.whiteBalanceAmber)
         put("whiteBalanceGreen", settings.whiteBalanceGreen)
@@ -232,6 +238,8 @@ internal object SettingsJson {
                 lutName = if (json.isNull("lutName")) null else json.optString("lutName").takeIf(String::isNotBlank)?.take(120),
                 hdfEnabled = json.optBoolean("hdfEnabled", false),
                 hdfStrength = json.amount("hdfStrength", .4f),
+                hdrEnabled = json.optBoolean("hdrEnabled", false),
+                hdrStrength = json.amount("hdrStrength", .6f),
                 whiteBalance = json.optString("whiteBalance", "AUTO")
                     .takeIf { name -> WhiteBalanceMode.entries.any { it.name == name } } ?: "AUTO",
                 whiteBalanceAmber = json.optInt("whiteBalanceAmber", 0).coerceIn(-9, 9),
