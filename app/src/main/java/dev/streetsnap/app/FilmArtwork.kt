@@ -175,9 +175,8 @@ private fun DrawScope.toneStrip(film: FilmProfile) {
     val end = Color(film.swatchEnd)
     for (i in 0 until steps) {
         val t = i / (steps - 1f)
-        // TRI-X is a monochrome stock: its signature strip stays a gray ramp, never color.
-        // Its lightest step stops short of the white card so all five steps stay readable.
-        val c = if (film.id == "MONO_01") lerp(Color(0xFF101010), Color(0xFFC6C6C0), t) else lerp(start, end, t)
+        // Swatches are authored per stock; TRI-X carries a neutral gray ramp in its own data.
+        val c = lerp(start, end, t)
         drawRect(c, Offset(3f + i * stepW, 85f), Size(stepW + .7f, 8f))
         if (i > 0) drawRect(Color.Black.copy(alpha = .18f), Offset(3f + i * stepW, 85f), Size(.6f, 8f))
     }

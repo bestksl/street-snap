@@ -69,7 +69,8 @@ object FilmRegistry {
                 preset = ColorPreset.MONO, grain = .34f, vignette = .12f, contrast = .08f,
                 highlights = -.14f, shadows = .06f, sharpness = -.06f, clarity = .08f,
             ),
-            0xFFD6B653, 0xFF496F58,
+            // Monochrome stock: a neutral gray ramp (light -> dark), never the gold/green placeholders.
+            0xFFC6C6C6, 0xFF101010,
         ),
         FilmProfile(
             "PORTRAIT_01", "PORTRA 400", "Kodak · 人像彩色负片，柔暖肤色与舒缓高光",

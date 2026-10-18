@@ -41,6 +41,9 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     // Smoothed HDR level for preview frames so AE jumps/toggles cannot pop the halo.
     // Stills are fresh renderers and settle immediately on the first draw.
     private var hdrLevel = 0f
+    // Preview swaps in an independent grain field each frame; stills pin frame 1 so every
+    // tiled strip shares one seamless field.
+    private var grainFrame = 0L
     val textureId get() = inputTexture
 
     init {
@@ -201,6 +204,9 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         val angle = state.recipe.hue * .34906585f
         GLES30.glUniform2f(uniform("uHueRotation"), cos(angle), sin(angle))
         GLES30.glUniform2f(uniform("uImageSize"), fullWidth.toFloat(), fullHeight.toFloat())
+        val grainSeedFrame = if (externalInput) ++grainFrame else 1L
+        GLES30.glUniform2f(uniform("uGrainSeed"),
+            grainSeedHash(grainSeedFrame, 0x9E3779B9L), grainSeedHash(grainSeedFrame, 0x85EBCA6BL))
         GLES30.glUniformMatrix4fv(uniform("uInputTransform"), 1, false, transform, 0)
         val diffusionOn = state.recipe.hdfEnabled && state.recipe.hdfStrength > 0f
         val hdrOn = state.recipe.hdrEnabled && state.recipe.hdrStrength > 0f
@@ -323,6 +329,16 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     }
 
     companion object {
+        // Deterministic per-frame grain seed in [0,1): splitmix-style mixing keeps successive
+        // frames (and the two salted channels) decorrelated without GPU sin precision issues.
+        private fun grainSeedHash(frame: Long, salt: Long): Float {
+            var h = (frame xor salt) * 1274126177L
+            h = h xor (h ushr 29)
+            h *= 2654435761L
+            h = h xor (h ushr 33)
+            return (h ushr 40).toFloat() / 16777216f // 24 bits
+        }
+
         fun checkGl(operation: String) {
             val error = GLES30.glGetError()
             check(error == GLES30.GL_NO_ERROR) { "$operation 失败 (GL 0x${error.toString(16)})" }

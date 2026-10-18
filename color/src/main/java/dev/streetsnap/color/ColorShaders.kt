@@ -36,6 +36,9 @@ internal object ColorShaders {
         uniform vec3 uWhiteBalanceGain;
         uniform vec2 uHueRotation; // precomputed cosine/sine, +/-20 degrees
         uniform vec2 uImageSize;
+        // Per-frame pseudo-random field offset for preview grain; stills pin a constant
+        // seed so tiled photo strips share one seamless grain field.
+        uniform vec2 uGrainSeed;
         uniform vec2 uBloomSize;
         uniform vec2 uBloomStep;
         uniform int uPass; // 0: image, 1: highlight extraction, 2: separable Gaussian
@@ -177,8 +180,25 @@ internal object ColorShaders {
             vec2 centered = (vUv - 0.5) * 1.41421356;
             float falloff = smoothstep(0.25, 1.0, dot(centered, centered));
             color *= 1.0 - uVignette * falloff * 0.6;
-            float n = noise(floor(vUv * uImageSize)) - 0.5;
-            color += n * uGrain * 0.12;
+            if (uGrain > 0.0) {
+                // Two-octave film grain: fine 1px speckle plus ~2.6px coarse clusters that
+                // survive preview/downscale. The seed swaps in an independent noise field
+                // each frame, so amplitude/density stay constant (no static watermark and no
+                // temporal drift); stills pin a constant seed and tile seamlessly across strips.
+                vec2 px = vUv * uImageSize;
+                float fine = noise(floor(px) + uGrainSeed) - 0.5;
+                float coarse = noise(floor(px / 2.6) + uGrainSeed * 1.7 + 17.0) - 0.5;
+                // Real stocks carry more grain in shadows, less in clipped highlights.
+                float grainDensity = mix(1.30, 0.62, smoothstep(0.0, 1.0, luminance(color)));
+                float lumaGrain = (fine * 0.55 + coarse * 0.95) * grainDensity;
+                color += vec3(lumaGrain) * uGrain * 0.18;
+                // Faint chroma grain only for the faster, grittier stocks (kept subtle).
+                float chromaGate = smoothstep(0.18, 0.34, uGrain);
+                if (chromaGate > 0.0) {
+                    float chromaGrain = noise(floor(px) - uGrainSeed + 41.0) - 0.5;
+                    color.rb += chromaGrain * uGrain * 0.05 * chromaGate * grainDensity;
+                }
+            }
             fragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
         }
     """
