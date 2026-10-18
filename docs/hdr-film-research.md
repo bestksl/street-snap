@@ -127,12 +127,18 @@
 - 落地参数：ACES 肩部 mask `smoothstep(.50,.90,luma)`、amount `mix(.45,.85,uHdr)`、headroom `1.0…1.6`；bright-pass 仅 HDR 路径改 `max(r,g,b)` 键 + `smoothstep(.57,.72,…)`（HDF 路径原样）；宽 halo 在同一对 384px FBO 追加 .026/.042 两轮，权重 `mix(.90,1.90,uHdr)`，glow 0.85 去饱和仅在 HDR 分支执行（HDF-only 逐像素不变）；预览强度 0.2/帧 lerp，静片首帧给满；bloom 仍只在 HDF 或 HDR 开启时绑定。
 - 单测：ColorRecipeTest（NaN/越界拒绝、disabled/零强度 identity、与 HDF 独立性）；SettingsJsonTest（默认关/.6、往返、legacy 缺字段恢复、越界夹取、坏 JSON 回默认）全绿；`:color:testDebugUnitTest :app:testDebugUnitTest`、`:app:assemblePreview` 通过。
 - AVD（emulator-5580，virtualscene 暗木墙场景，EV+2.5）逐像素对比预览：HDR 开/关亮部（luma>170）均值 −15/255（肩部压柔高光，方向正确），暗部（luma<70）+0.45（不泛灰）；成片 960×1280 同场景 mean|Δ|=1.28、max 74，静片路径无异常；HDR+HDF 同时开启拍照成功、logcat 无 GL error/FATAL（软件渲染 80–115 ms/帧）；开关状态重启后保持（药丸即状态判据，点击进面板、长按复位）。
-- 遗留 not-verified：本虚拟场景无灯窗/点光源且基础曝光拉不亮，**宽外层光晕的夸张视觉无法在该场景目视标定**；亮场（灯窗/霓虹/逆光）观感与真机 GPU 帧时留待真机或高动态场景复核；halation 暖橙混入未做（当前四成分中仅取肩部+核心+宽 halo 三件，作为后续调档）。
+- 亮场补证（同日晚些，横屏切换后 virtualscene 落到带整面亮窗的房间，loaded-only）：亮窗场景 HDR 开/关预览 mean|Δ|≈13、约 30% 像素变化；目视+成片（960×1280 静片）对比一致——关时窗为磨砂白、边缘干净，开时窗成炽白光源、宽外层光晕明显漫上天花板与地面、室内整体柔亮，即"高光柔化+外层光晕更夸张"的目标观感；暗部抬升主要来自窗光扩散与 ACES 中调（地毯/柜面仍有层次，非死灰）。**仍 not-verified：真机 GPU 帧时与真机高光场景观感**；halation 暖橙混入未做（当前四成分中仅取肩部+核心+宽 halo 三件，作为后续调档）。
 
 ### T25 HDR 常驻按钮（app 模块）
 
 - 取景器常驻开关（不进面板深处）；具体落点经 T27 统筹（顶行胶片小画也要占位），候选：右上胶囊行左侧/小画下方竖排；保持"构图/实时/AF"与快门零干扰。
 - 持久化 + 默认关 + ActiveOverride 药丸（长按复位）+ 无模型依赖；SettingsJsonTest 往返。
+
+#### 实现与验证记录（2026-10-19，loaded-only：软件渲染 AVD）
+
+- 取景器常驻一键开关 `HdrToggleButton`（38dp 圆形，与 OSD 角钮同规格）：落在取景器**左上、OSD 角钮正下方（top=52dp）**，与右侧直方图/PARAMS 卡左右对称、不重叠，且把右上区域留给 T27 胶片徽章；关时安静深底白字、开时主色高亮；contentDescription「HDR 效果开关」+ stateDescription 已开启/关闭。
+- 持久化/默认关/JSON 往返/legacy 恢复/越界夹取随 T24 一并落地（SettingsJsonTest 已覆盖，默认值向后兼容无需 version bump）；开启时进 ActiveOverride 药丸（点击进影调面板、长按复位）；面板内 HDR 按钮（柔光参数行）保留为第二入口。
+- AVD：默认关、常驻钮始终可见；一键开/关即时生效（以药丸存在与否判状态，uiautomator 的 selected 标志对自定义钮不可靠）；force-stop 重启后开启态保持；竖屏与横屏 fallback 布局均无遮挡；OSD PARAMS 卡与 HDR 钮左右分列不撞。viewfinder.png 待与 T27 胶片徽章一并重截。
 
 ### T26 胶片颗粒强化（color 模块）
 

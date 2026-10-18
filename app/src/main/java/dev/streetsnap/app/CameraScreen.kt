@@ -580,6 +580,10 @@ private fun Viewfinder(
                         else -> "当前对焦模式"
                     })
             }
+            // Persistent HDR toggle, stacked under the OSD corner button; the right column
+            // stays reserved for the histogram/readout card and the future film badge.
+            HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
+                Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
             // DSLR-style readout under the histogram. Every value is reported by the
             // camera: automatic slots read AUTO rather than a guessed number, aperture is
             // shown only when the device actually reports a fixed one (most phones do not).
@@ -711,6 +715,24 @@ private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
                     size = androidx.compose.ui.geometry.Size(barWidth, barHeight))
             }
         }
+    }
+}
+
+/** Always-on HDR toggle under the OSD corner button; quiet when off, primary-tinted while on. */
+@Composable
+private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    val tint = if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
+    Box(modifier.size(38.dp).clip(CircleShape)
+        .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
+        .clickable(role = Role.Button, onClick = onToggle)
+        .semantics {
+            contentDescription = "HDR 效果开关"
+            stateDescription = if (on) "已开启" else "已关闭"
+            this.selected = on
+        },
+        contentAlignment = Alignment.Center) {
+        Text("HDR", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
 
