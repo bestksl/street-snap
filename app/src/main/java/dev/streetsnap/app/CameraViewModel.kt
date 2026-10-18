@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import dev.streetsnap.app.edge.EdgeModelCatalog
 import dev.streetsnap.camera.CameraController
 import dev.streetsnap.camera.ExposureMode
+import dev.streetsnap.camera.LumaMeter
 import dev.streetsnap.camera.FocalLength
 import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorEngine
@@ -56,6 +57,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val previewError = _previewError.asStateFlow()
     private val _controlsRestored = MutableStateFlow(false)
     val controlsRestored = _controlsRestored.asStateFlow()
+    private val _histogram = MutableStateFlow<IntArray?>(null)
+    val histogram = _histogram.asStateFlow()
+    /** Real luma histogram from analysis frames, sampled only while the OSD shows it. */
+    internal val lumaMeter = LumaMeter { bins -> _histogram.value = bins }
     private val noticeChannel = Channel<CameraNotice>(Channel.UNLIMITED)
     val notices = noticeChannel.receiveAsFlow()
     private val processing = Mutex()
@@ -84,6 +89,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             } finally {
                 _settingsLoaded.value = true
                 syncComposition()
+                syncMeter()
             }
         }
     }
@@ -253,6 +259,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun toggleGrid() = update { it.copy(grid = !it.grid) }
     fun toggleLevel() = update { it.copy(level = !it.level) }
 
+    /** Viewfinder corner button: OFF -> histogram -> histogram + exposure readout -> OFF. */
+    fun cycleViewfinderOsd() = update { it.copy(viewfinderOsd = ViewfinderOsd.next(it.viewfinderOsd)) }
+
     fun setPreset(preset: ColorPreset) {
         if (preset == ColorPreset.CUSTOM && lut == null) {
             notify("请先导入 .cube LUT")
@@ -287,12 +296,23 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun onForegroundChanged(active: Boolean) {
         foreground = active
-        if (_settingsLoaded.value) syncComposition()
+        if (_settingsLoaded.value) {
+            syncComposition()
+            syncMeter()
+        }
     }
     private fun syncComposition() = composition.configure(
         _settings.value.compositionModel, _settings.value.compositionEnabled, foreground,
         realtime = _settings.value.compositionRealtime,
         focalLengthMm = _settings.value.focalLength.takeIf { it > 0 } ?: 28)
+
+    /** The analysis stream is bound only while the histogram OSD is wanted. */
+    private fun syncMeter() {
+        val wanted = _settingsLoaded.value && foreground &&
+            _settings.value.viewfinderOsd != ViewfinderOsd.OFF
+        lumaMeter.active = wanted
+        if (!wanted) _histogram.value = null
+    }
 
     fun setColor(
         intensity: Float? = null, grain: Float? = null, vignette: Float? = null,
@@ -370,7 +390,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun update(transform: (AppSettings) -> AppSettings) {
         _settings.value = transform(_settings.value)
-        if (_settingsLoaded.value) syncComposition()
+        if (_settingsLoaded.value) {
+            syncComposition()
+            syncMeter()
+        }
         saveSettingsJob?.cancel()
         saveSettingsJob = viewModelScope.launch {
             delay(180)

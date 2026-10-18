@@ -225,6 +225,24 @@ class SettingsJsonTest {
         assertEquals("AUTO", encoded.captureOrientation)
     }
 
+    @Test fun viewfinderOsdDefaultsOffAndEveryModeSurvivesRestart() {
+        // Pure viewfinder by default; documents written before T20 simply lack the field.
+        assertEquals(ViewfinderOsd.OFF, AppSettings().viewfinderOsd)
+        assertEquals(ViewfinderOsd.OFF,
+            SettingsJson.decode("""{"version":4,"preset":"MONO"}""").viewfinderOsd)
+        for (mode in listOf(ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM, ViewfinderOsd.PARAMS)) {
+            val settings = AppSettings(viewfinderOsd = mode)
+            assertEquals(settings, SettingsJson.decode(SettingsJson.encode(settings)))
+        }
+        // Corrupt/unknown values never leave a phantom overlay on screen.
+        assertEquals(ViewfinderOsd.OFF,
+            SettingsJson.decode("""{"version":4,"viewfinderOsd":"LEVELS"}""").viewfinderOsd)
+        // The corner button walks the full cycle and returns to off.
+        var mode: String? = null
+        val sequence = List(4) { mode = ViewfinderOsd.next(mode); mode }
+        assertEquals(listOf(ViewfinderOsd.HISTOGRAM, ViewfinderOsd.PARAMS, ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM), sequence)
+    }
+
     @Test fun freshInstallSelectsTheRecommendedD1RankerAndUnknownIdsFallBack() {
         assertEquals("d1-omni-600m", EdgeModelCatalog.DEFAULT_MODEL_ID)
         assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)

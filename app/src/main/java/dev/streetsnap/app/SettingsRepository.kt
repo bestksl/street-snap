@@ -50,6 +50,8 @@ data class AppSettings(
     val exposureTimeNs: Long? = null,
     val grid: Boolean = true,
     val level: Boolean = true,
+    // Viewfinder OSD cycle: OFF (default, pure viewfinder) / HISTOGRAM / PARAMS (histogram + exposure readout).
+    val viewfinderOsd: String = ViewfinderOsd.OFF,
     val preset: String = "ORIGINAL",
     val filmId: String? = null,
     // null = the nameplate follows the active look family; "HIDDEN" = no nameplate; a
@@ -113,6 +115,20 @@ internal object CameraPreferences {
     fun orientation(id: String?): String = id?.takeIf { it in orientations } ?: DEFAULT_ORIENTATION
 }
 
+/** Viewfinder overlay cycle. Nothing here is fabricated: the readout shows reported camera values only. */
+internal object ViewfinderOsd {
+    const val OFF = "OFF"
+    const val HISTOGRAM = "HISTOGRAM"
+    const val PARAMS = "PARAMS"
+    private val modes = setOf(OFF, HISTOGRAM, PARAMS)
+    fun mode(value: String?): String = value?.takeIf { it in modes } ?: OFF
+    fun next(value: String?): String = when (mode(value)) {
+        OFF -> HISTOGRAM
+        HISTOGRAM -> PARAMS
+        else -> OFF
+    }
+}
+
 /** Keep the old key so installing over v0.1 migrates settings without losing the selected look. */
 class SettingsRepository(private val context: Context) {
     private val key = stringPreferencesKey("recipe_v1")
@@ -139,6 +155,7 @@ internal object SettingsJson {
         put("exposureTimeNs", settings.exposureTimeNs ?: JSONObject.NULL)
         put("grid", settings.grid)
         put("level", settings.level)
+        put("viewfinderOsd", ViewfinderOsd.mode(settings.viewfinderOsd))
         put("preset", settings.preset)
         put("filmId", settings.filmId ?: JSONObject.NULL)
         put("mascotCamera", CameraPreferences.nameplate(settings.mascotCamera) ?: JSONObject.NULL)
@@ -201,6 +218,7 @@ internal object SettingsJson {
                 exposureTimeNs = if (json.isNull("exposureTimeNs")) null else json.optLong("exposureTimeNs").takeIf { it > 0L },
                 grid = json.optBoolean("grid", true),
                 level = json.optBoolean("level", true),
+                viewfinderOsd = ViewfinderOsd.mode(json.optString("viewfinderOsd").takeIf { it.isNotEmpty() }),
                 preset = preset,
                 filmId = if (json.isNull("filmId")) null else json.optString("filmId")
                     .takeIf { FilmRegistry.find(it) != null },

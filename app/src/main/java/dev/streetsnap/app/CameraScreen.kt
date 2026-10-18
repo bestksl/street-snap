@@ -377,6 +377,9 @@ private fun Viewfinder(
     val previewError by model.previewError.collectAsStateWithLifecycle()
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
     val streaming by model.previewStreaming.collectAsStateWithLifecycle()
+    val histogram by model.histogram.collectAsStateWithLifecycle()
+    val osdMode = settings.viewfinderOsd
+    val meteringWanted = osdMode != ViewfinderOsd.OFF
     val hasSize = width > 0 && height > 0
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     val manualFocus = state.settings.focusDistanceDiopters != null
@@ -390,7 +393,7 @@ private fun Viewfinder(
     }
     // The adjustment panel only changes the preview's size, not its 4:3 framing.
     // PreviewView handles those resizes without tearing down the camera session.
-    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource) {
+    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource, meteringWanted) {
         if (!hasSize) return@LaunchedEffect
         model.onBindingStarted()
         bindingError = null
@@ -404,7 +407,8 @@ private fun Viewfinder(
             val viewPort = ViewPort.Builder(ratio, rotation)
                 .setScaleType(ViewPort.FILL_CENTER).build()
             model.camera.bind(lifecycle, preview.surfaceProvider, model.colors.previewEffect(model::onPreviewError), viewPort, rotation,
-                compositionFrames = compositionSource)
+                compositionFrames = compositionSource,
+                lumaMeter = if (meteringWanted) model.lumaMeter else null)
             model.onCameraBound()
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -459,13 +463,45 @@ private fun Viewfinder(
                     }
                 }
                 if (settings.level && roll != null) {
+                    // Horizon level near the top edge (DSLR convention), never over the
+                    // centre of the picture: a faint fixed reference plus a rolling line;
+                    // the two coincide and turn lime when the phone is level.
+                    val pivot = Offset(size.width / 2f, size.height * .085f)
+                    val halfLength = min(size.width * .075f, 28.dp.toPx())
+                    val tick = 4.dp.toPx()
+                    val reference = Color.White.copy(alpha = .32f)
+                    drawLine(reference, Offset(pivot.x - halfLength, pivot.y), Offset(pivot.x + halfLength, pivot.y), 1.5.dp.toPx())
+                    drawLine(reference, Offset(pivot.x - halfLength, pivot.y - tick), Offset(pivot.x - halfLength, pivot.y + tick), 1.dp.toPx())
+                    drawLine(reference, Offset(pivot.x + halfLength, pivot.y - tick), Offset(pivot.x + halfLength, pivot.y + tick), 1.dp.toPx())
                     val radians = Math.toRadians(roll.toDouble())
-                    val length = min(size.width * .2f, 66.dp.toPx())
-                    val delta = Offset((kotlin.math.cos(radians) * length).toFloat(), (kotlin.math.sin(radians) * length).toFloat())
-                    val midpoint = center
-                    val color = if (abs(roll) < 1.5f) Color(0xFFE2FF79) else Color.White.copy(alpha = .7f)
-                    drawLine(color, midpoint - delta, midpoint + delta, 2.dp.toPx())
-                    drawCircle(color, 3.dp.toPx(), midpoint)
+                    val delta = Offset((kotlin.math.cos(radians) * halfLength).toFloat(), (kotlin.math.sin(radians) * halfLength).toFloat())
+                    val levelColor = if (abs(roll) < 1.5f) Color(0xFFE2FF79) else Color.White.copy(alpha = .78f)
+                    drawLine(levelColor, pivot - delta, pivot + delta, 2.dp.toPx())
+                }
+                if (meteringWanted) histogram?.let { counts ->
+                    val panelWidth = 118.dp.toPx()
+                    val panelHeight = 48.dp.toPx()
+                    val margin = 10.dp.toPx()
+                    // Below the top-right composition/realtime/AF pills.
+                    val panelLeft = size.width - panelWidth - margin
+                    val panelTop = 52.dp.toPx()
+                    val corner = 6.dp.toPx()
+                    drawRoundRect(Color.Black.copy(alpha = .42f),
+                        topLeft = Offset(panelLeft, panelTop),
+                        size = androidx.compose.ui.geometry.Size(panelWidth, panelHeight),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner, corner))
+                    val tallest = counts.maxOrNull()?.toFloat() ?: 0f
+                    if (tallest > 0f) {
+                        val innerPad = 3.dp.toPx()
+                        val plotHeight = panelHeight - innerPad * 2
+                        val barWidth = panelWidth / counts.size
+                        counts.forEachIndexed { index, count ->
+                            val barHeight = (count / tallest * plotHeight).coerceAtLeast(1f)
+                            drawRect(Color.White.copy(alpha = .72f),
+                                topLeft = Offset(panelLeft + index * barWidth, panelTop + panelHeight - innerPad - barHeight),
+                                size = androidx.compose.ui.geometry.Size(barWidth * .82f, barHeight))
+                        }
+                    }
                 }
                 focusPoint?.let { point ->
                     val radius = minOf(22.dp.toPx(), size.minDimension / 4f)
@@ -509,6 +545,8 @@ private fun Viewfinder(
                 }
             }
             Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                // Single quiet corner entry: off -> histogram -> histogram + exposure readout -> off.
+                OsdCycleButton(osdMode, model::cycleViewfinderOsd)
                 Spacer(Modifier.weight(1f))
                 OverlayPill(
                     label = if (!compositionState.isRequestRunning) "构图" else "分析中",
@@ -538,6 +576,25 @@ private fun Viewfinder(
                         state.capabilities?.supportsManualFocus == true -> "切换手动对焦"
                         else -> "当前对焦模式"
                     })
+            }
+            // DSLR-style readout under the histogram. Every value is reported by the
+            // camera: automatic slots read AUTO rather than a guessed number, aperture is
+            // shown only when the device actually reports a fixed one (most phones do not).
+            if (osdMode == ViewfinderOsd.PARAMS) {
+                val caps = state.capabilities
+                val capture = state.settings
+                val ev = capture.exposureCompensationIndex * (caps?.exposureCompensationStepEv ?: 0.0)
+                Column(Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = 106.dp).width(118.dp)
+                    .background(Color.Black.copy(alpha = .42f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 5.dp)) {
+                    OsdReadoutRow(capture.exposureMode.label,
+                        if (capture.exposureMode == ExposureMode.MANUAL) "EV —" else "EV %+.1f".format(ev))
+                    OsdReadoutRow("快门", capture.exposureTimeNs?.let(::shutterLabel) ?: "AUTO")
+                    OsdReadoutRow("ISO", capture.iso?.toString() ?: "AUTO")
+                    caps?.fixedAperture?.let { aperture ->
+                        OsdReadoutRow("光圈", "f/%.1f".format(aperture))
+                    }
+                }
             }
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
             if (settings.compositionEnabled) {
@@ -621,6 +678,48 @@ private fun OverlayPill(
         }.padding(horizontal = 15.dp), contentAlignment = Alignment.Center) {
         Text(label, color = if (enabled) content else content.copy(alpha = .4f),
             fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/** Top-left corner entry for the viewfinder OSD cycle; quiet when off, primary-tinted while showing. */
+@Composable
+private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
+    val active = mode != ViewfinderOsd.OFF
+    val description = when (mode) {
+        ViewfinderOsd.HISTOGRAM -> "正在显示直方图，点按追加拍摄参数"
+        ViewfinderOsd.PARAMS -> "正在显示直方图与拍摄参数，点按关闭取景信息"
+        else -> "显示曝光直方图"
+    }
+    val tint = if (active) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
+    Box(Modifier.size(38.dp).clip(CircleShape)
+        .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
+        .clickable(role = Role.Button, onClick = onCycle)
+        .semantics { contentDescription = description; this.selected = active },
+        contentAlignment = Alignment.Center) {
+        // Tiny histogram glyph: three bars of different height.
+        Canvas(Modifier.size(16.dp)) {
+            val fractions = listOf(.45f, .95f, .65f)
+            val gap = 1.5.dp.toPx()
+            val barWidth = (size.width - gap * (fractions.size - 1)) / fractions.size
+            fractions.forEachIndexed { index, fraction ->
+                val barHeight = size.height * fraction
+                drawRect(tint,
+                    topLeft = Offset(index * (barWidth + gap), size.height - barHeight),
+                    size = androidx.compose.ui.geometry.Size(barWidth, barHeight))
+            }
+        }
+    }
+}
+
+/** One labelled, reported-by-camera value in the OSD readout; never a fabricated number. */
+@Composable
+private fun OsdReadoutRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp),
+        horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = Color.White.copy(alpha = .55f), fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(value, color = Color.White.copy(alpha = .92f), fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace, maxLines = 1)
     }
 }
 
