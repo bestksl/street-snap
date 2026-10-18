@@ -352,14 +352,18 @@ private fun Viewfinder(
             bindingError = error.message ?: "相机未能启动"
         }
     }
-    BoxWithConstraints(modifier.background(Color.Black), contentAlignment = Alignment.Center) {
+    BoxWithConstraints(modifier.background(Color.Black)) {
         val ratio = if (landscape) 4f / 3f else 3f / 4f
         val previewWidth = min(maxWidth.value, maxHeight.value * ratio).dp
         val previewHeight = previewWidth / ratio
         // Phones float the shutter/focal bar over this lower edge; lift overlays just above
         // the single manual-override chip row that can intrude into the preview.
         val floatingClearance = if (maxHeight > maxWidth) 92.dp else 10.dp
-        Box(Modifier.size(previewWidth, previewHeight)) {
+        // Portrait: pin the 3:4 preview to the top so the dead letterbox space becomes
+        // the bottom control area (camera convention), instead of leaving a large empty
+        // band above the viewfinder. Landscape keeps it centred beside the side rail.
+        val previewAlignment = if (maxHeight > maxWidth) Alignment.TopCenter else Alignment.Center
+        Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment)) {
             AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().onSizeChanged {
                 width = it.width
                 height = it.height

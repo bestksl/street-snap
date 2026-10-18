@@ -101,6 +101,84 @@ class FastCompositionAdvisorTest {
     }
 
     @Test
+    fun mirrorStructureOnBothFlanksReadsAsSymmetry() {
+        val result = FastCompositionAdvisor.suggest(96, 64, terracedBands())
+        val first = result.candidates.first()
+        assertEquals(CompositionStyle.SYMMETRY, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.SYMMETRY.title))
+    }
+
+    @Test
+    fun aSingleCentralMassDoesNotReadAsSymmetry() {
+        val pixels = IntArray(96 * 64) { 0xFF262626.toInt() }
+        for (y in 0 until 64) for (x in 38..58) pixels[y * 96 + x] = 0xFFE6E6E6.toInt()
+        val styles = FastCompositionAdvisor.suggest(96, 64, pixels).candidates.map { it.style }
+        assertTrue("central bar must claim CENTERED not SYMMETRY, got $styles",
+            styles.first() == CompositionStyle.CENTERED)
+        assertTrue("no flank structure means symmetry never appears, got $styles",
+            styles.none { it == CompositionStyle.SYMMETRY })
+    }
+
+    @Test
+    fun regularGridReadsAsRepetition() {
+        val first = FastCompositionAdvisor.suggest(96, 64, dotGrid()).candidates.first()
+        assertEquals(CompositionStyle.REPETITION, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.REPETITION.title))
+    }
+
+    @Test
+    fun severalSpreadVerticalEdgesReadAsVerticalLines() {
+        val first = FastCompositionAdvisor.suggest(96, 64, tallBeams()).candidates.first()
+        assertEquals(CompositionStyle.VERTICAL, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.VERTICAL.title))
+    }
+
+    @Test
+    fun aLongHorizontalBoundaryReadsAsHorizon() {
+        val result = FastCompositionAdvisor.suggest(96, 64, horizonBands())
+        val first = result.candidates.first()
+        assertEquals(CompositionStyle.HORIZON, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.HORIZON.title))
+        assertTrue("landscape must not be claimed by symmetry, got ${result.candidates.map { it.style }}",
+            result.candidates.none { it.style == CompositionStyle.SYMMETRY })
+    }
+
+    @Test
+    fun verticalTonalSplitReadsAsContrastNotHorizon() {
+        val pixels = IntArray(96 * 64) { index ->
+            if (index % 96 < 44) 0xFF242424.toInt() else 0xFFE6E6E6.toInt()
+        }
+        val first = FastCompositionAdvisor.suggest(96, 64, pixels).candidates.first()
+        assertEquals(CompositionStyle.CONTRAST, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.CONTRAST.title))
+    }
+
+    @Test
+    fun bilateralInwardDiagonalsReadAsConvergence() {
+        val first = FastCompositionAdvisor.suggest(96, 64, convergingLines()).candidates.first()
+        assertEquals(CompositionStyle.CONVERGENCE, first.style)
+        assertTrue(first.reason.startsWith(CompositionStyle.CONVERGENCE.title))
+    }
+
+    @Test
+    fun strongEvidenceSeedsADiverseFullFrameCandidate() {
+        val result = FastCompositionAdvisor.suggest(96, 64, symmetricWithOneSign())
+        val styles = result.candidates.map { it.style }
+        assertTrue("seeded full-frame SYMMETRY expected among $styles",
+            styles.contains(CompositionStyle.SYMMETRY))
+        val symmetryCrop = result.candidates.first { it.style == CompositionStyle.SYMMETRY }.crop
+        assertTrue("injected crop keeps most of the frame, got ${symmetryCrop.right - symmetryCrop.left}",
+            symmetryCrop.right - symmetryCrop.left >= 0.95f)
+    }
+
+    @Test
+    fun noSeedInjectionForFeaturelessOrUnsupportedFrames() {
+        val uniform = IntArray(96 * 64) { 0xFF707070.toInt() }
+        assertTrue(FastCompositionAdvisor.suggest(96, 64, uniform).candidates
+            .all { it.style == CompositionStyle.CONSERVATIVE })
+    }
+
+    @Test
     fun conservativeCopyVariesWithExposure() {
         val dark = IntArray(96 * 64) { 0xFF202020.toInt() }
         val bright = IntArray(96 * 64) { 0xFFF0F0F0.toInt() }
@@ -129,6 +207,80 @@ class FastCompositionAdvisorTest {
     fun featurelessFramesNeverClaimADistantSubject() {
         val uniform = IntArray(96 * 64) { 0xFF707070.toInt() }
         assertFalse(FastCompositionAdvisor.suggest(96, 64, uniform).subjectLooksDistant)
+    }
+
+    private fun terracedBands(): IntArray = IntArray(96 * 64) { index ->
+        val x = index % 96
+        val y = index / 96
+        val band = when {
+            y <= 10 -> 0x40
+            y <= 24 -> 0x5A
+            y <= 44 -> 0x78
+            y <= 55 -> 0x9C
+            else -> 0xB8
+        }
+        val shade = (kotlin.math.abs(x - 47.5) * 0.8).toInt().coerceAtMost(0x30)
+        val v = (band - shade).coerceIn(0, 255)
+        0xFF000000.toInt() or (v shl 16) or (v shl 8) or v
+    }
+
+    private fun dotGrid(): IntArray = IntArray(96 * 64) { index ->
+        val x = index % 96
+        val y = index / 96
+        val onX = intArrayOf(10, 26, 42, 58, 74).any { kotlin.math.abs(x - it) <= 2 }
+        val onY = intArrayOf(10, 26, 42, 58).any { kotlin.math.abs(y - it) <= 2 }
+        if (onX && onY) 0xFFD8D8D8.toInt() else 0xFF2C2C2C.toInt()
+    }
+
+    private fun tallBeams(): IntArray = IntArray(96 * 64) { index ->
+        when (index % 96) {
+            in 10..14 -> 0xFFC8C8C8.toInt()
+            in 62..68 -> 0xFFB0B0B0.toInt()
+            else -> 0xFF303030.toInt()
+        }
+    }
+
+    private fun horizonBands(): IntArray = IntArray(96 * 64) { index ->
+        val y = index / 96
+        when {
+            y < 21 -> 0xFFD8D8D8.toInt()
+            y == 30 || y == 45 || y == 58 -> 0xFF5C5C5C.toInt()
+            else -> 0xFF6A6A6A.toInt()
+        }
+    }
+
+    private fun convergingLines(): IntArray = IntArray(96 * 64) { index ->
+        val x = (index % 96 + 0.5)
+        val y = (index / 96 + 0.5)
+        var onLine = false
+        for (offset in intArrayOf(-15, 0, 15)) {
+            val apexX = 48.0 + offset
+            if (y >= 12) {
+                val expectedX = if (x < apexX) apexX - (y - 12) / 0.85
+                else apexX + (y - 12) / 0.85
+                if (kotlin.math.abs(x - expectedX) <= 1.7) onLine = true
+            }
+        }
+        if (onLine) 0xFFD0D0D0.toInt() else 0xFF262626.toInt()
+    }
+
+    /** Mirror-symmetric weak facade plus one off-axis high-contrast sign (seeding case). */
+    private fun symmetricWithOneSign(): IntArray = IntArray(96 * 64) { index ->
+        val x = index % 96
+        val y = index / 96
+        if (x in 1..11 && y in 52..62) 0xFFF2D26C.toInt()
+        else {
+            val band = when {
+                y <= 10 -> 0x58
+                y <= 24 -> 0x5E
+                y <= 44 -> 0x64
+                y <= 55 -> 0x6A
+                else -> 0x70
+            }
+            val shade = (kotlin.math.abs(x - 47.5) * 0.5).toInt().coerceAtMost(20)
+            val v = (band - shade).coerceIn(0, 255)
+            0xFF000000.toInt() or (v shl 16) or (v shl 8) or v
+        }
     }
 
     private fun diagonalBands(): IntArray = IntArray(96 * 64) { index ->

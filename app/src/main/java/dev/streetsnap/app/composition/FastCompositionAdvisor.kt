@@ -118,8 +118,9 @@ internal object FastCompositionAdvisor {
         }
 
         val features = SceneFeatures.extract(w, h, pixels, signal, energy)
+        val enriched = enrichWithStyleSeeds(selected, ranked, features)
         val subjectLooksDistant = detectDistantSubject(w, signal, selected.first())
-        val styled = assignStyles(selected, features).map { (crop, style) ->
+        val styled = assignStyles(enriched, features).map { (crop, style) ->
             CompositionCandidate(crop.rectangle(), crop.score.toFloat(), describe(style, crop, features), true, style)
         }
         return FastCompositionResult(styled, subjectLooksDistant)
@@ -162,6 +163,35 @@ internal object FastCompositionAdvisor {
     }
 
     /**
+     * Scene-level (crop-independent) evidence for the statistic-native styles. Geometry is
+     * applied afterwards in [affinities]; this is also the strength gate for style-seeded
+     * candidate injection. Every value is 0 unless a measured detector fires.
+     */
+    private fun sceneEvidence(style: CompositionStyle, f: SceneFeatures): Double = when (style) {
+        // A mirror facade is symmetry without a central mass. A strong diagonal field is
+        // usually perspective rather than mirror symmetry, and a single horizontal boundary
+        // makes any landscape "mirror" trivially — that reading belongs to HORIZON.
+        CompositionStyle.SYMMETRY -> ((f.symmetry - 0.65) / 0.25).coerceIn(0.0, 1.0) *
+            (1.0 - 0.6 * f.diagonal) * (1.0 - 0.8 * f.horizontalSplit) * f.lateralTexture
+        CompositionStyle.VERTICAL -> f.verticalStrength
+        CompositionStyle.HORIZON -> f.horizontalSplit
+        CompositionStyle.REPETITION -> f.repetition
+        CompositionStyle.CONTRAST -> f.contrast
+        CompositionStyle.CONVERGENCE -> f.convergence
+        else -> 0.0
+    }
+
+    /** Styles whose claim is carried by a scene detector rather than by crop geometry. */
+    private val evidenceStyles = listOf(
+        CompositionStyle.SYMMETRY,
+        CompositionStyle.VERTICAL,
+        CompositionStyle.HORIZON,
+        CompositionStyle.REPETITION,
+        CompositionStyle.CONTRAST,
+        CompositionStyle.CONVERGENCE,
+    )
+
+    /**
      * Evidence-only per-crop style scores. There is deliberately no base/prior term:
      * a style can win only on measured scene evidence combined with geometric fit.
      */
@@ -174,13 +204,38 @@ internal object FastCompositionAdvisor {
             (1 - abs(v - u) / 0.35).coerceIn(0.0, 1.0),
             (1 - abs(v - (1 - u)) / 0.35).coerceIn(0.0, 1.0),
         )
+        // Frame-wide structures (symmetry / vertical / convergence) key off the crop FRAME's
+        // geometric centre, not the energy centroid: one off-axis high-contrast object must
+        // not decide whether the frame itself sits on the axis of symmetry.
+        val centreU = crop.left + scale / 2.0
+        // Symmetry keeps most of the mirrored structure and centres it; a tight crop that
+        // chases one detail destroys the reading.
+        val symmetryGeometry = (1 - abs(centreU - 0.5) / 0.25).coerceIn(0.0, 1.0) *
+            ((scale - 0.84) / 0.08).coerceIn(0.0, 1.0)
+        // The horizon claim holds only for a crop that keeps the dividing line inside the
+        // frame and puts it near a third; a crop that cuts the line away scores nothing.
+        val horizonLine = (f.horizonY - crop.top) / scale
+        val horizonGeometry = if (horizonLine in 0.0..1.0) {
+            (1 - min(abs(horizonLine - 1.0 / 3), abs(horizonLine - 2.0 / 3)) / 0.25)
+                .coerceIn(0.0, 1.0)
+        } else {
+            0.0
+        }
+        // Converging lines read best when the vanishing point stays inside the crop near
+        // the top and the structure is centred; crop energy centroid sits on the lines
+        // themselves (lower half), so v is not a useful gate — top and u are.
+        val convergenceGeometry = (1 - abs(centreU - 0.5) / 0.30).coerceIn(0.0, 1.0) *
+            ((scale - 0.84) / 0.08).coerceIn(0.0, 1.0) *
+            (1 - crop.top / 0.25).coerceIn(0.0, 1.0)
         return mapOf(
             CompositionStyle.THIRDS to thirdsGeometry,
             CompositionStyle.CENTERED to f.centered *
                 (1 - hypot(u - 0.5, v - 0.5) / 0.35).coerceIn(0.0, 1.0),
-            CompositionStyle.DIAGONAL to f.diagonal *
+            // Diagonal and single-corner leading lines need ONE dominant slope; a balanced
+            // V-shaped field belongs to CONVERGENCE instead.
+            CompositionStyle.DIAGONAL to f.diagonal * f.slopePurity *
                 ((scale - 0.72) / 0.14).coerceIn(0.0, 1.0) * (0.4 + 0.6 * diagonalGeometry),
-            CompositionStyle.LEADING_LINES to f.leading *
+            CompositionStyle.LEADING_LINES to f.leading * f.slopePurity *
                 ((scale - 0.80) / 0.12).coerceIn(0.0, 1.0),
             CompositionStyle.TRIANGLE to f.triangle *
                 ((scale - 0.70) / 0.20).coerceIn(0.0, 1.0) *
@@ -201,7 +256,56 @@ internal object FastCompositionAdvisor {
             ),
             CompositionStyle.WIDE_CONTEXT to f.scattered *
                 ((scale - 0.88) / 0.08).coerceIn(0.0, 1.0),
+            CompositionStyle.SYMMETRY to
+                sceneEvidence(CompositionStyle.SYMMETRY, f) * symmetryGeometry,
+            CompositionStyle.VERTICAL to f.verticalStrength *
+                ((scale - 0.80) / 0.12).coerceIn(0.0, 1.0) *
+                (1 - abs(centreU - 0.5) / 0.30).coerceIn(0.0, 1.0),
+            CompositionStyle.HORIZON to f.horizontalSplit *
+                ((scale - 0.72) / 0.16).coerceIn(0.0, 1.0) * horizonGeometry,
+            CompositionStyle.REPETITION to f.repetition *
+                ((scale - 0.84) / 0.08).coerceIn(0.0, 1.0),
+            // Chiaroscuro without a clean dividing line: hard light that splits the frame
+            // into tonal blocks is claimed by HORIZON/VERTICAL, contrast keeps the rest.
+            CompositionStyle.CONTRAST to f.contrast *
+                (1 - abs(scale - 0.88) / 0.20).coerceIn(0.0, 1.0),
+            CompositionStyle.CONVERGENCE to f.convergence * convergenceGeometry,
         )
+    }
+
+    /**
+     * Style-seeded candidate diversity. The energy-ranked top three can miss a composition
+     * language that has strong scene evidence but no geometrically matching crop (a mirror
+     * facade, for instance, never produces a centred crop when content sits off-axis). When
+     * that happens the best-fitting crop from the wider pool replaces the third proposal, so
+     * the on-device model gets three genuinely different grammars to choose between instead
+     * of three near-duplicates. Prompt wording is untouched (the T07 eval showed wording
+     * changes do not move the small model); the extra option itself is the intervention.
+     * Evidence zero means no injection, and the replacement must still retain most energy.
+     */
+    private fun enrichWithStyleSeeds(
+        selected: List<ScoredCrop>,
+        ranked: List<ScoredCrop>,
+        features: SceneFeatures,
+    ): List<ScoredCrop> {
+        if (selected.size < 3) return selected
+        val represented = evidenceStyles.any { style ->
+            selected.maxOf { affinities(it, features)[style] ?: 0.0 } >= 0.18
+        }
+        if (represented) return selected
+        val seed = evidenceStyles
+            .associateWith { sceneEvidence(it, features) }
+            .filterValues { it >= 0.60 }
+            .maxByOrNull { it.value }
+            ?: return selected
+        val seedStyle = seed.key
+        val replacement = ranked
+            .filter { crop -> selected.all { intersectionOverUnion(crop, it) < 0.80 } }
+            .filter { it.score >= selected.last().score - 0.10 && it.score >= 0.45 }
+            .maxByOrNull { (affinities(it, features)[seedStyle] ?: 0.0) * 0.7 + it.score * 0.3 }
+            ?: return selected
+        if ((affinities(replacement, features)[seedStyle] ?: 0.0) < 0.35) return selected
+        return selected.take(2) + replacement
     }
 
     private fun describe(style: CompositionStyle, crop: ScoredCrop, features: SceneFeatures): String = when (style) {
@@ -231,6 +335,24 @@ internal object FastCompositionAdvisor {
             else -> "留白构图 · 保留右侧大片留白，主体更突出、更有呼吸感"
         }
         CompositionStyle.WIDE_CONTEXT -> "环境构图 · 退后一步保留环境信息，让场景本身讲故事"
+        CompositionStyle.SYMMETRY -> "对称构图 · 左右几乎镜像，站到中轴线上拍，秩序感最强"
+        CompositionStyle.VERTICAL -> "竖线构图 · 让竖向结构贯穿画面、保持正直，气势更足"
+        CompositionStyle.HORIZON -> run {
+            val line = (features.horizonY - crop.top) / crop.scale
+            when {
+                line !in 0.0..1.0 -> "水平分割 · 保留这条明暗分界线，让它落在三分线上"
+                line < 0.42 -> "水平分割 · 分界压在上三分线，地面成为画面主角"
+                line > 0.58 -> "水平分割 · 分界压在下三分线，给天空留出大片空间"
+                else -> "水平分割 · 分界线卡在正中，上移要地面、下移要天空"
+            }
+        }
+        CompositionStyle.REPETITION ->
+            "节奏构图 · 重复的元素形成韵律，拍满它，或等一个异类打破节奏"
+        CompositionStyle.CONTRAST ->
+            if (features.darkShare >= 0.62) "明暗对比 · 光比很硬，让主体走进亮区，暗部自然沉下去"
+            else "明暗对比 · 画面亮暗分明，让主体压在亮暗交界处"
+        CompositionStyle.CONVERGENCE ->
+            "汇聚线构图 · 两侧线条向远处收拢，把主体放在汇聚点上"
         CompositionStyle.CONSERVATIVE -> "纹理与对比较少，保留完整画面更稳妥"
         CompositionStyle.GENERIC -> when {
             crop.scale >= 0.92 -> "保留更多环境与明暗结构，避免过度裁切"
@@ -322,11 +444,29 @@ internal class SceneFeatures private constructor(
     val symmetry: Double,
     val diagonal: Double,
     val slashDominant: Boolean,
+    /** Weighted agreement of diagonal slope sign: 1 for one-slash fields, ~0 for a V (convergence). */
+    val slopePurity: Double,
     val leading: Double,
     val centered: Double,
     val scattered: Double,
     val frame: Double,
     val triangle: Double,
+    /** Several strong vertical edges spread across the frame, not one object's two sides. */
+    val verticalStrength: Double,
+    /** A single long horizontal tonal boundary (horizon / band split). */
+    val horizontalSplit: Double,
+    /** Normalized y of the horizontal boundary when [horizontalSplit] fires. */
+    val horizonY: Double,
+    /** Equally spaced repetition along columns or rows (rhythm / pattern). */
+    val repetition: Double,
+    /** Bimodal tonal separation (Otsu between-class variance / total variance). */
+    val contrast: Double,
+    /** Share of pixels below the Otsu threshold; copy distinguishes low-key from high-key. */
+    val darkShare: Double,
+    /** Diagonal edges lean inward from both lower halves toward the upper centre. */
+    val convergence: Double,
+    /** Edge texture on BOTH flanks: symmetry needs mirrored structure, not one central mass. */
+    val lateralTexture: Double,
     /** Foreground band strength: index 0 = bottom band, 1 = top band. */
     val foreground: DoubleArray,
     /** Empty-band strength: index 0 = left, 1 = right, 2 = bottom, 3 = top. */
@@ -362,17 +502,29 @@ internal class SceneFeatures private constructor(
             var diagVoteWeight = 0.0
             var diagVote = 0.0
             var orientationSign = 0.0
+            var slopeSignVote = 0.0
+            var slopeVoteWeight = 0.0
             for (i in gx.indices) {
                 val weight = hypot(gx[i], gy[i])
                 val denom = gx[i] * gx[i] + gy[i] * gy[i]
                 if (denom > 1e-12) {
-                    diagVote += weight * (2 * abs(gx[i] * gy[i]) / denom)
+                    val diagness = 2 * abs(gx[i] * gy[i]) / denom
+                    diagVote += weight * diagness
                     orientationSign += gx[i] * gy[i]
+                    slopeSignVote += weight * diagness * if (gx[i] * gy[i] >= 0) 1.0 else -1.0
+                    slopeVoteWeight += weight * diagness
                 }
                 diagVoteWeight += weight
             }
             val diagAlign = if (diagVoteWeight > 1e-9) diagVote / diagVoteWeight else 0.0
             val diagonal = ((diagAlign - 0.55) / 0.25).coerceIn(0.0, 1.0)
+            val slopePurity = if (slopeVoteWeight > 1e-9) abs(slopeSignVote / slopeVoteWeight) else 0.0
+            // A one-slope diagonal field projects a periodic ramp and often a bimodal
+            // histogram too, but "diagonal" is the operative reading there. The suppression
+            // uses the raw diagonal alignment (a shallower gate than DIAGONAL's own claim)
+            // times slopePurity, so a 30-ish degree stripe field still yields to "diagonal"
+            // while V-shaped fields (low purity) keep transverse rhythm such as a crossing.
+            val singleSlope = ((diagAlign - 0.45) / 0.25).coerceIn(0.0, 1.0) * slopePurity
 
             // Left-right mirror symmetry on luminance.
             var symmetryDiff = 0.0
@@ -417,10 +569,206 @@ internal class SceneFeatures private constructor(
                 (1 - bands[side] / (0.5 * opposite[side])).coerceIn(0.0, 1.0) * directional
             }
 
-            // Edge magnitude for foreground / frame readings.
+            // Edge magnitude shared by the vertical / horizon / frame / foreground readings.
             val mag = DoubleArray(w * h) { hypot(gx[it], gy[it]) }
             val magEnergy = FastCompositionAdvisor.Integral(w, h, mag)
             val globalMag = mag.average() + 1e-9
+            val edgeThreshold = globalMag * 1.4
+
+            // Symmetry claims mirrored STRUCTURE on both flanks. A single central bar is
+            // mirror-symmetric too, but with empty flanks that reading is CENTERED instead.
+            // The flank/centre ratio (not a global ratio) survives one strong off-axis object.
+            val sideTexture = minOf(
+                magEnergy.density(w, h, 0.0, 0.0, 0.34, 1.0),
+                magEnergy.density(w, h, 0.66, 0.0, 1.0, 1.0),
+            )
+            val centerTexture = magEnergy.density(w, h, 0.34, 0.0, 0.66, 1.0)
+            val lateralTexture = (2.0 * sideTexture / (sideTexture + centerTexture + 1e-9))
+                .coerceIn(0.0, 1.0)
+
+            // Vertical dominance needs several vertical edge COLUMNS spread across the frame.
+            // One object's two flanking sides (a central pillar, a single bright bar) must not
+            // read as a vertical-line composition, hence the count and span gates.
+            var strongTotal = 0.0
+            var verticalVote = 0.0
+            var minVertColumn = w
+            var maxVertColumn = 0
+            var vertColumnCount = 0
+            for (x in 1 until w - 1) {
+                var columnStrong = 0.0
+                var columnVertical = 0.0
+                for (y in 1 until h - 1) {
+                    val i = y * w + x
+                    if (mag[i] >= edgeThreshold) {
+                        columnStrong += mag[i]
+                        strongTotal += mag[i]
+                        if (abs(gx[i]) > 1.6 * abs(gy[i])) columnVertical += mag[i]
+                    }
+                }
+                if (columnVertical > columnStrong * 0.6 &&
+                    columnStrong > h * globalMag * 0.6) {
+                    vertColumnCount++
+                    minVertColumn = min(minVertColumn, x)
+                    maxVertColumn = max(maxVertColumn, x)
+                    verticalVote += columnVertical
+                }
+            }
+            val verticalShare = if (strongTotal > 1e-9) verticalVote / strongTotal else 0.0
+            val verticalSpan = if (vertColumnCount > 0) (maxVertColumn - minVertColumn) / w.toDouble() else 0.0
+            val verticalStrength = ((verticalShare - 0.45) / 0.30).coerceIn(0.0, 1.0) *
+                ((vertColumnCount - 3).toDouble() / 1.0).coerceIn(0.0, 1.0) *
+                ((verticalSpan - 0.40) / 0.30).coerceIn(0.0, 1.0) *
+                (1.0 - 0.6 * diagonal)
+
+            // Longest horizontal boundary: accepted only when strong horizontal edges cover
+            // most of the width and the row peak dominates the vertical peak, so a vertical
+            // tonal split cannot qualify as a horizon.
+            val rowHorizontal = DoubleArray(h)
+            val colVerticalEnergy = DoubleArray(w)
+            for (y in 1 until h - 1) for (x in 1 until w - 1) {
+                val i = y * w + x
+                if (mag[i] >= edgeThreshold) {
+                    if (abs(gy[i]) > 1.6 * abs(gx[i])) rowHorizontal[y] += mag[i]
+                    if (abs(gx[i]) > 1.6 * abs(gy[i])) colVerticalEnergy[x] += mag[i]
+                }
+            }
+            var splitRow = 1
+            var rowPeak = 0.0
+            for (y in 2 until h - 2) {
+                if (rowHorizontal[y] > rowPeak) {
+                    rowPeak = rowHorizontal[y]
+                    splitRow = y
+                }
+            }
+            // Sobel responds on BOTH rows flanking a step, so the second-strongest boundary
+            // is measured outside the peak's ±2 row neighbourhood; a terraced frame then
+            // shows a competing boundary while a true horizon has none.
+            var secondPeak = 0.0
+            for (y in 2 until h - 2) {
+                if (abs(y - splitRow) >= 3 && rowHorizontal[y] > secondPeak) {
+                    secondPeak = rowHorizontal[y]
+                }
+            }
+            val colPeak = (1 until w - 1).maxOf { colVerticalEnergy[it] }
+            var coveredColumns = 0
+            for (x in 2 until w - 2) {
+                if (abs(gy[splitRow * w + x]) > globalMag * 1.2) coveredColumns++
+            }
+            val coverage = coveredColumns.toDouble() / (w - 4)
+            // Dominance over the SECOND strongest boundary row: a terraced multi-band frame
+            // has competing rows near the peak, a true horizon has one undisputed boundary.
+            val boundaryDominance = rowPeak / (secondPeak + 1e-9)
+            val horizontalSplit = if (rowPeak >= colPeak * 1.15) {
+                ((coverage - 0.55) / 0.30).coerceIn(0.0, 1.0) *
+                    ((boundaryDominance - 2.0) / 2.0).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
+            val horizonY = (splitRow + 0.5) / h
+
+            // Bimodal tonal separation via Otsu's between-class variance. Contrast also needs
+            // a real minority block; a clean single geometric split is reserved for HORIZON.
+            val tonalHistogram = IntArray(256)
+            lum.forEach { tonalHistogram[(it * 255).roundToInt().coerceIn(0, 255)]++ }
+            val pixelCount = w * h
+            val luminanceSum = lum.sum()
+            var darkWeight = 0
+            var darkSum = 0.0
+            var maxVariance = 0.0
+            var darkCountAtThreshold = 0
+            for (t in 0 until 256) {
+                darkWeight += tonalHistogram[t]
+                if (darkWeight == 0) continue
+                val lightWeight = pixelCount - darkWeight
+                if (lightWeight == 0) break
+                darkSum += tonalHistogram[t] * t / 255.0
+                val meanDark = darkSum / darkWeight
+                val meanLight = (luminanceSum - darkSum) / lightWeight
+                val betweenVariance = darkWeight.toDouble() * lightWeight *
+                    (meanDark - meanLight).pow(2.0)
+                if (betweenVariance > maxVariance) {
+                    maxVariance = betweenVariance
+                    darkCountAtThreshold = darkWeight
+                }
+            }
+            val totalLuminanceVariance = lum.sumOf {
+                (it - luminanceSum / pixelCount).pow(2.0)
+            }.coerceAtLeast(1e-12)
+            val separability = (maxVariance / (pixelCount * totalLuminanceVariance)).coerceIn(0.0, 1.0)
+            val darkShare = darkCountAtThreshold.toDouble() / pixelCount
+            val minorityShare = min(darkShare, 1.0 - darkShare)
+            val contrast = ((separability - 0.62) / 0.25).coerceIn(0.0, 1.0) *
+                ((minorityShare - 0.14) / 0.10).coerceIn(0.0, 1.0) *
+                (1.0 - 0.9 * horizontalSplit) * (1.0 - 0.8 * singleSlope)
+
+            // Rhythm: a sharp non-zero autocorrelation lag with at least three repetitions.
+            // The half-lag correlation must be negative (alternating bands/blocks); a single
+            // wide pulse whose autocorrelation only decays does not count as rhythm. Diagonal
+            // fields project a periodic ramp, so suppress them when diagonal alignment wins.
+            fun periodicStrength(projection: DoubleArray): Double {
+                val n = projection.size
+                val centered = DoubleArray(n) { projection[it] - projection.average() }
+                val energy = centered.sumOf { it * it }
+                if (energy < 1e-9) return 0.0
+                var best = 0.0
+                for (lag in 3..n / 3) {
+                    fun normalizedAt(offset: Int): Double {
+                        var acc = 0.0
+                        for (i in 0 until n - offset) acc += centered[i] * centered[i + offset]
+                        return acc / (energy * (n - offset) / n)
+                    }
+                    // True rhythm: positive at the lag, negative half a lag later (alternation),
+                    // and still positive at 2*lag (a third repetition). A single wide pulse or
+                    // non-periodic terraced bands fails at least one of these.
+                    val normalized = normalizedAt(lag)
+                    if (normalized > best && normalizedAt(lag / 2) < 0.0 &&
+                        normalizedAt(2 * lag) > normalized - 0.15
+                    ) {
+                        best = normalized
+                    }
+                }
+                return best
+            }
+            val columnProjection = DoubleArray(w) { x ->
+                var acc = 0.0
+                for (y in 0 until h) acc += signal[y * w + x]
+                acc
+            }
+            val rowProjection = DoubleArray(h) { y ->
+                var acc = 0.0
+                for (x in 0 until w) acc += signal[y * w + x]
+                acc
+            }
+            val repetition = ((maxOf(periodicStrength(columnProjection),
+                periodicStrength(rowProjection)) - 0.45) / 0.30).coerceIn(0.0, 1.0) *
+                (1.0 - 0.85 * singleSlope)
+
+            // Convergence: strong diagonal edges in the left half lean "/" while the right
+            // half leans "\", both groups heading inward toward the upper centre. A single
+            // slope field (one-slash photo) keeps one of the two shares near zero.
+            var leftDiagonal = 0.0
+            var leftInward = 0.0
+            var rightDiagonal = 0.0
+            var rightInward = 0.0
+            for (y in 1 until h - 1) for (x in 1 until w - 1) {
+                val i = y * w + x
+                if (mag[i] < edgeThreshold) continue
+                val denom = gx[i] * gx[i] + gy[i] * gy[i]
+                if (denom <= 1e-12 || 2 * abs(gx[i] * gy[i]) / denom < 0.7) continue
+                val weight = mag[i]
+                if (x < w / 2) {
+                    leftDiagonal += weight
+                    if (gx[i] * gy[i] > 0) leftInward += weight
+                } else {
+                    rightDiagonal += weight
+                    if (gx[i] * gy[i] < 0) rightInward += weight
+                }
+            }
+            val leftInwardShare = if (leftDiagonal > 1e-9) leftInward / leftDiagonal else 0.0
+            val rightInwardShare = if (rightDiagonal > 1e-9) rightInward / rightDiagonal else 0.0
+            val convergence = ((diagAlign - 0.50) / 0.25).coerceIn(0.0, 1.0) *
+                ((min(leftInwardShare, rightInwardShare) - 0.55) / 0.30).coerceIn(0.0, 1.0)
+
             val bottomMag = magEnergy.density(w, h, 0.0, 0.78, 1.0, 1.0)
             val topMag = magEnergy.density(w, h, 0.0, 0.0, 1.0, 0.22)
             val upperContent = sigDensity(0.0, 0.05, 1.0, 0.75)
@@ -492,8 +840,9 @@ internal class SceneFeatures private constructor(
             val activeCells = cells.sumOf { column -> column.count { it > meanDensity * 1.5 } }
             val scattered = ((activeCells - 3).toDouble() / 2.0).coerceIn(0.0, 1.0)
 
-            return SceneFeatures(symmetry, diagonal, orientationSign >= 0.0, leading, centered,
-                scattered, frame, triangle, foreground, negSpace)
+            return SceneFeatures(symmetry, diagonal, orientationSign >= 0.0, slopePurity, leading,
+                centered, scattered, frame, triangle, verticalStrength, horizontalSplit, horizonY,
+                repetition, contrast, darkShare, convergence, lateralTexture, foreground, negSpace)
         }
     }
 }
