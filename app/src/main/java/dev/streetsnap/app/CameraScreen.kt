@@ -34,6 +34,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -226,9 +227,38 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                                 compositionState = compositionState,
                                 latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
                         }
+                    } else if (maxHeight > maxWidth) {
+                        // Phone portrait: a camera-back layout. Nameplate, the exact 3:4
+                        // viewfinder screen and an opaque control cluster stack edge to
+                        // edge, so there is no letterbox void between picture and controls.
+                        val nameplateHeight = 48.dp
+                        // Worst case the cluster can show: divider + paddings + one override
+                        // chip row + focal row + 92dp shutter row. Reserve it up front; on
+                        // short screens the 3:4 picture shrinks a touch instead of clipping.
+                        val clusterMinHeight = 210.dp
+                        val framedWidth = minOf(maxWidth, (maxHeight - nameplateHeight - clusterMinHeight) * 3f / 4f)
+                        Column(Modifier.fillMaxSize().background(Color.Black)) {
+                            ViewfinderNameplate(CameraModel.fromId(settings.mascotCamera),
+                                onPickMascot = { showMascotPicker = true },
+                                modifier = Modifier.fillMaxWidth().height(nameplateHeight))
+                            Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
+                                Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ })
+                            ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
+                                Modifier.fillMaxWidth().weight(1f), framed = true,
+                                onTab = { adjustmentTab = it },
+                                latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
+                        }
+                        if (adjustmentTab != null) {
+                            ControlBottomSheet(adjustmentTab!!, onDismiss = { adjustmentTab = null },
+                                onTab = { adjustmentTab = it },
+                                state = state, settings = settings, importing = lutLoading, model = model,
+                                importLut = { lutPicker.launch(arrayOf("*/*")) },
+                                openMascotPicker = { showMascotPicker = true },
+                                compositionState = compositionState)
+                        }
                     } else {
-                        // Phone (and small split-screen): the viewfinder owns the whole screen;
-                        // shutter/focal controls float over it and pro controls live in a sheet.
+                        // Small landscape / split-screen: the viewfinder owns the space and
+                        // shutter/focal controls float over its lower edge.
                         Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
                             Modifier.fillMaxSize(), onRetry = { retry++ })
                         ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
@@ -280,6 +310,9 @@ private fun Viewfinder(
     compositionState: CompositionUiState,
     modifier: Modifier,
     onRetry: () -> Unit,
+    // Portrait camera-back layout: the caller already sizes this composable to the exact
+    // 3:4 screen, so overlays only need a small lift off its bottom edge.
+    framed: Boolean = false,
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -356,13 +389,17 @@ private fun Viewfinder(
         val ratio = if (landscape) 4f / 3f else 3f / 4f
         val previewWidth = min(maxWidth.value, maxHeight.value * ratio).dp
         val previewHeight = previewWidth / ratio
-        // Phones float the shutter/focal bar over this lower edge; lift overlays just above
-        // the single manual-override chip row that can intrude into the preview.
-        val floatingClearance = if (maxHeight > maxWidth) 92.dp else 10.dp
-        // Portrait: pin the 3:4 preview to the top so the dead letterbox space becomes
-        // the bottom control area (camera convention), instead of leaving a large empty
-        // band above the viewfinder. Landscape keeps it centred beside the side rail.
-        val previewAlignment = if (maxHeight > maxWidth) Alignment.TopCenter else Alignment.Center
+        // Framed portrait: the box already is the exact 3:4 screen between nameplate and
+        // control cluster, so cards hug the screen edge. Floating portrait lifts cards
+        // above the shutter/focal bar; landscape barely lifts them at all.
+        val floatingClearance = when {
+            framed -> 16.dp
+            maxHeight > maxWidth -> 92.dp
+            else -> 10.dp
+        }
+        // Framed fills its box. The floating portrait path pins to TopCenter; landscape
+        // keeps the 3:4 picture centred beside/below its chrome.
+        val previewAlignment = if (framed || maxWidth > maxHeight) Alignment.Center else Alignment.TopCenter
         Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment)) {
             AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().onSizeChanged {
                 width = it.width
@@ -562,7 +599,43 @@ private fun OverlayPill(
 }
 
 /**
- * Phone portrait capture surface: everything floats over the full-screen viewfinder.
+ * Phone portrait top chrome: the collectible camera body sits above the 3:4 screen
+ * like the plate on a camera back; tap it to swap bodies. Stays deliberately wordless.
+ */
+@Composable
+private fun ViewfinderNameplate(
+    mascot: CameraModel?,
+    onPickMascot: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        if (mascot != null) {
+            // Same mid-grey card as the MascotPicker tiles (#2D3335): the dark vector
+            // bodies only separate from a lighter field, not from black chrome.
+            Box(Modifier.size(74.dp, 40.dp).clip(RoundedCornerShape(9.dp))
+                .background(Color(0xFF2D3335))
+                .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(9.dp))
+                .clickable(role = Role.Button, onClick = onPickMascot)
+                .semantics { contentDescription = "相机摆件：${mascot.brand} ${mascot.model}，点按更换" },
+                contentAlignment = Alignment.Center) {
+                // Canvas has no intrinsic size; an explicit height is mandatory here
+                // (fillMaxWidth alone collapses it to zero in the wrapped nameplate).
+                CameraArtwork(mascot, Modifier.size(64.dp, 40.dp))
+            }
+            Spacer(Modifier.width(10.dp))
+            Column {
+                Text(mascot.model, color = Color.White.copy(alpha = .92f), fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold, maxLines = 1)
+                Text(mascot.brand, color = Color.White.copy(alpha = .5f), fontSize = 9.sp, maxLines = 1)
+            }
+        }
+    }
+}
+
+/**
+ * Phone portrait capture surface. Framed mode is an opaque camera-back control cluster
+ * beneath the 3:4 screen (focal row hugs the screen, shutter sinks to the bottom); the
+ * small-landscape fallback keeps controls floating over the viewfinder on a gradient.
  * Only the high-frequency focal choice and the shutter stay; looks, white balance and
  * other pro controls are surfaced here *only* while a manual override is active (a
  * tappable chip that jumps straight to the right sheet section), otherwise they live
@@ -579,6 +652,7 @@ private fun ViewfinderOverlayBar(
     onTab: (AdjustmentTab?) -> Unit,
     latestPhoto: Uri?,
     openPhoto: (Uri) -> Unit,
+    framed: Boolean = false,
 ) {
     val focalLengths = listOf(FocalLength.MM28, FocalLength.MM35, FocalLength.MM50)
     val supportedFocalLengths = state.capabilities?.focalLengthOptions.orEmpty()
@@ -607,13 +681,16 @@ private fun ViewfinderOverlayBar(
             add(ActiveOverride("EV %+.1f".format(ev), AdjustmentTab.SHOOTING, "曝光归零") { model.setExposure(0) })
     }
 
-    Column(modifier.background(
-            Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
-        .padding(top = 46.dp, bottom = 10.dp),
+    val chrome = if (framed) Modifier.background(Color.Black)
+        else Modifier.background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
+    Column(modifier.then(chrome)
+        .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 6.dp else 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
+        // Hairline that separates the 3:4 screen from the camera-back control cluster.
+        if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
         // Active manual overrides: visible tappable reminders that jump to the section.
         if (overrides.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = if (framed) 3.dp else 4.dp)
                 .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
                 overrides.forEach { override ->
@@ -624,7 +701,7 @@ private fun ViewfinderOverlayBar(
             }
         }
         // Focal lengths: the one pro control worth keeping on the capture screen.
-        Row(Modifier.padding(bottom = 6.dp).clip(RoundedCornerShape(22.dp))
+        Row(Modifier.padding(bottom = if (framed) 4.dp else 6.dp).clip(RoundedCornerShape(22.dp))
             .background(Color.Black.copy(alpha = .42f)).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             focalLengths.forEach { focal ->
@@ -645,6 +722,9 @@ private fun ViewfinderOverlayBar(
                 }
             }
         }
+        // Framed mode: focal row hugs the screen above while the shutter row rests on the
+        // bottom of the control cluster; any extra height is absorbed here, never as a void.
+        if (framed) Spacer(Modifier.weight(1f).heightIn(min = 6.dp))
         Row(Modifier.fillMaxWidth().height(92.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceEvenly) {
             Box(Modifier.weight(1f, fill = false).width(80.dp).height(72.dp), contentAlignment = Alignment.Center) {

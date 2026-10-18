@@ -2,7 +2,7 @@
 
 喜欢口袋相机，也喜欢它们各自的脾气：熟悉的视角、顺手的快门，一眼认得出的颜色。途帧于手机之上：收束纷扰，快门轻触，影调自调。途遇，帧藏。
 
-**Open-source Android street camera: a full-screen viewfinder, Snap-style capture, film-inspired color, and an optional on-device composition advisor — no cloud, no account.**
+**Open-source Android street camera: an uncluttered camera-back viewfinder, Snap-style capture, film-inspired color, and an optional on-device composition advisor — no cloud, no account.**
 
 [![Status: Development](https://img.shields.io/badge/status-development-f59e0b?style=flat-square)](#roadmap)
 [![Android: v0.3 dev](https://img.shields.io/badge/Android-v0.3%20dev-3DDC84?style=flat-square&logo=android&logoColor=white)](#安装与发布)
@@ -15,7 +15,7 @@
 
 手机相机的功能越来越多，但街头抓拍没有多少时间留给菜单和模式切换。途帧以理光 GR 这类随身相机的就绪速度为参照：**启动快、操作少、体积轻**，只保留 **28 / 35 / 50mm** 三档等效视角，把准备工作前置（预设曝光、对焦、影调并自动记忆），举机即拍。
 
-`v0.3.0-dev` 已把拍摄前的主要决定收进一块从底部升起的控制面板：默认取景页只剩全屏画面、居中快门、焦段与一个"调整"入口；影调、胶片配方、白平衡、P/S/M 与构图模型管理都在面板里。任何手动覆盖（非自动白平衡、MF、S/M 档、EV、柔光）都会在快门上方显示一枚小药丸：点按直达对应设置，**长按一键复位**，避免忘记手动状态毁掉整组照片。
+`v0.3.0-dev` 竖屏取景页是相机背式三段布局：顶部相机铭牌（当前摆件，点按更换）、与成片同比例的 3:4 取景屏、不透明控制簇（焦段贴屏、居中快门与"调整"入口沉底，中间不留 letterbox 黑带）；拍摄前的主要决定收进一块从底部升起的控制面板——影调、胶片配方、白平衡、P/S/M 与构图模型管理都在面板里。任何手动覆盖（非自动白平衡、MF、S/M 档、EV、柔光）都会在快门上方显示一枚小药丸：点按直达对应设置，**长按一键复位**，避免忘记手动状态毁掉整组照片。
 
 - **举起即拍**：快门居中、零确认、无边框打印；音量键可当快门；点按对焦、长按锁焦。
 - **三档视角**：28 / 35 / 50mm 等效焦段（按设备 Camera2 能力开放，不支持的档位不点亮）。
@@ -28,9 +28,9 @@
 
 ## 界面
 
-| 全屏取景与构图建议 | 相机摆件选择 | 端侧模型管理 |
+| 竖屏取景与构图建议 | 相机摆件选择 | 端侧模型管理 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧取景界面：全屏预览、三分网格、画面分析蓝框与中文建议卡、状态行显示来源与耗时、底部悬浮焦段条、居中快门与调整入口"> | <img src="docs/images/camera-picker.png" width="250" alt="相机设置弹窗：五款相机摆件与自动、横持、竖持取景方向"> | <img src="docs/images/edge-models.png" width="250" alt="构图辅助设置：推荐框与实时开关、三个可选端侧模型、已安装 417.7MB 的 d1 决策 600M、状态行显示 AI 比较超时"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧竖屏取景界面：顶部相机铭牌、3:4 取景屏内三分网格与画面分析蓝框中文建议卡、状态行显示来源与耗时、底部实体控制簇内焦段条、居中快门与调整入口"> | <img src="docs/images/camera-picker.png" width="250" alt="相机设置弹窗：五款相机摆件与自动、横持、竖持取景方向"> | <img src="docs/images/edge-models.png" width="250" alt="构图辅助设置：推荐框与实时开关、三个可选端侧模型、已安装 417.7MB 的 d1 决策 600M、状态行显示 AI 比较超时"> |
 
 <p align="center">
 <img src="docs/images/model-adoption.png" width="660" alt="横屏取景：端侧模型通过门闸后推荐框升级为黄色 AI 选择，附中文建议卡与来源、耗时"><br>
@@ -150,7 +150,7 @@ Preview 是开发测试签名的非调试构建（启用 R8 与资源裁剪，�
 
 - [x] Android 基础拍摄：取景、拍照、28/35/50mm、参数记忆、实时影调、LUT 导入、EXIF JPEG
 - [x] 手动能力：P/S/M、EV、AF/MF、白平衡漂移、HDF 柔光；设备不支持的档位不显示
-- [x] 全屏取景器改造：控制面板收纳进底部浮层、手动覆盖可见且可一键复位（行业调研见 [camera-ui-research.md](docs/camera-ui-research.md)）
+- [x] 取景器改造：竖屏相机背式三段布局（铭牌 + 3:4 屏 + 实体控制簇，无 letterbox 黑带）、控制面板收纳进底部浮层、手动覆盖可见且可一键复位（行业调研见 [camera-ui-research.md](docs/camera-ui-research.md)）
 - [x] 双分支构图管线：规则层独立可用 + d1/SmolVLM 端侧择优，含换序一致性门闸、背压与场景失效契约
 - [ ] 构图质量：独立人工标注照片集，评估规则首选与模型重排的真实偏好改善
 - [x] 性能：连续串行推理，规则层模拟器实测约 2.4 次/秒（0.87 → 2.4）；真机帧率、温升与功耗待 Vs3
