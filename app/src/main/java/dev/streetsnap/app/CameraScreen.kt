@@ -234,11 +234,14 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // Nameplate: follow-look by default (the body tracks the active
                         // look/film family), a pinned body, or hidden entirely.
                         val hideNameplate = settings.mascotCamera == CameraPreferences.HIDDEN
-                        val nameplateHeight = if (hideNameplate) 0.dp else 48.dp
+                        // Tall enough for the body card to read as a camera plate rather than
+                        // a flattened strip (T22: 48dp crowded the 74x40 artwork).
+                        val nameplateHeight = if (hideNameplate) 0.dp else 80.dp
                         // Worst case the cluster can show: divider + paddings + one override
-                        // chip row + focal row + 92dp shutter row. Reserve it up front; on
-                        // short screens the 3:4 picture shrinks a touch instead of clipping.
-                        val clusterMinHeight = 210.dp
+                        // chip row + focal row + fixed focal/shutter gap + 92dp shutter row.
+                        // Reserve it up front; on short screens the 3:4 picture shrinks a
+                        // touch instead of clipping.
+                        val clusterMinHeight = 218.dp
                         val framedWidth = minOf(maxWidth, (maxHeight - nameplateHeight - clusterMinHeight) * 3f / 4f)
                         Column(Modifier.fillMaxSize().background(Color.Black)) {
                             if (!hideNameplate) {
@@ -265,7 +268,7 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                                         if (following) adjustmentTab = AdjustmentTab.LOOK
                                         else showMascotPicker = true
                                     },
-                                    modifier = Modifier.fillMaxWidth().height(48.dp))
+                                    modifier = Modifier.fillMaxWidth().height(nameplateHeight))
                             }
                             Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
                                 Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ })
@@ -740,9 +743,9 @@ private fun ViewfinderNameplate(
     Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         // Same mid-grey card as the body-picker tiles (#2D3335): the dark vector bodies
         // only separate from a lighter field, not from black chrome.
-        Box(Modifier.size(74.dp, 40.dp).clip(RoundedCornerShape(9.dp))
+        Box(Modifier.size(92.dp, 52.dp).clip(RoundedCornerShape(11.dp))
             .background(Color(0xFF2D3335))
-            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(9.dp))
+            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(11.dp))
             .clickable(role = Role.Button, onClick = onPick)
             .semantics {
                 contentDescription = if (camera != null) "相机铭牌：${camera.brand} ${camera.model}，点按更换"
@@ -750,14 +753,14 @@ private fun ViewfinderNameplate(
             },
             contentAlignment = Alignment.Center) {
             // Canvas has no intrinsic size; an explicit size is mandatory in the wrapped row.
-            if (camera != null) CameraArtwork(camera, Modifier.size(64.dp, 40.dp))
-            else NeutralLookArtwork(Modifier.size(26.dp))
+            if (camera != null) CameraArtwork(camera, Modifier.size(82.dp, 50.dp))
+            else NeutralLookArtwork(Modifier.size(32.dp))
         }
-        Spacer(Modifier.width(10.dp))
+        Spacer(Modifier.width(12.dp))
         Column {
-            Text(title, color = Color.White.copy(alpha = .92f), fontSize = 13.sp,
+            Text(title, color = Color.White.copy(alpha = .92f), fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(subtitle, color = Color.White.copy(alpha = .5f), fontSize = 9.sp,
+            Text(subtitle, color = Color.White.copy(alpha = .5f), fontSize = 10.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
@@ -765,8 +768,9 @@ private fun ViewfinderNameplate(
 
 /**
  * Phone portrait capture surface. Framed mode is an opaque camera-back control cluster
- * beneath the 3:4 screen (focal row hugs the screen, shutter sinks to the bottom); the
- * small-landscape fallback keeps controls floating over the viewfinder on a gradient.
+ * beneath the 3:4 screen (a hairline marks the edge, then chips/focal/shutter sit as one
+ * vertically centred group); the small-landscape fallback keeps controls floating over
+ * the viewfinder on a gradient.
  * Only the high-frequency focal choice and the shutter stay; looks, white balance and
  * other pro controls are surfaced here *only* while a manual override is active (a
  * tappable chip that jumps straight to the right sheet section), otherwise they live
@@ -815,10 +819,14 @@ private fun ViewfinderOverlayBar(
     val chrome = if (framed) Modifier.background(Color.Black)
         else Modifier.background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
     Column(modifier.then(chrome)
-        .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 6.dp else 10.dp),
+        .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 8.dp else 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
         // Hairline that separates the 3:4 screen from the camera-back control cluster.
         if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
+        // Framed mode: the control group (chips, focal, shutter) is vertically centred as
+        // one block, so on tall 20:9 screens the slack splits above/below it instead of
+        // opening a void between the focal row and the shutter (T22).
+        if (framed) Spacer(Modifier.weight(1f))
         // Active manual overrides: visible tappable reminders that jump to the section.
         if (overrides.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = if (framed) 3.dp else 4.dp)
@@ -832,7 +840,8 @@ private fun ViewfinderOverlayBar(
             }
         }
         // Focal lengths: the one pro control worth keeping on the capture screen.
-        Row(Modifier.padding(bottom = if (framed) 4.dp else 6.dp).clip(RoundedCornerShape(22.dp))
+        // In framed mode it belongs to the shutter group with a fixed, deliberate gap.
+        Row(Modifier.padding(bottom = if (framed) 14.dp else 6.dp).clip(RoundedCornerShape(22.dp))
             .background(Color.Black.copy(alpha = .42f)).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             focalLengths.forEach { focal ->
@@ -853,9 +862,6 @@ private fun ViewfinderOverlayBar(
                 }
             }
         }
-        // Framed mode: focal row hugs the screen above while the shutter row rests on the
-        // bottom of the control cluster; any extra height is absorbed here, never as a void.
-        if (framed) Spacer(Modifier.weight(1f).heightIn(min = 6.dp))
         Row(Modifier.fillMaxWidth().height(92.dp), verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceEvenly) {
             Box(Modifier.weight(1f, fill = false).width(80.dp).height(72.dp), contentAlignment = Alignment.Center) {
@@ -887,6 +893,8 @@ private fun ViewfinderOverlayBar(
                     color = Color.White.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+        // Counterweight to the leading spacer: keeps the whole control group centred.
+        if (framed) Spacer(Modifier.weight(1f))
     }
 }
 

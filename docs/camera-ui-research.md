@@ -188,3 +188,16 @@
 **验证（emulator-5580，1080×2340）**：OFF 默认纯净；HISTOGRAM 角钮高亮、直方图随暗场景真实集中暗部（与画面一致）；PARAMS 显 `P / EV +0.0 / 快门 AUTO / ISO AUTO`、无光圈行；第三击回 OFF；**force-stop 冷启动后 HISTOGRAM 态与直方图数据均保留**；构图建议卡（左下）与右上 OSD 不重叠。SettingsJsonTest 新增默认 OFF/三态往返/未知值回退 OFF/循环顺序用例，全量 `testDebugUnitTest` + `:app:assemblePreview` 通过。
 
 **未能在模拟器验证（代码走查，留真机）**：① 水平仪倾斜转动——emulator console 只能注入 acceleration（TYPE_ACCELEROMETER），而 app 优先消费不可注入的 TYPE_GRAVITY；水平态荧光绿已实测，旋转几何为同一 cos/sin 数学。② S/M 手动档真实快门/ISO 读数——该 AVD 模拟镜头 S/M/A 均灰禁不支持；数值通路与拍摄面板、"调整"钮副标题共用同一 `CaptureSettings` 字段与 `shutterLabel()` 格式化。③ 横屏 framebuffer 不翻转旧疾（第四节 b13/b14），位置参数按顶部/右上对齐做了走查。
+
+## 八、T22：三段比例再分配——铭牌加高、控件成组（2026-10-18）
+
+**问题（用户反馈）**：T18 三段式在 20:9 长屏上（1080×2340 / 420dpi，可用 411×891dp）比例失衡——3:4 屏宽占满即 411×548dp，垂直富余约 140dp 全部落进控制簇；而 T18 的簇实现是"焦段贴分隔线、快门沉底、中间 `Spacer(weight 1f)`"，于是焦段与快门之间撑出约 140dp 的巨大中空；与此同时顶部铭牌只有 48dp、74×40 摆件卡几乎占满条高，被压得很扁。
+
+**再分配**（只改竖屏 Column 路径，宽横屏侧栏与小横屏浮层不动）：
+1. 铭牌 48dp → **80dp**：摆件卡 74×40 → 92×52dp、机身 Canvas 64×40 → 82×50dp、中性镜头标 26 → 32dp，标题 13 → 14sp / 副标题 9 → 10sp；点按热区随之变大。
+2. 控制簇改为**整组垂直居中**：分隔线仍贴簇顶不动；其下新增一个 leading `Spacer(weight 1f)`，删除焦段与快门之间那个撑空的 weight Spacer，快门行后加等重的 trailing Spacer——chip 行/焦段/快门因此成为一个紧凑整体（焦段↔快门固定 14dp），长屏富余高度在组的**上下对称分配**，而不是在两个相关控件之间开天窗；chip 行出现时上下 Spacer 同步收缩。
+3. 短屏预算 `clusterMinHeight` 210 → 218dp（覆盖新的 14dp 组内间距），`framedWidth = min(maxWidth, (maxHeight - 80dp - 218dp) * 3/4)`，短屏仍然只缩屏、不裁控件。
+
+**AVD 验证（emulator-5580）**：默认态铭牌 GR 卡比例舒展、标题垂直居中；焦段与快门间距 14dp 视觉紧凑、上下留白对称；EV +2.0 覆盖药丸出现时整组增高不溢出；HIDDEN 铭牌时预览顶到状态栏、获得全部 80dp；跟随/正片 GR 铭牌语义节点保持「相机铭牌：理光 GR，点按更换」。`testDebugUnitTest` 全过、`:app:assemblePreview` 通过；重截 viewfinder.png。
+
+**未变**：3:4 屏宽度占满后高度物理锁定（WYSIWYG 共享 ViewPort 坐标不允许铺满裁切，见第五节），长屏富余空间只能分配给上下 chrome——80dp 铭牌 + 居中控件组即此约束下的均衡解；荣耀 Vs3 真机比例（内外屏）仍待实机确认。
