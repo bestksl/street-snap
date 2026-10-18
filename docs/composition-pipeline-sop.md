@@ -155,6 +155,12 @@ T28 §2.2 标准 4 的落地。纯逻辑在 `composition/CropTrial.kt`：`CropTr
 - 测试：`CropTrialTest` 7 测（全幅与 3% 容差 null、居中 .92 框等比 1/.92 且中心不变、偏置框中心随动、cover 取短边、最紧 .68 档缩放上界、窄条沿薄边缩放、合法框约束下的退化情形——NormalizedBoundingBox 契约禁止零/逆序尺寸）；全量 app/color/camera 测试绿，assemblePreview 通过。
 - AVD（emulator-5580，loaded-only）：用 `input motionevent DOWN/UP` 保持长按态截图——长按中预览按 1/.92 放大、框线遮罩隐去、提示条出现（初版与「构图」pill 重叠，改为长按期隐藏顶部行后复测干净），抬手后蓝框/遮罩/三分线完整还原；**试取景长按保持中用音量键拍照**，MediaStore 实测产物 `STREET_...jpg` 为 960×1280 全幅 3:4（测试后删除），证明显示放大不影响成像；无 FATAL。站位移动限制同前，但本特性不依赖站位。审美质量不由此特性声称。
 
+### T37：建议效果回归度量骨架（edge 仓探针，可复跑基线）
+
+「够不够多、有没有用」的回归基线落在 edge-model-solutions：`scripts/advice-regression-eval`（Gradle JVM，零 Android/零模型依赖）+ `evaluations/advice-regression-baseline-2026-10-19.json`。探针逐字快照在产纯 Kotlin（`FastCompositionAdvisor`/`CompositionActions`/`AlignmentFeedback`/`CompositionStyle` 整文件 + 从 `CompositionPipelineContracts.kt` 逐字抽取的 `NormalizedBoundingBox`，源为 street-snap `e891092`，包名不变、internal 同模块可见，README 记录再同步步骤），跑 204 个确定性 96×96 几何场景（1 平坦基线 + 3 尺寸×7×7 位置块扫描 + 贴边/拥挤/水平分界扫描/竖条/对角/汇聚/对称/三角/半明半暗/画框/前景层次/小主体留白），看数前固定四个指标：M1 首选风格覆盖率（排除 CONSERVATIVE/GENERIC，分母 19）；M2 频次分布（ln(21) 归一化熵、最大类占比、带动作句比例）；M3 变化率（同帧重复必须零变化；扫描相邻边变化率；全序列平均 run 长度）；M4 对齐闭环——对每个带动作句的建议，按 `plan` 的方向/推拉直接改场景参数（每步走几何差 60%、12 步预算、主体不出画），重渲染后喂真实 `AlignmentTracker`，以发出 ALIGNED 为成功；另带状态机门闸健全性（无需求不夸、12 帧需求后第 8 帧单发）。
+
+首版基线（2026-10-19，loaded-only，复跑除延迟外逐字节一致）：覆盖 10/19；首选分布 THIRDS 115 / MINIMAL 51 占 81%（熵 .44、最大类 .56），83.3% 带动作句；同帧重复 0/204 变化，扫描变化率 .247，平均 run 3.64 帧；M4 对齐 49/147（33%），98 个失败全部卡在 inset 0.03–0.10——结构性原因：crop 尺度档 0.68/.76/.84/.92/1.0 中 .92 档四边 inset=.04，而 T34 的 `FRAME_TOLERANCE`=.03，听话走位停在 .92 首选就永远不亮绿；126/147 闭环终态被读作 SYMMETRY。多个场景族首选与几何意图错位（拥挤边框→SYMMETRY 而非 TOO_TIGHT、汇聚线→CENTERED、三角块→THIRDS），作为「合成几何 vs 规则触发条件」的基线事实记录，首版看数后不调场景（改进套件几何是另立预注册的 v2）。本骨架是回归绊线而非质量声称：不含模型门闸/排序/调度，walker 假设操作者精确听话，桌面耗时（中位 1.88ms）非真机；审美仍 not-verified，唯一下一步是独立人工标注照片集。
+
 ## 历史诊断：为什么先前没有框
 
 此前直接让通用 SmolVLM 生成裁切坐标，实际输出包含 `[0,0,0,0]`、残缺坐标或普通描述，被合法性检查拒绝。相机输入与 ONNX 推理已打通；未经过本项目构图/定位训练的模型不能仅凭提示词保证坐标和审美能力。此前 Q4 语义探针曾连续两次正确识别画面右侧电视，描述任务也出现人物幻觉，不能据此证明可靠定位。
