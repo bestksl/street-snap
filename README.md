@@ -70,9 +70,11 @@ CameraX ImageAnalysis（YUV → 独立 RGB 帧 + 场景签名）
         │
         ▼
 FastCompositionAdvisor（Kotlin 规则，不是神经网络）
-  96px 缩略图：Sobel 边缘与梯度方向 · 视觉重心 · 分带能量 · 左右对称 ·
-  三分位置契合 · 边缘切割风险 · 裁切信息保留率
-        │ 3 个等比例合法裁切框 + 构图风格标签 + 中文理由（11 类构图语言）
+  96px 缩略图：Sobel 边缘与梯度方向直方图 · 视觉重心 · 分带能量 · 左右镜像 ·
+  侧翼纹理 · 竖边普查 · 水平分界（次强边界对比）· 投影自相关节奏 ·
+  Otsu 明暗双峰 · 双侧内收汇聚 · 三分位置契合 · 边缘切割风险 · 裁切信息保留率
+        │ 3 个等比例合法裁切框 + 构图风格标签 + 中文理由（17 类构图语言）
+        │ 强证据但能量候选缺失时，第三名补入"风格种子"裁切（如对称全帧）
         ▼
 CandidateContactSheet：同一帧三个裁片拼成 A/B/C 对照图
         │ （不夹带规则分数/高亮，防止把排序泄露给模型）
@@ -122,7 +124,7 @@ Compose 叠加层：框（黄=模型选择 / 蓝=画面分析）+ 中文建议 +
 | Android | Kotlin 2.2.10 + Jetpack Compose + CameraX / Camera2 interop |
 | 模块 | `app`（交互/保存/构图）· `camera`（相机会话与帧管线）· `color`（LUT 与 GPU 效果） |
 | 调色 | OpenGL ES 3.0 / GLSL，预览与成片共用 |
-| 规则构图 | Kotlin 图像统计（积分图/Sobel/分带能量），11 类构图语言 |
+| 规则构图 | Kotlin 图像统计（积分图/Sobel/方向普查/自相关/Otsu），17 类构图语言 |
 | 端侧推理 | ONNX Runtime 1.22（arm64 裁剪 AAR）；d1-omni-600M 与 SmolVLM 256M/500M 按需下载 |
 | iOS（后续） | Swift + SwiftUI + AVFoundation / Metal |
 | 预设文件 | `.cube` + JSON |
