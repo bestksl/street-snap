@@ -52,7 +52,9 @@ data class AppSettings(
     val level: Boolean = true,
     val preset: String = "ORIGINAL",
     val filmId: String? = null,
-    val mascotCamera: String? = CameraPreferences.DEFAULT_MASCOT,
+    // null = the nameplate follows the active look family; "HIDDEN" = no nameplate; a
+    // camera id = a manually pinned body. See CameraPreferences.nameplate.
+    val mascotCamera: String? = null,
     val captureOrientation: String = CameraPreferences.DEFAULT_ORIENTATION,
     val compositionEnabled: Boolean = false,
     val compositionRealtime: Boolean = false,
@@ -90,12 +92,24 @@ data class AppSettings(
 
 /** Stored IDs are independent of the Compose catalog so loading settings never needs UI code. */
 internal object CameraPreferences {
-    const val DEFAULT_MASCOT = "RICOH_GR"
     const val DEFAULT_ORIENTATION = "AUTO"
+
+    /** Explicitly hides the viewfinder nameplate. */
+    const val HIDDEN = "HIDDEN"
     private val mascots = setOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3")
     private val orientations = setOf("AUTO", "LANDSCAPE", "PORTRAIT")
 
-    fun mascot(id: String?): String? = if (id == null) null else id.takeIf { it in mascots } ?: DEFAULT_MASCOT
+    /**
+     * null = follow the active look/film family; [HIDDEN] = no nameplate; a known camera
+     * id = that pinned body. Legacy docs that pinned a body keep it; unknown ids recover
+     * to follow-look. (The pre-T19 explicit "hidden" value was JSON null, which now means
+     * follow-look — a deliberate, documented migration.)
+     */
+    fun nameplate(id: String?): String? = when {
+        id == null || id == HIDDEN -> id
+        id in mascots -> id
+        else -> null
+    }
     fun orientation(id: String?): String = id?.takeIf { it in orientations } ?: DEFAULT_ORIENTATION
 }
 
@@ -127,7 +141,7 @@ internal object SettingsJson {
         put("level", settings.level)
         put("preset", settings.preset)
         put("filmId", settings.filmId ?: JSONObject.NULL)
-        put("mascotCamera", CameraPreferences.mascot(settings.mascotCamera) ?: JSONObject.NULL)
+        put("mascotCamera", CameraPreferences.nameplate(settings.mascotCamera) ?: JSONObject.NULL)
         put("captureOrientation", CameraPreferences.orientation(settings.captureOrientation))
         put("compositionEnabled", settings.compositionEnabled)
         put("compositionRealtime", settings.compositionRealtime)
@@ -190,11 +204,8 @@ internal object SettingsJson {
                 preset = preset,
                 filmId = if (json.isNull("filmId")) null else json.optString("filmId")
                     .takeIf { FilmRegistry.find(it) != null },
-                mascotCamera = when {
-                    !json.has("mascotCamera") -> CameraPreferences.DEFAULT_MASCOT
-                    json.isNull("mascotCamera") -> null
-                    else -> CameraPreferences.mascot(json.optString("mascotCamera"))
-                },
+                mascotCamera = if (!json.has("mascotCamera") || json.isNull("mascotCamera")) null
+                    else CameraPreferences.nameplate(json.optString("mascotCamera")),
                 captureOrientation = CameraPreferences.orientation(json.optString("captureOrientation")),
                 compositionEnabled = json.optBoolean("compositionEnabled", false),
                 compositionRealtime = json.optBoolean("compositionRealtime", false),

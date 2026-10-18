@@ -174,7 +174,8 @@ class SettingsJsonTest {
         assertEquals(16_000_000L, loaded.exposureTimeNs)
         assertEquals(50, loaded.focalLength)
         assertEquals("DAYLIGHT", loaded.whiteBalance)
-        assertEquals("RICOH_GR", loaded.mascotCamera)
+        // Pre-T19 documents have no nameplate field; null now means "follow the active look".
+        assertNull(loaded.mascotCamera)
         assertEquals("AUTO", loaded.captureOrientation)
 
         val saved = JSONObject(SettingsJson.encode(loaded))
@@ -184,8 +185,10 @@ class SettingsJsonTest {
         assertEquals(loaded, SettingsJson.decode(saved.toString()))
     }
 
-    @Test fun everyCameraMascotAndCaptureDirectionSurviveRestart() {
-        val mascots = listOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3", null)
+    @Test fun everyNameplateChoiceAndCaptureDirectionSurviveRestart() {
+        // null = follow the active look, HIDDEN = no nameplate, camera ids = pinned body.
+        val mascots = listOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3",
+            CameraPreferences.HIDDEN, null)
         for (mascot in mascots) for (orientation in listOf("AUTO", "LANDSCAPE", "PORTRAIT")) {
             val settings = AppSettings(mascotCamera = mascot, captureOrientation = orientation,
                 preset = "POWDER_BLUE", whiteBalanceAmber = 3)
@@ -193,24 +196,32 @@ class SettingsJsonTest {
         }
     }
 
-    @Test fun missingCameraPreferencesUseDefaultsButExplicitlyDisabledMascotStaysDisabled() {
+    @Test fun missingOrNullNameplateMeansFollowLookWhileHiddenIsAString() {
+        // A legacy document without the field follows the active look (T19 migration)...
         val legacy = SettingsJson.decode("""{"version":2,"preset":"SUNNY"}""")
-        assertEquals("RICOH_GR", legacy.mascotCamera)
+        assertNull(legacy.mascotCamera)
         assertEquals("AUTO", legacy.captureOrientation)
-        val disabled = SettingsJson.decode("""{"version":4,"mascotCamera":null,"captureOrientation":"PORTRAIT"}""")
-        assertNull(disabled.mascotCamera)
-        assertEquals("PORTRAIT", disabled.captureOrientation)
-        assertEquals(disabled, SettingsJson.decode(SettingsJson.encode(disabled)))
+        // ...and so does an explicit JSON null, which used to mean "hidden" before T19.
+        val follow = SettingsJson.decode("""{"version":4,"mascotCamera":null,"captureOrientation":"PORTRAIT"}""")
+        assertNull(follow.mascotCamera)
+        assertEquals("PORTRAIT", follow.captureOrientation)
+        assertEquals(follow, SettingsJson.decode(SettingsJson.encode(follow)))
+        // The hidden state is the dedicated HIDDEN string, encoded verbatim rather than as null.
+        val hiddenJson = JSONObject(SettingsJson.encode(AppSettings(mascotCamera = CameraPreferences.HIDDEN)))
+        assertEquals(CameraPreferences.HIDDEN, hiddenJson.getString("mascotCamera"))
+        val hidden = SettingsJson.decode(hiddenJson.toString())
+        assertEquals(CameraPreferences.HIDDEN, hidden.mascotCamera)
     }
 
     @Test fun unknownCameraPreferencesRecoverWithoutDiscardingTheSelectedLook() {
         val settings = SettingsJson.decode("""{"version":4,"mascotCamera":"REMOVED_CAMERA","captureOrientation":"SIDEWAYS","preset":"POSITIVE","looks":{"POSITIVE":{"contrast":0.5}}}""")
-        assertEquals("RICOH_GR", settings.mascotCamera)
+        // An unknown body id recovers to follow-look (null), never to a hard-coded body.
+        assertNull(settings.mascotCamera)
         assertEquals("AUTO", settings.captureOrientation)
         assertEquals("POSITIVE", settings.preset)
         assertEquals(.5f, settings.activeLook.contrast, 0f)
         val encoded = SettingsJson.decode(SettingsJson.encode(AppSettings(mascotCamera = "UNKNOWN", captureOrientation = "UNKNOWN")))
-        assertEquals("RICOH_GR", encoded.mascotCamera)
+        assertNull(encoded.mascotCamera)
         assertEquals("AUTO", encoded.captureOrientation)
     }
 

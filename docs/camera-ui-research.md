@@ -157,3 +157,18 @@
 **未动**：宽横屏 ≥600dp 全控件侧栏、小横屏/分屏的全屏悬浮浮层路径（framed 仅竖屏 Column 路径使用）；控制面板 ModalBottomSheet；相机/坐标/ViewPort 绑定。
 
 **AVD 验证（emulator-5580，1080×2340）**：默认态三段无黑带；GR（暗机身）与 X100VI（银顶）铭牌均可辨；点铭牌出 MascotPicker、切换五款正常；EV +1.5 覆盖药丸在簇内完整不溢出；长按药丸一键复位无回归；`./gradlew test` 与 `:app:assemblePreview` 通过。横屏仍受 AVD 软件渲染不翻转 framebuffer 所限（同第四节 b13/b14），只做代码走查，留真机。
+
+## 六、T19：铭牌从"独立摆件"变为影调族的可视化（2026-10-18）
+
+**问题（用户反馈）**：T18 恢复的顶部 48dp 相机摆件是一个与影调无关的独立吉祥物；用户期望"你选什么滤镜，上面就会变成那个相机"——铭牌应当反映当前影调/胶片，而不是另一个需要单独维护的装饰选择。
+
+**三态模型**（`CameraPreferences.nameplate`）：`mascotCamera: String?`
+- `null`（新默认）= **跟随影调**：`CameraLookGroup.forPreset(preset)` 把 11 个影调预设归族——理光（正片/负片/高反差黑白）→GR、富士（Classic Chrome/Classic Negative/Nostalgic Negative/ACROS）→X100VI、适马（Powder Blue）→fp、松下（L.Natural/L.Mono）→LX100、通用（原色/晴街/自定义 LUT）→中性镜头标 `NeutralLookArtwork` + 影调名；插胶片时按 `FilmProfile.basePreset` 归同一套族（500T/Portra→理光、Ektar→理光、C200→适马、250D/50D→通用、TRI-X→理光）。
+- `"HIDDEN"` = 铭牌整行消失，`nameplateHeight=0`，3:4 屏获得这 48dp；
+- 已知机身 id = 手动固定，不随影调变化。
+
+**点按语义随态变化**：跟随态点铭牌直达影调面板（少一次跳转）；固定态点铭牌打开六卡 picker。picker 首卡即"跟随影调"（镜头标），与五机身同样 2 列卡片；原"隐藏"checkable 语义改为左下角"不显示"文本钮（选中显示 ✓）。通用族镜头标用 onSurfaceVariant 双圆圈，无品牌归属。
+
+**JSON 语义迁移（已在注释与测试中明示）**：pre-T19 的 JSON null 表示"隐藏摆件"，T19 起 null 表示"跟随影调"，隐藏改由专用字符串 `HIDDEN` 表达——一次有意的、记录在案的迁移；无字段的 legacy 文档与未知机身 id 一律回退到 null（跟随），不再硬编码默认机身。
+
+**AVD 验证（emulator-5580，1080×2340）**：fresh install 原色=镜头标+「原色/通用影调」；正片→GR、Classic Chrome→X100VI、Powder Blue→fp、L.Natural→LX100 semantics 与机身绘制均正确；C200→适马 fp、250D→镜头标+胶片名（胶片经 basePreset 归族）；固定 F3 后切正片铭牌仍 F3、点按开 picker；HIDDEN 后铭牌节点为 0、预览顶到状态栏下沿；picker 六卡 + 取景方向 + 不显示 ✓ 态齐全。SettingsJsonTest 覆盖 legacy 缺字段/null/HIDDEN 字符串往返/未知 id 回退/五机身+HIDDEN+null 全组合方向矩阵；`testDebugUnitTest` 全过、`:app:assemblePreview` 通过装机。

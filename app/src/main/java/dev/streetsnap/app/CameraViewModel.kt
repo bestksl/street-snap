@@ -271,7 +271,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         applyColor()
     }
 
-    fun setMascotCamera(id: String?) = update { it.copy(mascotCamera = CameraPreferences.mascot(id)) }
+    fun setMascotCamera(id: String?) = update { it.copy(mascotCamera = CameraPreferences.nameplate(id)) }
     fun setCaptureOrientation(id: String) = update { it.copy(captureOrientation = CameraPreferences.orientation(id)) }
 
     fun setCompositionEnabled(enabled: Boolean) = update { it.copy(compositionEnabled = enabled) }

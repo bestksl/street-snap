@@ -231,16 +231,42 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // Phone portrait: a camera-back layout. Nameplate, the exact 3:4
                         // viewfinder screen and an opaque control cluster stack edge to
                         // edge, so there is no letterbox void between picture and controls.
-                        val nameplateHeight = 48.dp
+                        // Nameplate: follow-look by default (the body tracks the active
+                        // look/film family), a pinned body, or hidden entirely.
+                        val hideNameplate = settings.mascotCamera == CameraPreferences.HIDDEN
+                        val nameplateHeight = if (hideNameplate) 0.dp else 48.dp
                         // Worst case the cluster can show: divider + paddings + one override
                         // chip row + focal row + 92dp shutter row. Reserve it up front; on
                         // short screens the 3:4 picture shrinks a touch instead of clipping.
                         val clusterMinHeight = 210.dp
                         val framedWidth = minOf(maxWidth, (maxHeight - nameplateHeight - clusterMinHeight) * 3f / 4f)
                         Column(Modifier.fillMaxSize().background(Color.Black)) {
-                            ViewfinderNameplate(CameraModel.fromId(settings.mascotCamera),
-                                onPickMascot = { showMascotPicker = true },
-                                modifier = Modifier.fillMaxWidth().height(nameplateHeight))
+                            if (!hideNameplate) {
+                                val following = settings.mascotCamera == null
+                                val activePreset = settings.colorRecipe().preset
+                                val lookName = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
+                                    ?: activePreset.displayName
+                                val familyCamera = if (following) cameraForLook(activePreset.name) else null
+                                val pinnedCamera = if (following) null else CameraModel.fromId(settings.mascotCamera)
+                                val nameplateCamera = familyCamera ?: pinnedCamera
+                                ViewfinderNameplate(
+                                    camera = nameplateCamera,
+                                    title = when {
+                                        following && nameplateCamera == null -> lookName
+                                        following -> nameplateCamera!!.model
+                                        else -> pinnedCamera?.model ?: lookName
+                                    },
+                                    subtitle = when {
+                                        following && nameplateCamera == null -> "通用影调"
+                                        following -> lookName
+                                        else -> pinnedCamera?.brand.orEmpty()
+                                    },
+                                    onPick = {
+                                        if (following) adjustmentTab = AdjustmentTab.LOOK
+                                        else showMascotPicker = true
+                                    },
+                                    modifier = Modifier.fillMaxWidth().height(48.dp))
+                            }
                             Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
                                 Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ })
                             ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
@@ -599,35 +625,41 @@ private fun OverlayPill(
 }
 
 /**
- * Phone portrait top chrome: the collectible camera body sits above the 3:4 screen
- * like the plate on a camera back; tap it to swap bodies. Stays deliberately wordless.
+ * Phone portrait top chrome. In follow-look mode the body tracks the active look/film
+ * family (the general family shows the neutral lens mark) and the subtitle names the
+ * look; a pinned body shows its brand. Tap: follow-look opens the look sheet, a pinned
+ * body opens the picker. Sits above the 3:4 screen like the plate on a camera back.
  */
 @Composable
 private fun ViewfinderNameplate(
-    mascot: CameraModel?,
-    onPickMascot: () -> Unit,
+    camera: CameraModel?,
+    title: String,
+    subtitle: String,
+    onPick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (mascot != null) {
-            // Same mid-grey card as the MascotPicker tiles (#2D3335): the dark vector
-            // bodies only separate from a lighter field, not from black chrome.
-            Box(Modifier.size(74.dp, 40.dp).clip(RoundedCornerShape(9.dp))
-                .background(Color(0xFF2D3335))
-                .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(9.dp))
-                .clickable(role = Role.Button, onClick = onPickMascot)
-                .semantics { contentDescription = "相机摆件：${mascot.brand} ${mascot.model}，点按更换" },
-                contentAlignment = Alignment.Center) {
-                // Canvas has no intrinsic size; an explicit height is mandatory here
-                // (fillMaxWidth alone collapses it to zero in the wrapped nameplate).
-                CameraArtwork(mascot, Modifier.size(64.dp, 40.dp))
-            }
-            Spacer(Modifier.width(10.dp))
-            Column {
-                Text(mascot.model, color = Color.White.copy(alpha = .92f), fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold, maxLines = 1)
-                Text(mascot.brand, color = Color.White.copy(alpha = .5f), fontSize = 9.sp, maxLines = 1)
-            }
+        // Same mid-grey card as the body-picker tiles (#2D3335): the dark vector bodies
+        // only separate from a lighter field, not from black chrome.
+        Box(Modifier.size(74.dp, 40.dp).clip(RoundedCornerShape(9.dp))
+            .background(Color(0xFF2D3335))
+            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(9.dp))
+            .clickable(role = Role.Button, onClick = onPick)
+            .semantics {
+                contentDescription = if (camera != null) "相机铭牌：${camera.brand} ${camera.model}，点按更换"
+                    else "相机铭牌：$title，点按更换影调"
+            },
+            contentAlignment = Alignment.Center) {
+            // Canvas has no intrinsic size; an explicit size is mandatory in the wrapped row.
+            if (camera != null) CameraArtwork(camera, Modifier.size(64.dp, 40.dp))
+            else NeutralLookArtwork(Modifier.size(26.dp))
+        }
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(title, color = Color.White.copy(alpha = .92f), fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Color.White.copy(alpha = .5f), fontSize = 9.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
