@@ -74,77 +74,126 @@ private fun DrawScope.lens(x: Float, y: Float, radius: Float, silver: Boolean = 
     drawCircle(Color(0xFF869494).copy(alpha = .6f), radius * .6f, c, style = Stroke(.75f))
 }
 
+/** Top-deck control dial: knurled cylinder poking above the deck line. */
+private fun DrawScope.dial(x: Float, topY: Float, r: Float, silver: Boolean = true) {
+    val metal = if (silver) Color(0xFFC6CBC9) else Color(0xFF5B6263)
+    val dark = if (silver) Color(0xFF7E8786) else Color(0xFF303536)
+    drawRoundRect(dark, Offset(x - r, topY + r * .5f), Size(r * 2, r * 1.1f), CornerRadius(1.5f))
+    drawCircle(metal, r, Offset(x, topY + r))
+    drawCircle(dark, r * .55f, Offset(x, topY + r))
+    drawLine(metal, Offset(x, topY + r * .5f), Offset(x, topY + r * 1.5f), 1.2f)
+}
+
+/* Ricoh GR III: the flattest, widest body here — absolutely flat top with
+ * no hump, no built-in finder or flash (hot shoe only), a centered fixed
+ * lens (an off-center barrel is a documented lens fault, not the design)
+ * and a small grip ridge on the viewer-left, i.e. the holder's right hand.
+ * The single mode dial rides that same viewer-left shoulder. */
 private fun DrawScope.ricohGr() {
-    panel(34f, 26f, 19f, 5f, bodyEdge)
-    panel(127f, 26f, 14f, 5f, bodyEdge)
-    body(17f, 31f, 146f, 68f, 8f)
-    panel(20f, 39f, 36f, 53f, inset, 7f)
-    for (y in 45..87 step 5) drawLine(Color(0xFF343A3A), Offset(24f, y.toFloat()), Offset(49f, y.toFloat()), .65f)
-    panel(28f, 34f, 20f, 5f, Color(0xFF697170), 1f)
-    panel(119f, 39f, 22f, 6f, Color(0xFF606762), 1f)
-    lens(95f, 67f, 27f)
-    lettering("GR", 138f, 90f, 10f)
-    drawCircle(Color(0xFFB04135), 1.5f, Offset(118f, 45f))
+    dial(36f, 31f, 6.5f, silver = false) // mode dial over the holder's right shoulder
+    panel(16f, 39f, 148f, 6f, Color(0xFF323839), 2f)
+    body(14f, 44f, 152f, 52f, 5f)
+    // hot shoe near center, toward the viewer-right
+    panel(108f, 48f, 20f, 4f, inset, 1f)
+    // small anti-slip grip on the viewer-left
+    panel(19f, 50f, 24f, 42f, inset, 4f)
+    for (y in 55..87 step 4) drawLine(Color(0xFF3A4141), Offset(23f, y.toFloat()), Offset(39f, y.toFloat()), .8f)
+    // centered fixed lens, all black
+    lens(90f, 71f, 23f)
+    lettering("GR", 131f, 91f, 10f)
 }
 
+/* Fujifilm X100VI: flat silver top deck (no prism), two control dials,
+ * the big square hybrid viewfinder window high on the viewer-right,
+ * silver-rimmed lens. Two-tone silver/black is the main thumbnail cue. */
 private fun DrawScope.fujiX100() {
-    panel(35f, 22f, 20f, 8f, bodySilver)
-    panel(119f, 20f, 21f, 10f, Color(0xFF929C9B))
-    panel(145f, 24f, 8f, 6f, bodySilver)
-    body(16f, 30f, 148f, 70f)
-    panel(17f, 31f, 146f, 23f, bodySilver, 5f)
-    panel(17f, 47f, 146f, 7f, bodySilver, 0f)
-    panel(17f, 93f, 146f, 7f, Color(0xFF8C9796), 3f)
-    panel(25f, 38f, 26f, 12f, bodyEdge, 2f)
-    panel(28f, 40f, 19f, 8f, Color(0xFF21404A), 1f)
-    panel(59f, 38f, 16f, 8f, Color(0xFFE1E1CE), 1f)
-    panel(149f, 39f, 6f, 10f, inset, 1f)
-    lens(106f, 68f, 30f, silver = true)
-    lettering("X100VI", 25f, 87f, 7f)
-    drawCircle(bodySilver, 4f, Offset(68f, 62f))
-    drawLine(Color(0xFFCE352D), Offset(66f, 59f), Offset(71f, 55f), 2f)
+    // dials sit on the deck: draw first, body overlaps their lower halves
+    dial(46f, 17f, 8f)   // shutter speed dial
+    dial(132f, 15f, 9f)  // exposure compensation dial
+    body(16f, 34f, 148f, 62f, 6f)
+    // silver top band across the whole front
+    panel(17f, 35f, 146f, 17f, bodySilver, 5f)
+    panel(17f, 50f, 146f, 1.6f, Color(0xFF8C9796))
+    // hybrid viewfinder: tall square window viewer-right
+    panel(124f, 38f, 26f, 13f, bodyEdge, 2f)
+    panel(127f, 40f, 20f, 9f, Color(0xFF1E333C), 1f)
+    panel(130f, 41.5f, 6f, 3f, Color(0xFF3E6672), .6f)
+    // small AF lamp viewer-left
+    panel(24f, 40f, 12f, 8f, inset, 1f)
+    lens(90f, 72f, 28f, silver = true) // centered lens with silver front ring
+    lettering("X100VI", 26f, 90f, 7f)
 }
 
+/* Sigma fp: a hard-edged die-cast block — the only body with no hump, no
+ * grip and no front window. A single combined dial/shutter sits over the
+ * viewer-left shoulder, twin mic slots straddle the centered L-mount, and
+ * the four case screws signal the modular, industrial body. */
 private fun DrawScope.sigmaFp() {
-    panel(31f, 30f, 18f, 4f, bodyEdge, 1f)
-    panel(127f, 29f, 13f, 5f, bodyEdge, 2f)
-    body(24f, 34f, 131f, 66f, 3f)
-    panel(25f, 35f, 17f, 64f, Color(0xFF343A3C), 1f)
-    for (x in 28..39 step 3) drawLine(inset, Offset(x.toFloat(), 42f), Offset(x.toFloat(), 94f), 1f)
-    drawCircle(bodySilver, 2f, Offset(31f, 39f))
-    drawCircle(bodySilver, 2f, Offset(149f, 94f))
-    lens(93f, 69f, 32f)
-    lettering("fp", 135f, 47f, 11f)
-    lettering("SIGMA", 45f, 44f, 6f)
+    dial(52f, 22f, 8f, silver = false) // combined dial + shutter, holder's right shoulder
+    body(30f, 30f, 120f, 68f, 1.5f)    // near right-angled block
+    // twin microphone slots symmetric above the mount
+    panel(78f, 39f, 9f, 3f, inset, 1f)
+    panel(93f, 39f, 9f, 3f, inset, 1f)
+    // case screws
+    drawCircle(Color(0xFF8A9291), 1.7f, Offset(36f, 36f))
+    drawCircle(Color(0xFF8A9291), 1.7f, Offset(144f, 36f))
+    drawCircle(Color(0xFF8A9291), 1.7f, Offset(36f, 92f))
+    drawCircle(Color(0xFF8A9291), 1.7f, Offset(144f, 92f))
+    lens(90f, 68f, 29f)
+    drawCircle(bodyEdge, 30.5f, Offset(90f, 68f), style = Stroke(2f)) // L-mount ring
+    lettering("fp", 126f, 48f, 11f)
+    lettering("SIGMA", 112f, 91f, 6f)
 }
 
+/* Panasonic LX100 II: asymmetric stepped top. From the viewer's side the
+ * EVF housing raises the right half of the deck (the holder's left
+ * shoulder), two sunken dials cluster over the viewer-left shoulder beside
+ * the small grip, and the large protruding zoom lens dominates the face.
+ * No red dot — that is the Leica D-LUX sibling, not the Lumix. */
 private fun DrawScope.lumixLx100() {
-    panel(28f, 24f, 21f, 8f, bodyEdge)
-    panel(119f, 21f, 22f, 11f, Color(0xFF717A79))
-    panel(145f, 25f, 10f, 7f, bodyEdge)
-    body(16f, 32f, 148f, 68f)
-    panel(20f, 37f, 30f, 58f, inset, 6f)
-    panel(61f, 32f, 44f, 8f, Color(0xFF51595A), 2f)
-    panel(125f, 39f, 27f, 8f, Color(0xFF717975), 1f)
-    lens(96f, 68f, 33f)
-    drawCircle(Color(0xFF973A33), 4f, Offset(145f, 73f))
-    lettering("LUMIX", 24f, 48f, 7f)
-    lettering("LX100", 129f, 92f, 6f)
+    // two dials over the holder's right shoulder = viewer-left
+    dial(42f, 26f, 7.5f, silver = false) // shutter speed dial
+    dial(71f, 24f, 8f, silver = false)   // exposure compensation dial
+    body(16f, 38f, 140f, 60f, 4f)
+    // EVF housing raises the viewer-right half of the deck
+    panel(88f, 27f, 68f, 12f, Color(0xFF262C2D), 3f)
+    // small grip swell on the viewer-left (holder's right hand)
+    panel(18f, 44f, 14f, 50f, Color(0xFF1C2021), 4f)
+    for (y in 49..89 step 4) drawLine(Color(0xFF394040), Offset(21f, y.toFloat()), Offset(28f, y.toFloat()), .8f)
+    // large protruding zoom lens, extra barrel rings read as extended
+    lens(86f, 71f, 29f)
+    drawCircle(Color(0xFF52595A), 30.2f, Offset(86f, 71f), style = Stroke(2.4f))
+    drawCircle(Color(0xFF2C3233), 33f, Offset(86f, 71f), style = Stroke(2f))
+    lettering("LUMIX", 114f, 54f, 7f)
+    lettering("LX100 II", 116f, 92f, 6f)
 }
 
+/* Nikon F3 with the DE-2 eye-level prism: the low, angular central
+ * pentaprism towers over every other body and is the whole silhouette.
+ * Film advance lever flicks out over the viewer-left shoulder (coaxial
+ * with the shutter), the shutter-speed dial rides the viewer-right
+ * shoulder, and Giugiaro's red vertical line runs down the concave grip
+ * on the viewer-left. Centered lens on the tallest, most squared body. */
 private fun DrawScope.nikonF3() {
-    panel(26f, 23f, 22f, 11f, Color(0xFF697171))
-    panel(131f, 24f, 20f, 10f, bodyEdge)
-    body(14f, 35f, 152f, 66f, 6f)
-    val prism = Path().apply {
-        moveTo(61f, 40f); lineTo(69f, 16f); lineTo(105f, 16f); lineTo(119f, 40f); close()
+    // film advance lever flicking out over the viewer-left shoulder
+    val lever = Path().apply {
+        moveTo(30f, 44f); lineTo(10f, 27f); lineTo(14f, 23f); lineTo(35f, 40f); close()
     }
-    drawPath(prism, Color(0xFF303739))
+    drawPath(lever, Color(0xFF3B4142))
+    drawPath(lever, bodyEdge, style = Stroke(1f))
+    dial(146f, 33f, 7.5f, silver = false) // shutter-speed dial, viewer-right shoulder
+    body(12f, 42f, 156f, 56f, 4f)
+    // dominant low angular pentaprism
+    val prism = Path().apply {
+        moveTo(58f, 43f); lineTo(70f, 13f); lineTo(108f, 13f); lineTo(122f, 43f); close()
+    }
+    drawPath(prism, Color(0xFF2C3234))
     drawPath(prism, bodyEdge, style = Stroke(1f))
-    panel(17f, 41f, 29f, 56f, inset, 5f)
-    panel(20f, 43f, 3f, 45f, Color(0xFFA83A33), 1f)
-    panel(133f, 41f, 26f, 8f, Color(0xFF505757), 1f)
-    lens(89f, 69f, 31f)
-    lettering("Nikon", 70f, 31f, 9f)
-    lettering("F3", 139f, 64f, 10f)
+    lettering("Nikon", 75f, 31f, 8.5f)
+    // concave grip on the viewer-left with the red vertical accent line
+    panel(17f, 50f, 27f, 44f, inset, 4f)
+    panel(21f, 56f, 2.6f, 32f, Color(0xFFC0271F), .8f)
+    drawCircle(Color(0xFF171B1C), 3.4f, Offset(34f, 46f)) // shutter release, viewer-left
+    lens(90f, 72f, 28f)
+    lettering("F3", 132f, 62f, 9f)
 }
