@@ -13,6 +13,8 @@ import android.os.Build
 import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.Surface
 import android.util.Size
 import androidx.activity.compose.BackHandler
@@ -90,6 +92,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -388,6 +391,22 @@ private fun Viewfinder(
     val histogram by model.histogram.collectAsStateWithLifecycle()
     val lookAdviceCard by model.lookAdviceCard.collectAsStateWithLifecycle()
     val exposureAdviceCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
+    // T34: one-shot "framing achieved" pulse. The green stroke/check is always shown;
+    // the buzz is opt-in and there is deliberately no sound path.
+    val alignmentPulse by model.composition.alignmentPulse.collectAsStateWithLifecycle()
+    var alignedVisible by remember { mutableStateOf(false) }
+    val vibrator = remember(context) { context.getSystemService(Vibrator::class.java) }
+    LaunchedEffect(alignmentPulse) {
+        if (alignmentPulse > 0L) {
+            alignedVisible = true
+            if (settings.alignmentHapticEnabled) {
+                @Suppress("MissingPermission") // VIBRATE is a normal permission, granted at install.
+                vibrator?.vibrate(VibrationEffect.createOneShot(20L, 60))
+            }
+            delay(1_300L)
+            alignedVisible = false
+        }
+    }
     val osdMode = settings.viewfinderOsd
     val meteringWanted = osdMode != ViewfinderOsd.OFF || settings.exposureAdviceEnabled
     val hasSize = width > 0 && height > 0
@@ -536,19 +555,38 @@ private fun Viewfinder(
                     val right = (crop.right.coerceIn(0f, 1f) * size.width)
                     val bottom = (crop.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
-                        val tint = if (overlay.origin == AdviceOrigin.MODEL_SELECTION) Color(0xFFE2FF79) else Color(0xFFB7E3F6)
+                        val tint = when {
+                            alignedVisible -> Color(0xFF54C97E)
+                            overlay.origin == AdviceOrigin.MODEL_SELECTION -> Color(0xFFE2FF79)
+                            else -> Color(0xFFB7E3F6)
+                        }
                         val shade = Color.Black.copy(alpha = .26f)
                         drawRect(shade, size = androidx.compose.ui.geometry.Size(size.width, top))
                         drawRect(shade, Offset(0f, bottom), androidx.compose.ui.geometry.Size(size.width, size.height - bottom))
                         drawRect(shade, Offset(0f, top), androidx.compose.ui.geometry.Size(left, bottom - top))
                         drawRect(shade, Offset(right, top), androidx.compose.ui.geometry.Size(size.width - right, bottom - top))
                         drawRect(tint.copy(alpha = .95f), Offset(left, top),
-                            androidx.compose.ui.geometry.Size(right - left, bottom - top), style = Stroke(2.dp.toPx()))
+                            androidx.compose.ui.geometry.Size(right - left, bottom - top),
+                            style = Stroke(if (alignedVisible) 3.dp.toPx() else 2.dp.toPx()))
                         for (i in 1..2) {
                             val x = left + (right - left) * i / 3f
                             val y = top + (bottom - top) * i / 3f
                             drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
                             drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
+                        }
+                        if (alignedVisible) {
+                            // Brief confirmation mark inside the guide's top-right corner (T34).
+                            val mark = minOf(26.dp.toPx(), (right - left) / 5f, (bottom - top) / 5f)
+                            // Inside the bottom-right corner: the advice card lives bottom-left
+                            // and the top-right can be covered by the optional histogram card.
+                            val center = Offset(right - mark * 1.35f, bottom - mark * 1.35f)
+                            drawCircle(Color.Black.copy(alpha = .40f), mark * .95f, center)
+                            val checkStroke = 2.5.dp.toPx()
+                            val p0 = Offset(center.x - mark * .45f, center.y + mark * .05f)
+                            val p1 = Offset(center.x - mark * .12f, center.y + mark * .38f)
+                            val p2 = Offset(center.x + mark * .48f, center.y - mark * .35f)
+                            drawLine(tint, p0, p1, checkStroke, cap = StrokeCap.Round)
+                            drawLine(tint, p1, p2, checkStroke, cap = StrokeCap.Round)
                         }
                     }
                     }
@@ -1640,6 +1678,9 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
             modifier = Modifier.semantics { contentDescription = "构图辅助开关" })
     }
     ToggleRow("实时构图 · 自动更新建议", settings.compositionRealtime, model::setCompositionRealtime)
+    ToggleRow("到位轻震反馈", settings.alignmentHapticEnabled) { model.setAlignmentHapticEnabled(it) }
+    Text("按建议移动、推荐框与当前取景重合时，框线短暂变绿并出现小勾；开启此项再附带一次极轻震动，全程无声。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Text(compositionTimingLabel(state), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (state.status == AssistStatus.READY && settings.compositionRealtime) Text(

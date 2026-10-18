@@ -413,6 +413,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** T34: opt-in haptic for the "framing achieved" confirmation; the visual pulse needs no switch. */
+    fun setAlignmentHapticEnabled(enabled: Boolean) {
+        update { it.copy(alignmentHapticEnabled = enabled) }
+    }
+
     /** × on an exposure card: hidden for the rest of this foreground session, no persistence. */
     fun dismissExposureAdvice() {
         val issue = exposureAdviser.visibleIssue ?: run {

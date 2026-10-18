@@ -126,7 +126,8 @@ internal object CompositionActions {
         else -> null
     }
 
-    private val ACTION_BUILT_IN = setOf(
+    /** Styles whose copy is already an explicit move (or "keep the whole frame"): the planner abstains and alignment praise (T34) never fires. */
+    internal val ACTION_BUILT_IN = setOf(
         CompositionStyle.EDGE_CUT,
         CompositionStyle.TOO_TIGHT,
         CompositionStyle.HORIZON_SPLIT,

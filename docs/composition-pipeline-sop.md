@@ -137,6 +137,15 @@ T33 把首选建议动作化（T28 §2.2 标准 1/2）：纯函数 `CompositionA
 - 测试：新增 `CompositionActionsTest` 12 测（各方向/三档/死区含浮点边界 s=.94/.92、多轴顺序、三分锚点四线、重心居中不编锚点、内置动作风格与 CONSERVATIVE 弃权、全幅无动作遍历全部风格），FastCompositionAdvisorTest 加端到端契约测（4 场景三类内置风格/全幅无 action、其余候选 action 必含动作动词且不等于 reason、uniform 保守场零动作）；advisor 32+动作 12，app 模块 177 测全绿，color/camera 全绿，assemblePreview 通过。
 - AVD（emulator-5580 固定房间，loaded-only）：竖屏实时建议真实帧首选出「靠近一点，让主体落在左三分线」13sp 主行 + 「三分构图 · …」11sp 副行，2–25ms 无 FATAL；28/50mm 数字变焦与横屏不改变归一化几何故句子恒定（同画面同建议为正确行为，overlay 去重亦如此设计）；站位移动无法经 adb 驱动（主机键鼠独占 VirtualScene，T28/T30/T32 同一限制），「按建议移动后句子变化」的正向证据只到纯函数单测级（几何输入变→句子变，12 测覆盖），真机站位反馈 not-verified，等 T34 对齐正反馈与真机。
 
+### T34：对齐正反馈（到位变绿 + 小勾，可选轻震，无声）
+
+T28 §2.2 标准 3 的落地。纯逻辑在 `composition/AlignmentFeedback.kt`：`isFramed(crop, style)` 取四边 inset 的最大值 ≤ `FRAME_TOLERANCE = 0.03`（crop 档差 0.08，.92 档至少留 4%，故 3% 实际等于全幅）；`EDGE_CUT / TOO_TIGHT / HORIZON_SPLIT / CONSERVATIVE`（复用 `CompositionActions.ACTION_BUILT_IN`，已提为 internal）永不判定到位——问题风格的目标不是全幅居中。`AlignmentTracker.observe(framed, actionable)` 每分析帧喂一次：必须**先**见到带动作句的非全幅建议（`seenActionableNeed`，防止一开机画面本来就好也被夸），再连续 `CONFIRM_FRAMES = 8` 帧（250ms 节拍 ≈ 2s，防单帧闪烁）判定到位，每次到位只发一个 `AlignmentEvent.ALIGNED`；保持到位不重发，偏离 `REARM_FRAMES = 3` 帧（≈0.75s）后重新武装（偏离本身即新需求，不再要求新动作句）。`reset()` 接场景切换（`clearVisibleAdvice`/`onSceneChanged`）与 `invalidateView`/会话重启。
+
+接线：状态机在 `CompositionAssistant.showAdvice` 内、同景去重提前 return **之前**喂入——静态近终景每帧复用同一 overlay，这些帧正是要累计的确认 streak；事件写一次性 `alignmentPulse: StateFlow<Long>`（elapsedRealtime 时间戳）。UI（`CameraScreen` Viewfinder）收脉冲后推荐框描边由蓝/黄改绿 `0xFF54C97E`（2dp→3dp）、三分线随之转绿、框内**右下角**小勾一现（黑底圆 + 绿勾，避开左下建议卡与右上可选直方图片），1.3s 自动恢复。震动为 opt-in：`AppSettings.alignmentHapticEnabled` 默认 false，SettingsJson 加布尔字段不 bump version（缺字段旧装默认 false）；开启时仅 `VibrationEffect.createOneShot(20ms, amplitude 60)` 一次极轻震，**无任何声音路径**；Manifest 加普通权限 `VIBRATE`。拍摄设置「构图辅助 · 实验性」分区实时构图片下新增「到位轻震反馈」ToggleRow + 说明文案。不拍照链路、不改规则层、不改候选坐标。
+
+- 测试：新增 `AlignmentFeedbackTest` 10 测（阈值 3% 边界含单边、问题风格四不触发、开机即好帧不夸、8 帧连续才发且之后不重发、单帧闪烁打断后 streak 归零重数、latch 后 1–2 帧偏离不误 rearm、持续偏离 3 帧后可再确认一次、无动作需求不武装、reset 重来）；CompositionActions 12 + advisor 32 等全量 app/color/camera 测试绿，assemblePreview 通过。
+- AVD（emulator-5580，loaded-only）：VirtualScene 站位仍不可经 adb 驱动，走 T31 路线一次性注入合成轨迹（前 4 帧非到位且带真实动作句、第 5 帧起到位）：logcat 实测事件在连续第 8 帧单发一次（draw=11 ALIGNED、其后全部 null），截图确认整框转绿 + 小勾渲染；随后删除全部临时代码（`grep T34-TEMP/T34TEMP` 源码零命中），全量重测重包，逐 dex `strings | grep` 零命中。设置面板实测开关可切、force-stop 重启后 checked=true 持久化（已关回默认 false）。正式包冒烟 8s 实时建议正常无 FATAL。真实「人按句子走到位」的端到端反馈仍受站位限制，not-verified，留真机；审美质量不由此特性声称。
+
 ## 历史诊断：为什么先前没有框
 
 此前直接让通用 SmolVLM 生成裁切坐标，实际输出包含 `[0,0,0,0]`、残缺坐标或普通描述，被合法性检查拒绝。相机输入与 ONNX 推理已打通；未经过本项目构图/定位训练的模型不能仅凭提示词保证坐标和审美能力。此前 Q4 语义探针曾连续两次正确识别画面右侧电视，描述任务也出现人物幻觉，不能据此证明可靠定位。

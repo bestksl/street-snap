@@ -4,6 +4,9 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import dev.streetsnap.app.composition.AlignmentEvent
+import dev.streetsnap.app.composition.AlignmentFeedback
+import dev.streetsnap.app.composition.AlignmentTracker
 import dev.streetsnap.app.composition.CandidateContactSheet
 import dev.streetsnap.app.composition.CandidateSelectionGate
 import dev.streetsnap.app.composition.CompositionCandidate
@@ -112,6 +115,14 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     val source = _source.asStateFlow()
     private val _overlay = MutableStateFlow<CompositionOverlay?>(null)
     val overlay = _overlay.asStateFlow()
+    /**
+     * Elapsed-realtime timestamp of a one-shot "framing achieved" confirmation (T34),
+     * or 0 before the first one. The tracker is fed every analysed frame, including
+     * frames that reuse the existing overlay via carriesSameGuidance.
+     */
+    private val _alignmentPulse = MutableStateFlow(0L)
+    val alignmentPulse = _alignmentPulse.asStateFlow()
+    private val alignmentTracker = AlignmentTracker()
     /** Coarse colour/light statistics from the latest rule-analysis frame; consumed later by look/exposure advice. */
     private val _sceneReading = MutableStateFlow<SceneReading?>(null)
     val sceneReading = _sceneReading.asStateFlow()
@@ -167,6 +178,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     fun invalidateView() {
         resultGate.invalidate(SystemClock.elapsedRealtime())
         _source.value?.invalidateFrames()
+        alignmentTracker.reset()
         _overlay.value = null
         _sceneReading.value = null
         expiryJob?.cancel()
@@ -199,6 +211,13 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         val crop = candidate.crop
         val now = SystemClock.elapsedRealtime()
         val draw = adviceCount++
+        // Feed the alignment state machine before the same-guidance early return:
+        // a static near-final scene keeps republishing the same overlay every frame,
+        // and those frames are exactly the confirmation streak we count.
+        val framed = AlignmentFeedback.isFramed(crop, candidate.style)
+        if (alignmentTracker.observe(framed, candidate.action != null) == AlignmentEvent.ALIGNED) {
+            _alignmentPulse.value = now
+        }
         val egg = easterEgg(subjectLooksDistant, origin, draw, now)
         if (egg != null) lastEasterEggAtMs = now
         // Rule analysis now runs several times per second. On a static scene the same
@@ -369,6 +388,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     visibleScene = null
                     selectedScene = null
                     selectedCandidate = null
+                    alignmentTracker.reset()
                     _overlay.value = null
                     _sceneReading.value = null
                     expiryJob?.cancel()

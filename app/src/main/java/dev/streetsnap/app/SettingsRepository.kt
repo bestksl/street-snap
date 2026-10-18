@@ -75,6 +75,9 @@ data class AppSettings(
     val lookAdviceEnabled: Boolean = true,
     // Independent switch for clipped-highlight/shadow exposure hints; on by default (T31).
     val exposureAdviceEnabled: Boolean = true,
+    // T34: optional light haptic when framing reaches the suggested crop. Visual green
+    // confirmation always shows; haptics are opt-in, and there is deliberately no sound.
+    val alignmentHapticEnabled: Boolean = false,
     // look key → dismiss timestamp (epoch ms); adviser suppresses keys within a 7-day window.
     val lookDismissedAt: Map<String, Long> = emptyMap(),
     // Three consecutive dismisses flip lookAdviceEnabled off; trying/keeping a look resets it.
@@ -202,6 +205,7 @@ internal object SettingsJson {
         put("whiteBalanceGreen", settings.whiteBalanceGreen)
         put("lookAdviceEnabled", settings.lookAdviceEnabled)
         put("exposureAdviceEnabled", settings.exposureAdviceEnabled)
+        put("alignmentHapticEnabled", settings.alignmentHapticEnabled)
         put("lookDismissedAt", JSONObject().apply {
             settings.lookDismissedAt.forEach { (lookKey, at) -> put(lookKey, at) }
         })
@@ -260,6 +264,7 @@ internal object SettingsJson {
                 whiteBalanceGreen = json.optInt("whiteBalanceGreen", 0).coerceIn(-9, 9),
                 lookAdviceEnabled = json.optBoolean("lookAdviceEnabled", true),
                 exposureAdviceEnabled = json.optBoolean("exposureAdviceEnabled", true),
+                alignmentHapticEnabled = json.optBoolean("alignmentHapticEnabled", false),
                 lookDismissedAt = json.optJSONObject("lookDismissedAt")?.let { dismissed ->
                     dismissed.keys().asSequence()
                         .mapNotNull { lookKey ->
