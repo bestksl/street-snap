@@ -12,7 +12,7 @@
 
 CI 包显示为 **途帧 CI**，包名为 `dev.streetsnap.app.ci`，可与公开版同时安装，参数各自独立。Preview 关闭调试并启用 R8 与资源裁剪；Debug 用于开发排查。
 
-CI 使用构建环境的临时开发签名，跨次运行不保证能覆盖安装。遇到签名不兼容时，卸载旧的「途帧 CI」再安装；这会清除 CI 包的参数和导入 LUT，不影响公开版。需要长期使用时下载 [Releases](https://github.com/bestksl/street-snap/releases) 中的版本。
+CI 使用构建环境的临时开发签名，跨次运行不保证能覆盖安装。遇到签名不兼容时，卸载旧的「途帧 CI」再安装；这会清除 CI 包的参数和导入 LUT，不影响公开版。需要长期使用时下载 [Releases](https://github.com/light-witness-lab/street-snap/releases) 中的版本。
 
 解压后可校验文件：
 
@@ -64,10 +64,10 @@ chmod 600 "$HOME/.local/share/street-snap-signing/street-snap-release.jks"
 
 ```sh
 base64 < "$HOME/.local/share/street-snap-signing/street-snap-release.jks" | \
-  gh secret set ANDROID_KEYSTORE_BASE64 --repo bestksl/street-snap
-gh secret set ANDROID_KEYSTORE_PASSWORD --repo bestksl/street-snap
-gh secret set ANDROID_KEY_ALIAS --repo bestksl/street-snap --body street-snap
-gh secret set ANDROID_KEY_PASSWORD --repo bestksl/street-snap
+gh secret set ANDROID_KEYSTORE_BASE64 --repo light-witness-lab/street-snap
+gh secret set ANDROID_KEYSTORE_PASSWORD --repo light-witness-lab/street-snap
+gh secret set ANDROID_KEY_ALIAS --repo light-witness-lab/street-snap --body street-snap
+gh secret set ANDROID_KEY_PASSWORD --repo light-witness-lab/street-snap
 ```
 
 工作流将密钥恢复到 runner 临时目录，密码通过步骤级环境变量传入，并在结束时清理密钥文件。缺少任一 Secret 时发布任务会明确失败，不会改用临时开发签名；普通 CI 不依赖这些 Secrets。

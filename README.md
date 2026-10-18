@@ -61,23 +61,47 @@
 - **预设对焦与景深**：规划支持区域对焦的使用方式，让预先选定的距离范围保持可接受的清晰度；可用的对焦设置与实际清晰范围需按镜头验证。
 - **三档视角**：28mm / 35mm / 50mm 等效焦段，一键切换。
 - **盲拍与单手操作**：音量键快门、ADJ 式参数快调，减少对屏幕操作的依赖。
-- **构图辅助**：已接入可选的端侧实验闭环；取景抽样、归一化参考框和失败回退已实现，模型权重与真机质量/延迟仍待验证。
+- **构图辅助**：点“构图”分析当前画面，显示推荐构图框与一句建议；也可开启实时更新。先用图像分析生成候选，再由本地模型比较，分别标明建议来源。
 - **对焦辅助**：规划实时黑白取景与峰值对焦，帮助观察光影和判断手动对焦范围。
 
 手机同样有景深与超焦距的概念，部分广角镜头可以利用较大景深获得近似“泛焦”的效果。Snap 指预设后快速拍摄的方式；泛焦描述较大范围内可接受清晰的效果，实际范围取决于镜头、对焦设置与清晰度要求。
 
 #### Local-first composition · 本地构图（实验性）
 
-构图辅助是一个可以关闭的本地通道：取景器提供独立 RGB 抽样帧，端侧视觉语言模型返回一个归一化矩形 `[left, top, right, bottom]`，再叠回当前取景作为参考框。它不自动改变曝光、对焦、变焦或快门。
+点一下取景器上的 **构图**，得到推荐的画面范围与一句中文建议；**实时**开关可选。推荐框用于帮助取景，照片仍保存完整画面，不自动改变曝光、对焦或变焦。这里需要的是构图裁切建议，当前界面不显示主体检测框。
 
 ```text
-取景帧 ──> KEEP_ONLY_LATEST ──> SmolVLM ONNX ──> [x0,y0,x1,y1] ──> 取景器叠框
-             latest-frame-wins / 有界队列 / 过期结果丢弃
+点“构图” / 开启实时
+  → 当前取景帧
+  → 图像对比、边缘、视觉重心、三分位置、裁切风险
+  → 三个合法裁切候选 → 立即显示“画面分析建议”＋一句中文提示
+                        └→ A/B/C 裁切对照图 → 本地 SmolVLM 比较
+                            → 支持度、差距、换序一致性与场景校验 → 有依据才更新为“AI 选择”
 ```
 
-取景帧率和模型处理速率分开：当前实现按节流策略抽样，模型空闲时才接收最新帧，不把 60 fps 误写成 60 次多模态推理。模型未安装、结果过期、运行失败或设备不支持并行分析时，不绘制假框，并回退到纯相机模式；分析不会拿走快门锁。
+**先提供可见建议，再做模型比较。** 快速算法直接从当前图像计算坐标；模型只比较候选，不再尝试生成四个坐标。SmolVLM 的视觉编码、文本嵌入、解码器是同一个模型的三个 ONNX 部件。每个候选排列使用一次视觉编码与一次 decoder prefill，读取 A/B/C 的 token 分数，不生成长段文字。首轮有选择时再循环换序比较，只有映射回同一候选才采纳；低纹理画面跳过模型。Compose 负责画框和显示中文提示，提示来自候选的规则理由，不伪装成模型自由生成的解释。
 
-模型目录默认 `SmolVLM 256M`，`SmolVLM 500M` 作为可选对照。当前 APK **不内置模型权重**，用户需在应用内主动查看固定版本、许可证、体积和 SHA-256 后安装；开发机尚未完成真实权重下载与端到端推理，因此不承诺荣耀 Vs3 上的延迟、温升、中文质量或持续实时帧率。实现边界和后续验证见 [端侧模型说明](docs/edge-model-plan.md)。
+画面分析和模型比较分别显示耗时。模型未安装、加载中、未明确选择或失败时，仍可显示来源明确的画面分析建议；场景变化后清除旧结果。手动模式一次请求完成即停止分析；实时模式低频更新，模型单并发、完成后冷却，静止场景复用结果，快门独立可用。
+
+此前“无有效框”源于任务适配问题：真实图像已送入模型，但直接生成坐标常得到全零、残缺内容或描述。构图质量不能靠“能返回 A/B/C”证明；需要测试候选重排、内容变化、低纹理画面和人工偏好。更懂构图的准备阶段应包括评价标准、许可清楚的裁切样本、人工优劣标注、独立测试集，再评估是否训练/微调及量化。本项目本轮未训练模型。完整前置与运行 SOP 见 [端侧构图建议 SOP](docs/composition-pipeline-sop.md)。
+
+当前运行 `SmolVLM 256M`，本地内置包使用已有固定 revision 的 `cpu-int8` 配置，7 个运行文件共 251.24 MiB。默认 Preview 不含权重，显式内置包约 300 MB，首次在前台启用构图辅助时导入。`compact` 173.9 MiB 配置保留供对照；YOLO 和 d1-omni 没有接入，本轮推荐框不依赖它们。模型与分发细节见 [模型附录](docs/edge-model-plan.md)。荣耀 Vs3 的速度、温升和主观构图质量仍需真机评估。
+
+本轮模拟器已实际显示推荐框和中文建议：规则首次计算69 ms、再次47 ms，实时预热后多数1–5 ms；这些数值不包含取帧和显示调度。SmolVLM候选换序和纯色对照暴露了位置偏好，因此增加一致性检查。前台双排列比较样本约9.5–11.4秒，未给出可采纳选择时保留规则框；不能宣称模型已经懂构图。手动/实时、横屏重绑、旧结果失效与推理中拍照已验证，细节见SOP。
+
+本地模型内置构建（权重不会进入 Git）需要先准备 `/Users/haoxuanli/Downloads/street-snap-models/smolvlm-256m/`，然后执行：
+
+```sh
+mkdir -p .tooling
+python3 scripts/check_smolvlm_bundle.py \
+  "$HOME/Downloads/street-snap-models/smolvlm-256m" \
+  --profile cpu-int8 --manifest .tooling/first-frame-cpu-int8-manifest.json
+./gradlew :app:assembleDebug \
+  -PedgeModelDir="$HOME/Downloads/street-snap-models/smolvlm-256m" \
+  -PedgeModelManifest=.tooling/first-frame-cpu-int8-manifest.json --offline
+```
+
+校验脚本只使用已有本地文件；`cpu-int8` 要求三张图均为 Int8，不会静默混入 Q4。`edgeModelDir` 配合 `edgeModelManifest` 只打包清单选中的 7 个运行文件，普通 `assemblePreview` 会清理残留 staging。模型、清单与 APK 均不提交 Git；较小的 `compact` 配置及复现细节见模型附录。
 
 ### 行色 / Xingse
 
@@ -138,7 +162,9 @@ Android 使用原生实现；iOS 暂留后续方案。首版不引入共享原�
 | --- | --- | --- |
 | Android | Kotlin + Jetpack Compose + CameraX / Camera2 interop | 界面、取景、拍照及设备支持的手动控制 |
 | 行色 | OpenGL ES 3.0 / GLSL | LUT、颗粒、暗角；预览与照片共用效果算法 |
-| 端侧构图（实验） | SmolVLM ONNX + ONNX Runtime（ARM64） | 抽样帧、归一化构图框与取景器叠加；权重由用户选择安装 |
+| 快速构图候选 | Kotlin 图像统计、积分图评分 | 根据内容保留、三分位置、视觉平衡与边缘裁切风险生成合法框，提供中文理由 |
+| 低频候选比较 | SmolVLM 256M CPU Int8 + ARM64 ONNX Runtime | 每个排列一次视觉编码与解码预填充比较 A/B/C，完整词表支持度、候选差距与换序一致性门闸 |
+| 构图交互与叠加 | Compose + CameraX ImageAnalysis | 默认手动、可选实时；框与一句建议、来源和耗时；场景变化失效 |
 | iOS（后续） | Swift + SwiftUI + AVFoundation；Core Image / Metal | 原生拍摄与实时调色 |
 | 预设文件 | `.cube` + JSON | LUT、影调参数与拍摄参数配置 |
 
@@ -154,7 +180,7 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 - [x] **Android 基础拍摄**：取景、拍照、三档视角、Snap 参数记忆、实时影调、LUT 导入和 JPEG 保存；源码与本地构建已完成。
 - [x] **影调与操作**：正片、负片、粉末蓝、每套影调独立微调、软件柔光、白平衡与漂移；已实现，效果继续实拍调校。
 - [x] **Android Preview**：v0.3.0-dev，支持 Android 12 及以上版本；包含 AF/MF 双向切换、P/S/M 曝光档、白平衡漂移、HDF 柔光、胶片分类和可选端侧构图辅助。
-- [ ] **Edge model validation**：锁定可再分发的 256M 权重后完成真实端到端推理、帧抽样共存、失败恢复、包体与真机温升基准；当前开发环境尚未下载权重。
+- [ ] **Composition quality**：推荐框与中文建议采用“图像候选先显示、模型异步比较”；继续以候选重排、独立画面和人工偏好评估构图质量，不把合法框或输出格式当作审美通过。前置标注/训练流程见 SOP，本轮没有训练新模型。
 - [ ] **Device validation**：荣耀 Vs3 真机测试、折叠屏适配、预览与成片对照及性能基线。
 - [ ] **Advanced controls**：RAW / DNG、峰值辅助、配方分享、完整 ADJ 式快捷操作。
 - [ ] **iOS**：复用产品交互与配方规范，接入 iOS 原生相机和调色实现。
@@ -165,9 +191,9 @@ Android v0.3 开发预览已提供可安装 APK。当前优先完善拍摄体验
 
 | 取景与快拍 | 相机外观与持握 | 端侧模型选择 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，包含相机摆件、AF、HDF、胶片选择与快门"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含 SmolVLM 256M、500M 和安装状态"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧最新取景界面，显示推荐构图框、中文建议、主动构图和实时开关"> | <img src="docs/images/camera-picker.png" width="250" alt="途帧相机选择器，包含五个相机摆件和自动、横持、竖持方向"> | <img src="docs/images/edge-models.png" width="250" alt="途帧端侧构图辅助设置，包含分阶段耗时、实时开关和已安装 251.2 MB 状态"> |
 
-Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测试场景。第一张展示最新取景器与相机摆件；第二张展示相机外观和自动/横持/竖持方向；第三张展示可选端侧构图辅助的模型选择与“未安装”状态。模型权重不随当前 APK 分发，实拍效果和设备支持范围以真机为准。
+Android 15 模拟器实际截图，取景为内置测试场景。第一张和第三张来自本轮 CPU Int8 调试包，展示推荐构图框、主动构图与实时入口、分阶段耗时及“已安装 · 251.2 MB”；第二张展示相机外观和自动/横持/竖持方向。内置包约 300 MB，默认 Preview APK 仍不带权重；实拍效果和设备支持范围以真机为准。
 
 ## 安装与发布
 
@@ -195,20 +221,20 @@ Android 15 模拟器中的当前 Preview APK 实际截图，取景为内置测�
 
 ### CI → APK
 
-[![Android CI](https://github.com/bestksl/street-snap/actions/workflows/android.yml/badge.svg)](https://github.com/bestksl/street-snap/actions/workflows/android.yml)
+[![Android CI](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml/badge.svg)](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml)
 
 | 触发 | 产出 |
 | --- | --- |
 | 推送到 `main` / PR / 手动运行 | 构建、测试、Lint；提供 Preview / Debug APK 与 SHA-256 |
 | `v*` 版本标签 / 手动指定标签 | 固定签名 APK、SHA-256 与 Release 草稿 |
 
-体验最新代码：打开 [Actions → Android](https://github.com/bestksl/street-snap/actions/workflows/android.yml)，选择成功的运行，在摘要下载 **Preview APK**，解压后安装。CI 制品保留 30 天，下载需要登录 GitHub。
+体验最新代码：打开 [Actions → Android](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml)，选择成功的运行，在摘要下载 **Preview APK**，解压后安装。CI 制品保留 30 天，下载需要登录 GitHub。
 
-CI 包使用独立包名，显示为「途帧 CI」，可与公开版并存；临时签名变化时需卸载旧 CI 包。长期使用请下载 [Releases](https://github.com/bestksl/street-snap/releases)。标签发布需要先配置签名 Secrets，步骤见 [CI 与版本发布](docs/ci-and-releases.md)。
+CI 包使用独立包名，显示为「途帧 CI」，可与公开版并存；临时签名变化时需卸载旧 CI 包。长期使用请下载 [Releases](https://github.com/light-witness-lab/street-snap/releases)。标签发布需要先配置签名 Secrets，步骤见 [CI 与版本发布](docs/ci-and-releases.md)。
 
 ## Contributing
 
-欢迎通过 [Issue](https://github.com/bestksl/street-snap/issues) 讨论方案，通过 PR 贡献实现。当前优先完善 Android 一期拍摄流程、设备适配与行色效果。
+欢迎通过 [Issue](https://github.com/light-witness-lab/street-snap/issues) 讨论方案，通过 PR 贡献实现。当前优先完善 Android 一期拍摄流程、设备适配与行色效果。
 
 - **Camera**：原生相机接入、参数控制、设备适配。
 - **Color**：独立创作的 LUT、影调配方与调色代码。

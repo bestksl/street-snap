@@ -3,6 +3,7 @@ package dev.streetsnap.app
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class CompositionResultGateTest {
@@ -18,8 +19,17 @@ class CompositionResultGateTest {
     @Test fun oldOrStaleFramesCannotPublishAfterTheAgeWindow() {
         val gate = CompositionResultGate(maximumAgeMs = 100)
         val ticket = gate.ticket(100)!!
+        assertFalse(gate.isFreshForInference(ticket, 200))
         assertFalse(gate.accepts(ticket, 200, frameIsCurrent = true))
         assertFalse(gate.accepts(ticket, 150, frameIsCurrent = false))
         assertNotNull(gate.ticket(250))
+    }
+
+    @Test fun aFreshFrameMayStartInferenceBeforeItIsPublished() {
+        val gate = CompositionResultGate(maximumAgeMs = 500)
+        val ticket = gate.ticket(100)!!
+        assertTrue(gate.isFreshForInference(ticket, 599))
+        assertEquals(1L, gate.remainingMs(ticket, 599))
+        assertTrue(gate.accepts(ticket, 599, frameIsCurrent = true))
     }
 }

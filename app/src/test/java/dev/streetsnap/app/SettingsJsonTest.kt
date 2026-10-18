@@ -7,6 +7,15 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class SettingsJsonTest {
+    @Test fun compositionUpgradeDefaultsToManualAndRealtimeSurvivesRestart() {
+        val legacy = SettingsJson.decode("""{"version":4,"compositionEnabled":true,"preset":"MONO"}""")
+        assertTrue(legacy.compositionEnabled)
+        assertFalse(legacy.compositionRealtime)
+        assertEquals("MONO", legacy.preset)
+        val realtime = legacy.copy(compositionRealtime = true)
+        assertEquals(realtime, SettingsJson.decode(SettingsJson.encode(realtime)))
+    }
+
     @Test fun upgradeKeepsTheOldLookAndDoesNotApplyItsEditsToOtherLooks() {
         val old = """{"version":1,"preset":"SUNNY","intensity":0.6,"grain":0.3,"vignette":0.2,"focalLength":35,"iso":400,"exposureTimeNs":8000000}"""
         val loaded = SettingsJson.decode(old)

@@ -2,6 +2,7 @@ package dev.streetsnap.app.edge
 
 import android.content.Context
 import android.os.StatFs
+import android.content.res.AssetManager
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
@@ -16,6 +17,7 @@ import org.json.JSONObject
 /** Bounded HTTPS downloads into app-private storage. No download starts in the constructor. */
 class EdgeModelStore(context: Context) {
     private val root = File(context.filesDir, "edge-models")
+    private val assets: AssetManager = context.assets
 
     suspend fun prepare(model: EdgeModelEntry): ModelDownloadPlan = withContext(Dispatchers.IO) {
         require(EdgeModelCatalog.models.contains(model)) { "未知模型来源" }
@@ -38,18 +40,39 @@ class EdgeModelStore(context: Context) {
                 add(ModelFile(path, item.getLong("size"), digest ?: requireNotNull(fallback), digest != null))
             }
         }
-        fun graph(stem: String): String = listOf(
-            // q4 is smaller for vision/decoder; embeddings have a much smaller
-            // official int8/uint8 graph, so prefer it for that one.
-            if (stem == "embed_tokens") "onnx/${stem}_quantized.onnx" else "onnx/${stem}_q4.onnx",
-            if (stem == "embed_tokens") "onnx/${stem}_q4.onnx" else "onnx/${stem}_quantized.onnx"
-        ).firstOrNull { candidate -> all.any { it.path == candidate } }
-            ?: error("官方仓库暂无可用的 $stem 小体积 ONNX 文件")
-        val vision = graph("vision_encoder")
-        val embedding = graph("embed_tokens")
-        val decoder = graph("decoder_model_merged")
-        val graphs = listOf(vision, embedding, decoder)
-        val required = listOf("config.json", "tokenizer.json", "tokenizer_config.json", "preprocessor_config.json")
+        val graphs: List<String>
+        val required: List<String>
+        when (model.kind) {
+            EdgeModelKind.SMOLVLM_CHOICE -> {
+                fun graph(stem: String): String = listOf(
+                    // q4 is smaller for vision/decoder; embeddings have a much smaller
+                    // official int8/uint8 graph, so prefer it for that one.
+                    if (stem == "embed_tokens") "onnx/${stem}_quantized.onnx" else "onnx/${stem}_q4.onnx",
+                    if (stem == "embed_tokens") "onnx/${stem}_q4.onnx" else "onnx/${stem}_quantized.onnx"
+                ).firstOrNull { candidate -> all.any { it.path == candidate } }
+                    ?: error("官方仓库暂无可用的 $stem 小体积 ONNX 文件")
+                // The third slot is the generative decoder for SmolVLM; d1 puts its
+                // decision head in the same plan field instead.
+                graphs = listOf(graph("vision_encoder"), graph("embed_tokens"), graph("decoder_model_merged"))
+                required = listOf("config.json", "tokenizer.json", "tokenizer_config.json", "preprocessor_config.json")
+            }
+            EdgeModelKind.D1_OMNI_CHOICE -> {
+                // fp16 SigLIP2 vision tower, Q4 block-gather embeddings and the 4-bit
+                // MatMulNBits decision graph. The official 8-bit decision graph cannot
+                // run on ORT 1.22 (its nodes lack accuracy_level=4, so ORT takes the
+                // unpacked path that only supports 4-bit); q4 is the supported path.
+                graphs = listOf(
+                    "onnx/vision_encoder_fp16.onnx",
+                    "onnx/embed_tokens_quantized.onnx",
+                    "onnx/decision_q4.onnx",
+                )
+                // The LFM Open License requires the license text to travel with the weights.
+                required = listOf("config.json", "tokenizer.json", "tokenizer_config.json",
+                    "preprocessor_config.json", "LICENSE")
+            }
+        }
+        require(graphs.all { expected -> all.any { it.path == expected } }) { "模型 ONNX 图不完整" }
+        val (vision, embedding, decoder) = graphs
         require(required.all { expected -> all.any { it.path == expected } }) { "模型配套配置不完整" }
         val optional = listOf("processor_config.json", "generation_config.json", "LICENSE", "LICENSE.txt")
         val files = all.filter { file -> file.path in required || file.path in optional || graphs.any {
@@ -119,18 +142,132 @@ class EdgeModelStore(context: Context) {
             InstalledEdgeModel(plan, folder)
         }
 
-    fun installed(model: EdgeModelEntry): InstalledEdgeModel? = root.listFiles()?.asSequence()
-        ?.filter { it.isDirectory && it.name.startsWith(model.id + "-") }
-        ?.mapNotNull { folder -> runCatching {
-            val manifest = File(folder, "install.json")
-            require(manifest.length() in 1..MAX_METADATA_BYTES.toLong())
-            val plan = decode(JSONObject(manifest.readText(Charsets.UTF_8)))
-            validatePlan(plan)
-            require(plan.model == model)
-            require(plan.files.all { File(folder, it.path).length() == it.bytes })
-            InstalledEdgeModel(plan, folder)
-        }.getOrNull() }
-        ?.firstOrNull()
+    /**
+     * Import a model that was deliberately staged in app assets at build time.
+     *
+     * Assets are copied into the private model store. Different graph variants at the
+     * same revision have separate directories, preserving a previously installed model.
+     * The manifest is validated before copying and every file is checked by its hash.
+     * Missing assets simply mean this APK has no bundled model; normal downloads remain
+     * available. A valid install with the same graph configuration is reused.
+     */
+    suspend fun installBundled(model: EdgeModelEntry): InstalledEdgeModel? = withContext(Dispatchers.IO) {
+        require(model in EdgeModelCatalog.models) { "未知模型来源" }
+        val bundledPlan = bundledPlan(model) ?: return@withContext null
+        installedModels(model).firstOrNull { sameVariant(it.plan, bundledPlan) }
+            ?.let { return@withContext it }
+        val assetRoot = "edge-models/${model.id}-${model.revision}"
+        val manifestPath = "$assetRoot/install.json"
+        val manifestText = readAssetSmall(manifestPath)
+
+        root.mkdirs()
+        require(StatFs(root.absolutePath).availableBytes > bundledPlan.totalBytes + 64L * 1024 * 1024) { "可用空间不足" }
+        val folderName = bundledFolderName(bundledPlan)
+        val folder = File(root, folderName)
+        val staging = File(root, "$folderName.asset-part")
+        if (staging.exists()) require(staging.deleteRecursively()) { "无法清理未完成的内置模型" }
+        staging.mkdirs()
+        try {
+            var copiedTotal = 0L
+            for (spec in bundledPlan.files) {
+                currentCoroutineContext().ensureActive()
+                val assetPath = "$assetRoot/${spec.path}"
+                require(assetExists(assetPath)) { "内置模型缺少文件：${spec.path}" }
+                val destination = File(staging, spec.path)
+                destination.parentFile?.mkdirs()
+                val partial = File(destination.path + ".part")
+                var copied = 0L
+                assets.open(assetPath).use { input ->
+                    partial.outputStream().buffered().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            copied += count
+                            require(copied <= spec.bytes) { "内置模型文件超出声明大小：${spec.path}" }
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                }
+                require(copied == spec.bytes && verify(partial, spec)) { "内置模型校验失败：${spec.path}" }
+                require(partial.renameTo(destination)) { "无法保存内置模型文件：${spec.path}" }
+                copiedTotal += copied
+            }
+            require(copiedTotal == bundledPlan.totalBytes) { "内置模型大小与清单不一致" }
+            val manifest = File(staging, "install.json.part")
+            manifest.writeText(manifestText, Charsets.UTF_8)
+            require(manifest.renameTo(File(staging, "install.json"))) { "无法保存内置模型清单" }
+            // Never replace another valid graph variant, including the legacy Q4
+            // directory. Only incomplete data at this variant's own path is replaced.
+            val existing = installedModel(folder, model)
+            if (existing != null) {
+                require(sameVariant(existing.plan, bundledPlan)) { "内置模型目录已被其他有效版本占用" }
+                require(staging.deleteRecursively()) { "无法清理内置模型临时文件" }
+                return@withContext existing
+            }
+            if (folder.exists()) require(folder.deleteRecursively()) { "无法替换未完成的内置模型" }
+            require(staging.renameTo(folder)) { "无法完成内置模型安装" }
+            InstalledEdgeModel(bundledPlan, folder)
+        } catch (error: Throwable) {
+            staging.deleteRecursively()
+            throw error
+        }
+    }
+
+    fun installed(model: EdgeModelEntry): InstalledEdgeModel? {
+        val models = installedModels(model)
+        val bundled = bundledPlan(model)
+        // An APK upgrade may change quantization without changing the pinned revision.
+        // Prefer that APK's graphs; a normal APK can still use a previously imported model.
+        return bundled?.let { plan -> models.firstOrNull { sameVariant(it.plan, plan) } }
+            ?: models.firstOrNull()
+    }
+
+    private fun installedModels(model: EdgeModelEntry): List<InstalledEdgeModel> =
+        root.listFiles()?.asSequence()
+            ?.filter { it.isDirectory && it.name.startsWith(model.id + "-") &&
+                !it.name.endsWith(".asset-part") }
+            ?.sortedBy { it.name }
+            ?.mapNotNull { installedModel(it, model) }
+            ?.toList().orEmpty()
+
+    private fun installedModel(folder: File, model: EdgeModelEntry): InstalledEdgeModel? = runCatching {
+        val manifest = File(folder, "install.json")
+        require(manifest.length() in 1..MAX_METADATA_BYTES.toLong())
+        val plan = decode(JSONObject(manifest.readText(Charsets.UTF_8)))
+        validatePlan(plan)
+        require(plan.model == model)
+        require(plan.files.all { File(folder, it.path).isFile && File(folder, it.path).length() == it.bytes })
+        InstalledEdgeModel(plan, folder)
+    }.getOrNull()
+
+    private fun bundledPlan(model: EdgeModelEntry): ModelDownloadPlan? {
+        val manifestPath = "edge-models/${model.id}-${model.revision}/install.json"
+        if (!assetExists(manifestPath)) return null
+        val plan = try {
+            decode(JSONObject(readAssetSmall(manifestPath)))
+        } catch (error: Exception) {
+            throw IllegalArgumentException("内置模型安装清单无效", error)
+        }
+        validatePlan(plan)
+        require(plan.model == model && plan.revision == model.revision) { "内置模型版本与应用目录不一致" }
+        require(plan.totalBytes > 0) { "内置模型为空" }
+        return plan
+    }
+
+    private fun sameVariant(first: ModelDownloadPlan, second: ModelDownloadPlan): Boolean =
+        first.model == second.model && first.revision == second.revision &&
+            first.visionFile == second.visionFile && first.embeddingFile == second.embeddingFile &&
+            first.decoderFile == second.decoderFile
+
+    private fun bundledFolderName(plan: ModelDownloadPlan): String {
+        val key = listOf(plan.model.id, plan.revision, plan.visionFile, plan.embeddingFile, plan.decoderFile)
+            .joinToString("\n")
+        val digest = MessageDigest.getInstance("SHA-256").digest(key.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 255) }
+        return "${plan.model.id}-${plan.revision}-bundle-${digest.take(24)}"
+    }
 
     /** Call after unloading this model's inference sessions. */
     suspend fun remove(model: EdgeModelEntry) = withContext(Dispatchers.IO) {
@@ -158,6 +295,25 @@ class EdgeModelStore(context: Context) {
                 out.toString("UTF-8")
             }
         } finally { connection.disconnect() }
+    }
+
+    private fun assetExists(path: String): Boolean = runCatching {
+        assets.open(path).use { }
+        true
+    }.getOrDefault(false)
+
+    private fun readAssetSmall(path: String): String {
+        assets.open(path).use { input ->
+            val out = java.io.ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            while (true) {
+                val count = input.read(buffer)
+                if (count < 0) break
+                require(out.size() + count <= MAX_METADATA_BYTES) { "内置模型清单过大" }
+                out.write(buffer, 0, count)
+            }
+            return out.toString("UTF-8")
+        }
     }
 
     private fun connection(address: String): HttpURLConnection = (URL(address).openConnection() as HttpURLConnection).apply {
@@ -203,11 +359,21 @@ class EdgeModelStore(context: Context) {
 
     private fun decode(json: JSONObject): ModelDownloadPlan {
         val files = json.getJSONArray("files")
+        val graphs = json.optJSONObject("graphs")
+        fun graph(name: String): String {
+            val direct = json.optString(name).takeIf { it.isNotBlank() }
+            return direct ?: graphs?.optString(name)?.takeIf { it.isNotBlank() }
+                ?: error("模型安装清单缺少 $name 图")
+        }
         return ModelDownloadPlan(
             requireNotNull(EdgeModelCatalog.find(json.getString("model"))), json.getString("revision"),
             (0 until files.length()).map { index -> files.getJSONObject(index).let {
-                ModelFile(it.getString("path"), it.getLong("bytes"), it.getString("digest"), it.getBoolean("sha256"))
-            } }, json.getString("vision"), json.getString("embedding"), json.getString("decoder"),
+                val digest = it.optString("digest").takeIf { value -> value.isNotBlank() }
+                    ?: it.optString("sha256").takeIf { value -> value.isNotBlank() }
+                    ?: error("模型安装清单缺少文件摘要")
+                ModelFile(it.getString("path"), it.getLong("bytes"), digest,
+                    it.optBoolean("sha256", digest.matches(Regex("[a-f0-9]{64}"))))
+            } }, graph("vision"), graph("embedding"), graph("decoder"),
         )
     }
 

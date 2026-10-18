@@ -2,8 +2,26 @@ package dev.streetsnap.app.edge
 
 import java.io.File
 
+/** Which runtime contract a pinned model uses; graph selection follows this, not file-name guesses. */
+enum class EdgeModelKind {
+    /** SmolVLM generative VLM: vision + embeddings + decoder-with-cache, A/B/C read from last logits. */
+    SMOLVLM_CHOICE,
+
+    /**
+     * Liquid d1-omni decision model: vision + embeddings + bidirectional decision head,
+     * zero generated tokens; A/B/C are softmax probabilities over option markers.
+     */
+    D1_OMNI_CHOICE,
+}
+
 /** Weights are optional, fetched only after the user explicitly starts a download. */
-data class EdgeModelEntry(val id: String, val title: String, val repository: String, val revision: String) {
+data class EdgeModelEntry(
+    val id: String,
+    val title: String,
+    val repository: String,
+    val revision: String,
+    val kind: EdgeModelKind = EdgeModelKind.SMOLVLM_CHOICE,
+) {
     val sourceUrl: String get() = "https://huggingface.co/$repository"
 }
 
@@ -16,6 +34,11 @@ object EdgeModelCatalog {
         EdgeModelEntry(
             "smolvlm-500m", "SmolVLM 500M", "HuggingFaceTB/SmolVLM-500M-Instruct",
             "a588b6298f96d180aff4c31e259409d106b5571e",
+        ),
+        EdgeModelEntry(
+            "d1-omni-600m", "d1 决策 600M", "onnx-community/d1-omni-600M-ONNX",
+            "4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0",
+            EdgeModelKind.D1_OMNI_CHOICE,
         ),
     )
     fun find(id: String?): EdgeModelEntry? = models.firstOrNull { it.id == id }

@@ -165,6 +165,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         composition.invalidateView()
         camera.setFocalLength(focal)
         update { it.copy(focalLength = focal.equivalentMm ?: 0) }
+        composition.updateFocalLength(focal.equivalentMm ?: 28)
     }
 
     fun setExposure(index: Int) = latestCameraAction("exposure") {
@@ -274,6 +275,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     fun setCaptureOrientation(id: String) = update { it.copy(captureOrientation = CameraPreferences.orientation(id)) }
 
     fun setCompositionEnabled(enabled: Boolean) = update { it.copy(compositionEnabled = enabled) }
+    fun setCompositionRealtime(enabled: Boolean) = update {
+        it.copy(compositionRealtime = enabled, compositionEnabled = true)
+    }
+    fun requestComposition() {
+        if (!_settings.value.compositionEnabled) setCompositionEnabled(true)
+        composition.requestAdvice()
+    }
     fun setCompositionModel(id: String) {
         if (EdgeModelCatalog.find(id) != null) update { it.copy(compositionModel = id) }
     }
@@ -282,7 +290,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         if (_settingsLoaded.value) syncComposition()
     }
     private fun syncComposition() = composition.configure(
-        _settings.value.compositionModel, _settings.value.compositionEnabled, foreground)
+        _settings.value.compositionModel, _settings.value.compositionEnabled, foreground,
+        realtime = _settings.value.compositionRealtime,
+        focalLengthMm = _settings.value.focalLength.takeIf { it > 0 } ?: 28)
 
     fun setColor(
         intensity: Float? = null, grain: Float? = null, vignette: Float? = null,

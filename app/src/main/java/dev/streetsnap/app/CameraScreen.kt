@@ -17,6 +17,9 @@ import android.view.Surface
 import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ViewPort
 import androidx.camera.view.PreviewView
@@ -25,6 +28,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -56,7 +60,9 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Slider
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -112,6 +118,7 @@ import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.ExposureMode
 import dev.streetsnap.camera.FocalLength
+import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
 import kotlin.coroutines.resume
@@ -120,7 +127,9 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 
@@ -196,51 +205,43 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-            Column(Modifier.fillMaxSize()) {
-                CameraModel.fromId(settings.mascotCamera)?.let { mascot ->
-                    Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
-                        CameraArtwork(mascot, Modifier.size(78.dp, 48.dp).clip(RoundedCornerShape(10.dp))
-                            .clickable(enabled = loaded, role = Role.Button) { showMascotPicker = true }
-                            .semantics { contentDescription = "相机摆件：${mascot.brand} ${mascot.model}，点按更换" })
-                    }
-                }
-                if (!permitted) {
-                    PermissionPanel(denied, { permission.launch(Manifest.permission.CAMERA) }, activity::openAppSettings)
-                } else {
-                    BoxWithConstraints(Modifier.fillMaxSize()) {
-                        val landscape = maxWidth > maxHeight
-                        if (landscape && maxWidth >= 600.dp) {
-                            val sideWidth = minOf(356.dp, maxWidth * .48f)
-                            Row(Modifier.fillMaxSize()) {
-                                Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay,
-                                    Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ })
-                                ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
-                                    Modifier.width(sideWidth).fillMaxHeight(),
-                                    adjustmentTab, { adjustmentTab = it }, sidePanel = true,
-                                    panelHeight = 264.dp,
-                                    importLut = { lutPicker.launch(arrayOf("*/*")) },
-                                    openMascotPicker = { showMascotPicker = true },
-                                    compositionState = compositionState,
-                                    latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
-                            }
-                        } else {
-                            val compact = maxHeight < 360.dp
-                            val previewHeight = maxOf(120.dp, maxHeight * .45f)
-                            val panelHeight = if (compact) 224.dp else (maxHeight - 306.dp).coerceIn(128.dp, 264.dp)
-                            // Tiny split-screen windows can scroll instead of losing their viewfinder.
-                            Column(if (compact) Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                                else Modifier.fillMaxSize()) {
-                                Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay,
-                                    if (compact) Modifier.fillMaxWidth().height(previewHeight)
-                                    else Modifier.weight(1f).fillMaxWidth(), onRetry = { retry++ })
-                                ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
-                                    Modifier.fillMaxWidth(), adjustmentTab, { adjustmentTab = it },
-                                    sidePanel = false, panelHeight = panelHeight,
-                                    importLut = { lutPicker.launch(arrayOf("*/*")) },
-                                    openMascotPicker = { showMascotPicker = true },
-                                    compositionState = compositionState,
-                                    latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
-                            }
+            if (!permitted) {
+                PermissionPanel(denied, { permission.launch(Manifest.permission.CAMERA) }, activity::openAppSettings)
+            } else {
+                BoxWithConstraints(Modifier.fillMaxSize()) {
+                    val landscape = maxWidth > maxHeight
+                    if (landscape && maxWidth >= 600.dp) {
+                        // Large landscape screens keep the all-controls side rail; the
+                        // phone portrait path below is the floating full-screen viewfinder.
+                        val sideWidth = minOf(356.dp, maxWidth * .48f)
+                        Row(Modifier.fillMaxSize()) {
+                            Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay, compositionState,
+                                Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ })
+                            ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
+                                Modifier.width(sideWidth).fillMaxHeight(),
+                                adjustmentTab, { adjustmentTab = it }, sidePanel = true,
+                                panelHeight = 264.dp,
+                                importLut = { lutPicker.launch(arrayOf("*/*")) },
+                                openMascotPicker = { showMascotPicker = true },
+                                compositionState = compositionState,
+                                latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
+                        }
+                    } else {
+                        // Phone (and small split-screen): the viewfinder owns the whole screen;
+                        // shutter/focal controls float over it and pro controls live in a sheet.
+                        Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
+                            Modifier.fillMaxSize(), onRetry = { retry++ })
+                        ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
+                            Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                            onTab = { adjustmentTab = it },
+                            latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
+                        if (adjustmentTab != null) {
+                            ControlBottomSheet(adjustmentTab!!, onDismiss = { adjustmentTab = null },
+                                onTab = { adjustmentTab = it },
+                                state = state, settings = settings, importing = lutLoading, model = model,
+                                importLut = { lutPicker.launch(arrayOf("*/*")) },
+                                openMascotPicker = { showMascotPicker = true },
+                                compositionState = compositionState)
                         }
                     }
                 }
@@ -276,6 +277,7 @@ private fun Viewfinder(
     landscape: Boolean,
     compositionSource: dev.streetsnap.camera.CompositionFrameSource?,
     compositionOverlay: CompositionOverlay?,
+    compositionState: CompositionUiState,
     modifier: Modifier,
     onRetry: () -> Unit,
 ) {
@@ -354,12 +356,18 @@ private fun Viewfinder(
         val ratio = if (landscape) 4f / 3f else 3f / 4f
         val previewWidth = min(maxWidth.value, maxHeight.value * ratio).dp
         val previewHeight = previewWidth / ratio
+        // Phones float the shutter/focal bar over this lower edge; lift overlays just above
+        // the single manual-override chip row that can intrude into the preview.
+        val floatingClearance = if (maxHeight > maxWidth) 92.dp else 10.dp
         Box(Modifier.size(previewWidth, previewHeight)) {
             AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().onSizeChanged {
                 width = it.width
                 height = it.height
             })
             val roll = rememberLevelAngle(settings.level, preview)
+            // Rule advice refreshes several times per second; ease the rectangle so the
+            // guide tracks the scene without visibly jumping between nearby crops.
+            val smoothCrop = rememberSmoothCrop(compositionOverlay)
             Canvas(Modifier.fillMaxSize().pointerInput(preview, canTapFocus) {
                 detectTapGestures(
                     onTap = { position ->
@@ -376,7 +384,7 @@ private fun Viewfinder(
                     },
                 )
             }) {
-                if (settings.grid) {
+                if (settings.grid && compositionOverlay == null) {
                     val color = Color.White.copy(alpha = .32f)
                     for (i in 1..2) {
                         drawLine(color, Offset(size.width * i / 3, 0f), Offset(size.width * i / 3, size.height), 1.dp.toPx())
@@ -406,47 +414,75 @@ private fun Viewfinder(
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
                 compositionOverlay?.let { overlay ->
-                    val suggestion = overlay.suggestion
-                    val left = (suggestion.left.coerceIn(0f, 1f) * size.width)
-                    val top = (suggestion.top.coerceIn(0f, 1f) * size.height)
-                    val right = (suggestion.right.coerceIn(0f, 1f) * size.width)
-                    val bottom = (suggestion.bottom.coerceIn(0f, 1f) * size.height)
+                    // Reading the animated values here (inside the draw scope) means
+                    // animation ticks only redraw this canvas, not recompose the screen.
+                    val crop = smoothCrop.crop
+                    if (crop != null) {
+                    val left = (crop.left.coerceIn(0f, 1f) * size.width)
+                    val top = (crop.top.coerceIn(0f, 1f) * size.height)
+                    val right = (crop.right.coerceIn(0f, 1f) * size.width)
+                    val bottom = (crop.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
-                        drawRect(Color(0xFFE2FF79).copy(alpha = .86f), Offset(left, top),
+                        val tint = if (overlay.origin == AdviceOrigin.MODEL_SELECTION) Color(0xFFE2FF79) else Color(0xFFB7E3F6)
+                        val shade = Color.Black.copy(alpha = .26f)
+                        drawRect(shade, size = androidx.compose.ui.geometry.Size(size.width, top))
+                        drawRect(shade, Offset(0f, bottom), androidx.compose.ui.geometry.Size(size.width, size.height - bottom))
+                        drawRect(shade, Offset(0f, top), androidx.compose.ui.geometry.Size(left, bottom - top))
+                        drawRect(shade, Offset(right, top), androidx.compose.ui.geometry.Size(size.width - right, bottom - top))
+                        drawRect(tint.copy(alpha = .95f), Offset(left, top),
                             androidx.compose.ui.geometry.Size(right - left, bottom - top), style = Stroke(2.dp.toPx()))
-                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(size.width / 2f, top),
-                            Offset(size.width / 2f, bottom), 1.dp.toPx())
-                        drawLine(Color(0xFFE2FF79).copy(alpha = .65f), Offset(left, size.height / 2f),
-                            Offset(right, size.height / 2f), 1.dp.toPx())
+                        for (i in 1..2) {
+                            val x = left + (right - left) * i / 3f
+                            val y = top + (bottom - top) * i / 3f
+                            drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
+                            drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
+                        }
+                    }
                     }
                 }
             }
-            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text(state.settings.focalLength.label, color = Color.White, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
-                    modifier = Modifier.background(Color.Black.copy(alpha = .45f), RoundedCornerShape(4.dp)).padding(5.dp))
+            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 Spacer(Modifier.weight(1f))
-                if (settings.hdfEnabled) Text("HDF", color = MaterialTheme.colorScheme.primary,
-                    fontFamily = FontFamily.Monospace, fontSize = 11.sp,
-                    modifier = Modifier.background(Color.Black.copy(alpha = .45f), RoundedCornerShape(4.dp)).padding(5.dp))
-                TextButton(onClick = {
-                    focusPoint = null
-                    if (state.isFocusLocked) model.autoFocus() else model.toggleFocusMode()
-                }, enabled = state.isReady && (if (manualFocus) state.capabilities?.autoFocusMode != null
-                    else state.isFocusLocked || state.capabilities?.supportsManualFocus == true),
-                    modifier = Modifier.heightIn(min = 48.dp).semantics {
-                        contentDescription = when {
-                            state.isFocusLocked -> "解除对焦锁定"
-                            manualFocus -> "切换自动对焦"
-                            state.capabilities?.supportsManualFocus == true -> "切换手动对焦"
-                            else -> "当前对焦模式"
-                        }
-                    }) {
-                    Text(when {
-                        manualFocus -> "MF"
-                        state.isFocusLocked -> "AF-L"
-                        state.capabilities?.autoFocusMode != null -> "AF"
-                        else -> "固定焦点"
-                    }, color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
+                OverlayPill(
+                    label = if (!compositionState.isRequestRunning) "构图" else "分析中",
+                    enabled = state.isReady && !compositionState.isRequestRunning,
+                    description = "分析一次构图",
+                    onClick = model::requestComposition)
+                OverlayPill(
+                    label = if (settings.compositionRealtime) "实时 · 开" else "实时",
+                    enabled = true, description = "实时构图开关", selected = settings.compositionRealtime,
+                    onClick = { model.setCompositionRealtime(!settings.compositionRealtime) })
+                val focusLabel = when {
+                    manualFocus -> "MF"
+                    state.isFocusLocked -> "AF-L"
+                    state.capabilities?.autoFocusMode != null -> "AF"
+                    else -> "固定焦点"
+                }
+                OverlayPill(focusLabel, onClick = {
+                        focusPoint = null
+                        if (state.isFocusLocked) model.autoFocus() else model.toggleFocusMode()
+                    },
+                    enabled = state.isReady && (if (manualFocus) state.capabilities?.autoFocusMode != null
+                        else state.isFocusLocked || state.capabilities?.supportsManualFocus == true),
+                    selected = manualFocus || state.isFocusLocked,
+                    description = when {
+                        state.isFocusLocked -> "解除对焦锁定"
+                        manualFocus -> "切换自动对焦"
+                        state.capabilities?.supportsManualFocus == true -> "切换手动对焦"
+                        else -> "当前对焦模式"
+                    })
+            }
+            // Advice card sits above the floating shutter/focal bar (clearance computed above).
+            if (settings.compositionEnabled) {
+                Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
+                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)) {
+                    compositionOverlay?.suggestion?.modelText?.let {
+                        Text(it, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    compositionOverlay?.easterEgg?.let {
+                        Text(it, color = Color(0xFFE2FF79), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    Text(compositionTimingLabel(compositionState), color = Color.White.copy(alpha = .78f), fontSize = 10.sp, maxLines = 2)
                 }
             }
             val focusHint = when {
@@ -455,7 +491,7 @@ private fun Viewfinder(
                 focusPoint != null && state.focusResult == false -> "未合焦 · 可重试或直接拍摄"
                 else -> null
             }
-            focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter).padding(16.dp),
+            focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter).padding(bottom = floatingClearance + 8.dp),
                 color = Color.White, fontSize = 12.sp) }
         }
         val error = bindingError ?: previewError ?: state.error
@@ -480,6 +516,187 @@ private enum class LookParameter(val label: String, val signed: Boolean = true) 
     INTENSITY("强度", false), SATURATION("饱和度"), HUE("色相"), CONTRAST("对比度"),
     BRIGHTNESS("亮度"), HIGHLIGHTS("高光"), SHADOWS("阴影"), SHARPNESS("锐度"),
     CLARITY("清晰度"), GRAIN("颗粒", false), VIGNETTE("暗角", false), DIFFUSION("柔光", false),
+}
+
+/** A currently-active manual override surfaced as a tappable/long-press-resettable chip. */
+private data class ActiveOverride(
+    val label: String,
+    val tab: AdjustmentTab,
+    val resetDescription: String,
+    val onReset: () -> Unit,
+)
+
+/** Small translucent chip that floats over the viewfinder instead of sitting on a grey bar. */
+@Composable
+private fun OverlayPill(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    selected: Boolean = false,
+    description: String? = null,
+    onLongClick: (() -> Unit)? = null,
+    longClickDescription: String? = null,
+) {
+    val highlighted = selected
+    val container = if (highlighted) MaterialTheme.colorScheme.primary.copy(alpha = .20f)
+        else Color.Black.copy(alpha = .42f)
+    val content = if (highlighted) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .92f)
+    Box(modifier.height(38.dp).clip(RoundedCornerShape(19.dp)).background(container)
+        .combinedClickable(
+            enabled = enabled, role = Role.Button,
+            onLongClick = onLongClick, onLongClickLabel = longClickDescription,
+            onClick = onClick,
+        )
+        .semantics {
+            if (description != null) contentDescription = description
+            this.selected = selected
+        }.padding(horizontal = 15.dp), contentAlignment = Alignment.Center) {
+        Text(label, color = if (enabled) content else content.copy(alpha = .4f),
+            fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+/**
+ * Phone portrait capture surface: everything floats over the full-screen viewfinder.
+ * Only the high-frequency focal choice and the shutter stay; looks, white balance and
+ * other pro controls are surfaced here *only* while a manual override is active (a
+ * tappable chip that jumps straight to the right sheet section), otherwise they live
+ * in [ControlBottomSheet].
+ */
+@Composable
+private fun ViewfinderOverlayBar(
+    state: CameraState,
+    settings: AppSettings,
+    inFlight: Int,
+    loaded: Boolean,
+    model: CameraViewModel,
+    modifier: Modifier = Modifier,
+    onTab: (AdjustmentTab?) -> Unit,
+    latestPhoto: Uri?,
+    openPhoto: (Uri) -> Unit,
+) {
+    val focalLengths = listOf(FocalLength.MM28, FocalLength.MM35, FocalLength.MM50)
+    val supportedFocalLengths = state.capabilities?.focalLengthOptions.orEmpty()
+    val exposureMode = state.settings.exposureMode
+    val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
+    val wbName = state.settings.whiteBalance.takeIf { it != WhiteBalanceMode.AUTO }?.displayName
+
+    // Only *manual overrides that can ruin a shot* get a persistent chip (Halide Mark III
+    // pattern): non-auto WB, diffusion, MF, S/M exposure, EV. Tap jumps to the section,
+    // long-press resets just that override. The creative look/film choice is WYSIWYG, so
+    // it stays inside the sheet instead of taking a permanent slot.
+    val overrides: List<ActiveOverride> = buildList {
+        wbName?.let {
+            add(ActiveOverride("白平衡 · $it", AdjustmentTab.WHITE_BALANCE, "复位白平衡") {
+                model.setWhiteBalance(WhiteBalanceMode.AUTO)
+                model.resetWhiteBalanceShift()
+            })
+        }
+        if (settings.hdfEnabled) add(ActiveOverride("柔光", AdjustmentTab.LOOK, "关闭柔光") { model.toggleHdf() })
+        if (state.settings.focusDistanceDiopters != null)
+            add(ActiveOverride("MF", AdjustmentTab.SHOOTING, "恢复自动对焦") { model.autoFocus() })
+        if (exposureMode != ExposureMode.PROGRAM) add(ActiveOverride(
+            when (exposureMode) { ExposureMode.MANUAL -> "M · ISO ${state.settings.iso ?: "—"}"; else -> "S" },
+            AdjustmentTab.SHOOTING, "复位拍摄参数", model::resetShootingParameters))
+        if (kotlin.math.abs(ev) > 0.001f && exposureMode != ExposureMode.MANUAL)
+            add(ActiveOverride("EV %+.1f".format(ev), AdjustmentTab.SHOOTING, "曝光归零") { model.setExposure(0) })
+    }
+
+    Column(modifier.background(
+            Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
+        .padding(top = 46.dp, bottom = 10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally) {
+        // Active manual overrides: visible tappable reminders that jump to the section.
+        if (overrides.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+                .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                overrides.forEach { override ->
+                    OverlayPill(override.label, selected = true,
+                        onClick = { onTab(override.tab) }, description = "打开${override.label}调整",
+                        onLongClick = override.onReset, longClickDescription = override.resetDescription)
+                }
+            }
+        }
+        // Focal lengths: the one pro control worth keeping on the capture screen.
+        Row(Modifier.padding(bottom = 6.dp).clip(RoundedCornerShape(22.dp))
+            .background(Color.Black.copy(alpha = .42f)).padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
+            focalLengths.forEach { focal ->
+                val enabled = focal in supportedFocalLengths && state.isReady && loaded
+                val selected = state.settings.focalLength == focal
+                Box(Modifier.height(38.dp).clip(RoundedCornerShape(18.dp))
+                    .background(if (selected) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .clickable(enabled = enabled, role = Role.Button) { model.setFocalLength(focal) }
+                    .semantics { this.selected = selected; contentDescription = "焦段 ${focal.label}" }
+                    .padding(horizontal = 20.dp), contentAlignment = Alignment.Center) {
+                    Text(focal.label, fontFamily = FontFamily.Monospace, fontSize = 12.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1,
+                        color = when {
+                            !enabled -> Color.White.copy(alpha = .32f)
+                            selected -> MaterialTheme.colorScheme.onPrimary
+                            else -> Color.White.copy(alpha = .92f)
+                        })
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth().height(92.dp), verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly) {
+            Box(Modifier.weight(1f, fill = false).width(80.dp).height(72.dp), contentAlignment = Alignment.Center) {
+                RecentPhoto(latestPhoto, openPhoto)
+            }
+            val canShoot = state.isReady && !state.isCapturing && inFlight < 2 && loaded
+            Box(Modifier.size(78.dp).border(2.dp, if (canShoot) Color.White else Color.Gray, CircleShape)
+                .padding(7.dp).clip(CircleShape).background(if (canShoot) MaterialTheme.colorScheme.primary else Color.DarkGray)
+                .clickable(enabled = canShoot, role = Role.Button) { model.shoot() }
+                .semantics { contentDescription = "拍照" }, contentAlignment = Alignment.Center) {
+                if (state.isCapturing) CircularProgressIndicator(Modifier.size(24.dp), color = Color.White, strokeWidth = 2.dp)
+                else if (inFlight > 0) Text("$inFlight / 2", fontFamily = FontFamily.Monospace,
+                    color = if (canShoot) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                    fontSize = 11.sp)
+            }
+            // Single gateway to every pro control (look/film/WB/shooting/composition).
+            // The sheet's own scrim/drag handle dismisses it, so this is always "open".
+            Column(Modifier.weight(1f, fill = false).width(80.dp).height(72.dp).clip(RoundedCornerShape(14.dp))
+                .clickable(enabled = loaded, role = Role.Button) { onTab(AdjustmentTab.LOOK) }
+                .semantics { contentDescription = "打开控制面板" },
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                Text("调整", fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
+                Text(when (exposureMode) {
+                        ExposureMode.MANUAL -> "M · ISO ${state.settings.iso ?: "—"}"
+                        ExposureMode.SHUTTER_PRIORITY -> "S · ${shutterLabel(state.settings.exposureTimeNs ?: 8_000_000L)}"
+                        ExposureMode.PROGRAM -> "P · %+.1f EV".format(ev)
+                    },
+                    fontFamily = FontFamily.Monospace, fontSize = 10.sp,
+                    color = Color.White.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
+    }
+}
+
+/** One shallow, modal bottom sheet for every pro control; opens already on the chosen section. */
+@Composable
+private fun ControlBottomSheet(
+    tab: AdjustmentTab,
+    onDismiss: () -> Unit,
+    onTab: (AdjustmentTab?) -> Unit,
+    state: CameraState,
+    settings: AppSettings,
+    importing: Boolean,
+    model: CameraViewModel,
+    importLut: () -> Unit,
+    openMascotPicker: () -> Unit,
+    compositionState: CompositionUiState,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState,
+        containerColor = Color.Transparent, scrimColor = Color.Black.copy(alpha = .55f),
+        contentWindowInsets = { androidx.compose.foundation.layout.WindowInsets(0) }) {
+        AdjustmentPanel(state, settings, importing, model, tab, onTab = onTab, importLut,
+            openMascotPicker, compositionState,
+            Modifier.fillMaxWidth().height(500.dp).padding(horizontal = 10.dp).padding(bottom = 10.dp))
+    }
 }
 
 @Composable
@@ -564,11 +781,18 @@ private fun ShootingControls(
         if (adjustmentTab != AdjustmentTab.LOOK) {
             Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "胶片", settings.filmId != null,
+                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "影调", settings.filmId != null,
                     enabled = loaded, onClick = { onTab(AdjustmentTab.FILM) })
-                val quickPresets = (listOf(ColorPreset.ORIGINAL, ColorPreset.POSITIVE, ColorPreset.NEGATIVE,
-                    ColorPreset.POWDER_BLUE, ColorPreset.MONO) +
-                    ColorPreset.entries.filter { it.name == settings.preset }).distinct()
+                // Keep the collapsed surface camera-like: a few high-frequency choices
+                // are visible, while the complete recipe catalog remains in the panel.
+                val quickPresets = buildList {
+                    add(ColorPreset.ORIGINAL)
+                    add(ColorPreset.POSITIVE)
+                    add(ColorPreset.NEGATIVE)
+                    ColorPreset.entries.firstOrNull { it.name == settings.preset }?.let { selected ->
+                        if (selected !in this) add(selected)
+                    }
+                }
                 quickPresets.forEach { preset ->
                     ControlButton(preset.displayName, settings.filmId == null && settings.preset == preset.name,
                         enabled = loaded, onClick = { model.setPreset(preset) })
@@ -1010,13 +1234,13 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
     Text("构图辅助 · 实验性", style = MaterialTheme.typography.titleSmall)
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text("本地模型建议", style = MaterialTheme.typography.bodyMedium)
+            Text("推荐构图框", style = MaterialTheme.typography.bodyMedium)
             Text(when (state.status) {
                 AssistStatus.OFF -> "关闭，不读取取景画面"
-                AssistStatus.UNINSTALLED -> "模型未安装"
+                AssistStatus.UNINSTALLED -> "画面分析可用，AI 模型未安装"
                 AssistStatus.PAUSED -> "后台已暂停"
                 AssistStatus.LOADING -> "加载本地模型…"
-                AssistStatus.READY -> state.statusText ?: "等待构图建议"
+                AssistStatus.READY -> state.statusText ?: "点取景器上的构图，分析当前画面"
                 AssistStatus.FAILED -> state.statusText ?: "本地推理失败"
             }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -1024,6 +1248,12 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
         Switch(settings.compositionEnabled, { model.setCompositionEnabled(it) },
             modifier = Modifier.semantics { contentDescription = "构图辅助开关" })
     }
+    ToggleRow("实时构图 · 自动更新建议", settings.compositionRealtime, model::setCompositionRealtime)
+    Text(compositionTimingLabel(state), style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+    if (state.status == AssistStatus.READY && settings.compositionRealtime) Text(
+        "画面分析约每秒更新 · AI 完成后至少间隔 ${formatInferenceTime(state.sampleIntervalMs)}，画面未变则复用",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1074,7 +1304,7 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
             TextButton(onClick = model.composition::prepareInstall, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
         }
     }
-    Text("构图建议只显示实时取景框，不会改变曝光或阻塞快门。模型仅在你安装并打开后运行。",
+    Text("点“构图”分析一次，也可开启实时。先显示画面分析建议，AI 比较候选后再择优；框仅供取景参考，照片不会自动裁切。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(bottom = 8.dp))
 }
@@ -1083,6 +1313,49 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024L -> "%.1f MB".format(bytes / (1024f * 1024f))
     bytes >= 1024L -> "%.0f KB".format(bytes / 1024f)
     else -> "$bytes B"
+}
+
+@Composable
+private fun compositionTimingLabel(state: CompositionUiState): String {
+    val started = state.inferenceStartedAtMs
+    var elapsedMs by remember(started) { mutableStateOf(0L) }
+    LaunchedEffect(started) {
+        if (started != null) while (true) {
+            elapsedMs = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(0L)
+            delay(500L)
+        }
+    }
+    val fast = state.fastAdviceMs?.let { "画面分析 ${formatInferenceTime(it)}" }
+    val source = when (state.adviceOrigin) {
+        AdviceOrigin.IMAGE_ANALYSIS -> "画面分析建议"
+        AdviceOrigin.MODEL_SELECTION -> "AI 选择"
+        null -> null
+    }
+    if (started != null) return listOfNotNull(source, fast, "AI 比较中 ${formatInferenceTime(elapsedMs)}").joinToString(" · ")
+    if (state.isRequestRunning) return if (source == null) "正在获取构图画面"
+        else listOfNotNull(source, fast, "准备 AI 比较").joinToString(" · ")
+    val duration = state.modelSelectionMs?.let(::formatInferenceTime)
+    val model = when (state.lastOutcome) {
+        CompositionOutcome.RETURNED -> duration?.let { "AI 比较 $it" }
+        CompositionOutcome.NO_RESULT -> "AI 未明确选择${duration?.let { " · $it" } ?: ""}"
+        CompositionOutcome.UNSTABLE_SELECTION -> "AI 比较不稳定${duration?.let { " · $it" } ?: ""}"
+        CompositionOutcome.TIMED_OUT -> "AI 比较超时${duration?.let { " · $it" } ?: ""}"
+        CompositionOutcome.SCENE_CHANGED -> "画面已变化，旧比较已忽略"
+        CompositionOutcome.FAILED -> "AI 暂不可用"
+        null -> null
+    }
+    if (source != null) return listOfNotNull(source, fast, model).joinToString(" · ")
+    return when (state.status) {
+        AssistStatus.OFF -> "点“构图”获取建议"
+        AssistStatus.PAUSED -> "构图辅助已暂停"
+        else -> model ?: "点“构图”分析当前画面"
+    }
+}
+
+private fun formatInferenceTime(milliseconds: Long): String = if (milliseconds >= 1_000L) {
+    "%.1f 秒".format(milliseconds / 1_000f)
+} else {
+    "$milliseconds ms"
 }
 
 @Composable
@@ -1142,3 +1415,66 @@ private fun CapabilitiesDialog(capabilities: CameraCapabilities?, error: String?
 
 private fun shutterLabel(timeNs: Long): String = if (timeNs < 1_000_000_000L)
     "1/${(1_000_000_000.0 / timeNs).roundToInt()} s" else "%.1f s".format(timeNs / 1_000_000_000.0)
+
+/** Normalized crop rectangle eased toward each incoming rule suggestion. */
+private data class SmoothCrop(val left: Float, val top: Float, val right: Float, val bottom: Float)
+
+/**
+ * Holds the four eased crop edges. The values are read inside the Canvas draw scope,
+ * so animation ticks trigger a redraw only, not recomposition of the camera screen.
+ */
+private class SmoothCropState {
+    // Order: left, top, right, bottom.
+    val edges = Array(4) { Animatable(0f) }
+    var ready by mutableStateOf(false)
+    var snappedOrigin: AdviceOrigin? = null
+
+    val crop: SmoothCrop?
+        get() = if (ready) {
+            SmoothCrop(edges[0].value, edges[1].value, edges[2].value, edges[3].value)
+        } else {
+            null
+        }
+}
+
+/**
+ * Rule advice refreshes several times per second; ease the rectangle so nearby crops
+ * glide instead of jumping. The first target, a rule/model handover (origin change),
+ * and recovery after the overlay was invalidated snap immediately — we never slide
+ * across a zoom/rotation/model change. Degenerate rectangles keep the previous frame.
+ */
+@Composable
+private fun rememberSmoothCrop(overlay: CompositionOverlay?): SmoothCropState {
+    val state = remember { SmoothCropState() }
+    LaunchedEffect(overlay) {
+        val current = overlay
+        if (current == null) {
+            // Zoom, rotation or model switch invalidated the guide; next guidance snaps.
+            state.ready = false
+            state.snappedOrigin = null
+            return@LaunchedEffect
+        }
+        val suggestion = current.suggestion
+        if (suggestion.right <= suggestion.left || suggestion.bottom <= suggestion.top) return@LaunchedEffect
+        val targets = floatArrayOf(suggestion.left, suggestion.top, suggestion.right, suggestion.bottom)
+        if (!state.ready || state.snappedOrigin != current.origin) {
+            state.edges.forEachIndexed { index, animatable -> animatable.snapTo(targets[index]) }
+            state.ready = true
+            state.snappedOrigin = current.origin
+        } else {
+            // Each new overlay cancels the previous tween mid-flight; animate from the
+            // current position so 250 ms cadence updates form one continuous glide.
+            coroutineScope {
+                state.edges.forEachIndexed { index, animatable ->
+                    launch {
+                        animatable.animateTo(
+                            targets[index],
+                            tween(durationMillis = 220, easing = FastOutSlowInEasing),
+                        )
+                    }
+                }
+            }
+        }
+    }
+    return state
+}
