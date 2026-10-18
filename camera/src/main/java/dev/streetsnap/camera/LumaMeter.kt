@@ -13,7 +13,7 @@ import androidx.camera.core.ImageProxy
  */
 class LumaMeter(
     val bins: Int = 48,
-    private val onHistogram: (IntArray) -> Unit,
+    private val onSample: (HistogramSample) -> Unit,
 ) {
     init { require(bins in 16..128) }
 
@@ -46,7 +46,7 @@ class LumaMeter(
             counts[(luma * bins / 256).coerceAtMost(bins - 1)]++
             i++
         }
-        onHistogram(counts)
+        onSample(HistogramSample(counts, ExposureStats.from(counts)))
     }
 
     private companion object { const val MIN_INTERVAL_MS = 200L }

@@ -132,6 +132,13 @@ Dazz Cam、OldRoll、NOMO（含 NOMO RAW）、Hipstamatic 四款代表性胶片�
 - 映射五条：夜+反差≥0.16→TRI-X 400（MONO_01）；黄昏→CLASSIC_NEGATIVE；昼+上半幅天空≥0.35→正片（暖/冷两种理由文案）；非夜+绿植≥0.30、天空<0.12、非暖→CLASSIC_CHROME；昼+饱和度≤0.10 且反差<0.13→粉末蓝；其余弃权不出卡。
 - 证据：映射与门闸为合成帧 JVM 单测（含昼夜/暖冷/黑白/预算/7 天窗口/弃权）；AVD 为 loaded-only——真实暖暗室内帧端到端触发「经典负片」卡、试用真实换色、还原/dismiss/跨会话 7 天压制/设置开关均按设计工作；模拟器虚拟场景站位移动由主机键鼠消费、adb 无法转向，「随不同站位色彩变化」的多场景证据只到单测级，审美正确性仍 not-verified，等独立人工标注照片集。
 
+## 6. 落地注记（T31 实现后）
+
+- 实现件：`camera/.../ExposureStats.kt`（48 bin 亮度直方图 → 顶 bin 251..255 / 底 bin 0..5 占比与 bin 中心加权均值的纯函数，`HistogramSample` 随帧携带）、`LumaMeter` 回调升级为 `HistogramSample`（同一份 200ms 节流、64px 点采样同时供给直方图 OSD 与曝光门闸，不开新相机流）、`composition/ExposureAdviser.kt`（三态门闸）、`composition/AdviceSessionBudget.kt`（影调建议与曝光提示共享：每前台会话影调≤2、合计≤3）、`CameraViewModel`（文案与 EV/EV 范围/手动模式门控、开关、会话重置）、HDR 钮下文字卡、拍摄设置「曝光提示」开关（默认开，随 v4 设置 JSON 持久化，旧档缺字段按开处理）。
+- 最终保守参数：高光占比 ≥0.04 判过曝、暗部 ≥0.15 判欠曝（暗部容忍度高于高光，呼应 Halide「勿因高光误报逼用户欠曝」）；同一问题连续 6 个 meter 帧（≈1.2s）才发卡，连续 3 个健康帧撤卡；同问题会话内只出一次；双端同时 clipping 判大光比，文案指向 HDR/避开强光（EV 救不了两端）；手动 ISO/快门模式不出单极 EV 建议（控件惰性），大光比卡仍出；EV 已在补偿范围端点时不出该方向建议；只建议、不自动改曝光；曝光卡无跨会话 dismiss 记忆、不参与「3 次 dismiss 关开关」。
+- 证据：统计纯函数 6 个 JVM 测（空直方图、单 bin 极限、4%/16%/80% 精确混合、尺寸无关、bin 24 均值≈0.51）、门闸 12 个测（6 帧确认/3 帧撤收/阈值边界/手动弃权/端点压制/会话单次/dismiss/切候选重置连计/共享预算 2+1 封顶与 reset）；`SettingsJsonTest` 补开关默认值与往返。
+- AVD 为 loaded-only：真实 VirtualScene 室内帧统计链路工作（n=3072、均值 0.40、暗部约 3%、亮窗被 AE 压在顶 bin 以下 hi=0），门闸据此正确保持沉默；但模拟器相机的 EV 补偿（−2…+2.5 全范围实测）与点按测光均不改变分析帧像素、且不支持手动曝光，无法用 adb 人工制造 clipping——阈值的端到端正例只到合成直方图单测级。卡渲染与交互经一次性强制注入验证（验证代码已移除）：卡位于 HDR 钮下、× 可点撤收且会话内不重现；开关关闭后 meter 回调静默而 OSD 直方图（独立开关）照常。**真机亮窗/夜景的阈值校准仍是 not-verified**，审美与曝光正确性的下一步证据不变：真机 + 独立人工标注照片集。
+
 ## 参考来源
 
 - VSCO 工程实践：[Suggesting Presets for Images: Building “For This Photo” at VSCO — TensorFlow Blog](https://blog.tensorflow.org/2019/06/vsco-suggesting-presets-for-images.html)；[Let VSCO find the perfect filter — App Store 故事](https://apps.apple.com/ge/story/id1483965840)

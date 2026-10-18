@@ -73,6 +73,8 @@ data class AppSettings(
     val whiteBalanceGreen: Int = 0,
     // Independent switch for the realtime look-suggestion card; on by default (T30).
     val lookAdviceEnabled: Boolean = true,
+    // Independent switch for clipped-highlight/shadow exposure hints; on by default (T31).
+    val exposureAdviceEnabled: Boolean = true,
     // look key → dismiss timestamp (epoch ms); adviser suppresses keys within a 7-day window.
     val lookDismissedAt: Map<String, Long> = emptyMap(),
     // Three consecutive dismisses flip lookAdviceEnabled off; trying/keeping a look resets it.
@@ -199,6 +201,7 @@ internal object SettingsJson {
         put("whiteBalanceAmber", settings.whiteBalanceAmber)
         put("whiteBalanceGreen", settings.whiteBalanceGreen)
         put("lookAdviceEnabled", settings.lookAdviceEnabled)
+        put("exposureAdviceEnabled", settings.exposureAdviceEnabled)
         put("lookDismissedAt", JSONObject().apply {
             settings.lookDismissedAt.forEach { (lookKey, at) -> put(lookKey, at) }
         })
@@ -256,6 +259,7 @@ internal object SettingsJson {
                 whiteBalanceAmber = json.optInt("whiteBalanceAmber", 0).coerceIn(-9, 9),
                 whiteBalanceGreen = json.optInt("whiteBalanceGreen", 0).coerceIn(-9, 9),
                 lookAdviceEnabled = json.optBoolean("lookAdviceEnabled", true),
+                exposureAdviceEnabled = json.optBoolean("exposureAdviceEnabled", true),
                 lookDismissedAt = json.optJSONObject("lookDismissedAt")?.let { dismissed ->
                     dismissed.keys().asSequence()
                         .mapNotNull { lookKey ->

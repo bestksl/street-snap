@@ -263,19 +263,23 @@ class SettingsJsonTest {
     @Test fun lookAdviceDefaultsOnAndDismissMemorySurvivesRoundTrip() {
         // Fresh installs get suggestions; legacy documents without the field default to on.
         assertTrue(AppSettings().lookAdviceEnabled)
+        assertTrue(AppSettings().exposureAdviceEnabled)
         assertEquals(0, AppSettings().lookAdviceDismissStreak)
         assertTrue(AppSettings().lookDismissedAt.isEmpty())
         val legacy = SettingsJson.decode("""{"version":4,"preset":"MONO"}""")
         assertTrue(legacy.lookAdviceEnabled)
+        assertTrue(legacy.exposureAdviceEnabled)
         val at = 1_700_000_000_000L
         val saved = AppSettings(
             lookAdviceEnabled = false,
+            exposureAdviceEnabled = false,
             lookAdviceDismissStreak = 2,
             lookDismissedAt = mapOf("POSITIVE" to at, "FILM:MONO_01" to at + 1L),
         )
         val loaded = SettingsJson.decode(SettingsJson.encode(saved))
         assertEquals(saved, loaded)
         assertFalse(loaded.lookAdviceEnabled)
+        assertFalse(loaded.exposureAdviceEnabled)
         assertEquals(2, loaded.lookAdviceDismissStreak)
         assertEquals(at, loaded.lookDismissedAt["POSITIVE"])
         // Bad streak values are clamped back into the valid 0..3 range.

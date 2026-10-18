@@ -28,7 +28,7 @@ class LookAdviserTest {
 
     private fun adviser(clockMs: Long = 1_000L, suppressMillis: Long = 5_000L): Pair<LookAdviser, () -> Long> {
         var clock = clockMs
-        return LookAdviser(stableFrames = 3, sessionBudget = 2, suppressMillis = suppressMillis,
+        return LookAdviser(stableFrames = 3, suppressMillis = suppressMillis,
             now = { clock }) to { clock }
     }
 

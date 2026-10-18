@@ -19,14 +19,13 @@ internal data class LookAdvice(val key: String, val target: LookTarget)
  */
 internal class LookAdviser(
     private val stableFrames: Int = DEFAULT_STABLE_FRAMES,
-    private val sessionBudget: Int = DEFAULT_SESSION_BUDGET,
     private val suppressMillis: Long = SUPPRESS_MILLIS,
     private val now: () -> Long = { System.currentTimeMillis() },
+    private val budget: AdviceSessionBudget = AdviceSessionBudget(),
 ) {
     private var candidateKey: String? = null
     private var candidateCount = 0
     private val shownKeys = mutableSetOf<String>()
-    private var adviceUsed = 0
     private var silenced = false
     private var visibleKey: String? = null
 
@@ -35,9 +34,9 @@ internal class LookAdviser(
         candidateKey = null
         candidateCount = 0
         shownKeys.clear()
-        adviceUsed = 0
         silenced = false
         visibleKey = null
+        budget.reset()
     }
 
     /** The user chose a look themselves (panel, badge tap); do not advise until resetSession(). */
@@ -69,7 +68,7 @@ internal class LookAdviser(
             return null
         }
         val suppressed = dismissedAt[target.key]?.let { ts -> now() - ts in 0..suppressMillis } == true
-        if (suppressed || target.key in shownKeys || adviceUsed >= sessionBudget) {
+        if (suppressed || target.key in shownKeys || !budget.canAcquire(isLook = true)) {
             resetStreak()
             return null
         }
@@ -82,7 +81,7 @@ internal class LookAdviser(
         if (candidateCount < stableFrames || visibleKey == target.key) return null
         visibleKey = target.key
         shownKeys += target.key
-        adviceUsed++
+        budget.acquire(isLook = true)
         return LookAdvice(target.key, target)
     }
 
@@ -100,8 +99,6 @@ internal class LookAdviser(
     companion object {
         /** Analysis frames arrive on a ~250 ms clock, so 8 frames ≈ 2 s of stable scene. */
         const val DEFAULT_STABLE_FRAMES = 8
-        /** At most two look nudges per foreground session (shared budget with exposure hints later). */
-        const val DEFAULT_SESSION_BUDGET = 2
         const val SUPPRESS_MILLIS = 7L * 24 * 60 * 60 * 1000
     }
 }

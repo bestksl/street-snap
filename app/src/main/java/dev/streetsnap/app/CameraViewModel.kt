@@ -6,6 +6,9 @@ import android.provider.OpenableColumns
 import androidx.camera.core.MeteringPoint
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.streetsnap.app.composition.AdviceSessionBudget
+import dev.streetsnap.app.composition.ExposureAdviser
+import dev.streetsnap.app.composition.ExposureIssue
 import dev.streetsnap.app.composition.LookAdviser
 import dev.streetsnap.app.composition.LookTarget
 import dev.streetsnap.app.edge.EdgeModelCatalog
@@ -44,15 +47,24 @@ data class LookAdviceCard(
     val trying: Boolean = false,
 )
 
+/** Exposure hint card. The action text (EV stop / HDR suggestion) is formatted here. */
+data class ExposureAdviceCard(
+    val message: String,
+)
+
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
     val camera = CameraController(application)
     val colors = ColorEngine()
     private val repository = SettingsRepository(application)
     private val saver = PhotoSaver(application)
     internal val composition = CompositionAssistant(application, viewModelScope)
-    private val lookAdviser = LookAdviser()
+    private val adviceBudget = AdviceSessionBudget()
+    private val lookAdviser = LookAdviser(budget = adviceBudget)
+    private val exposureAdviser = ExposureAdviser(budget = adviceBudget)
     private val _lookAdviceCard = MutableStateFlow<LookAdviceCard?>(null)
     val lookAdviceCard = _lookAdviceCard.asStateFlow()
+    private val _exposureAdviceCard = MutableStateFlow<ExposureAdviceCard?>(null)
+    val exposureAdviceCard = _exposureAdviceCard.asStateFlow()
     private var pendingLookTarget: LookTarget? = null
     private var trialLook: TrialLook? = null
     private data class TrialLook(val preset: String, val filmId: String?)
@@ -75,8 +87,33 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     val controlsRestored = _controlsRestored.asStateFlow()
     private val _histogram = MutableStateFlow<IntArray?>(null)
     val histogram = _histogram.asStateFlow()
-    /** Real luma histogram from analysis frames, sampled only while the OSD shows it. */
-    internal val lumaMeter = LumaMeter { bins -> _histogram.value = bins }
+    /** Real luma histogram from analysis frames; the same sample feeds the exposure adviser. */
+    internal val lumaMeter = LumaMeter { sample ->
+        _histogram.value = sample.counts
+        onMeterSample(sample.stats)
+    }
+
+    private fun onMeterSample(stats: dev.streetsnap.camera.ExposureStats) {
+        if (!_settingsLoaded.value || !foreground || !_settings.value.exposureAdviceEnabled) return
+        val capture = camera.state.value.settings
+        val caps = camera.state.value.capabilities
+        val step = caps?.exposureCompensationStepEv ?: 0.0
+        val advice = exposureAdviser.onFrame(
+            stats,
+            // EV compensation does nothing in manual mode; never suggest a control that is inert.
+            evAdjustable = capture.exposureMode != ExposureMode.MANUAL && step > 0.0,
+            canLowerEv = capture.exposureCompensationIndex > (caps?.exposureCompensationMin ?: 0),
+            canRaiseEv = capture.exposureCompensationIndex < (caps?.exposureCompensationMax ?: 0),
+        ) ?: return
+        val nextEv = (capture.exposureCompensationIndex + advice.issue.evDirection) * step
+        _exposureAdviceCard.value = ExposureAdviceCard(
+            when (advice.issue) {
+                ExposureIssue.WIDE_DYNAMIC_RANGE -> "明暗光比大，可开 HDR 或避开强光"
+                ExposureIssue.HIGHLIGHTS_CLIPPED -> "高光过亮，建议 EV %+.1f".format(nextEv)
+                ExposureIssue.SHADOWS_CLIPPED -> "暗部太黑，建议 EV %+.1f".format(nextEv)
+            },
+        )
+    }
     private val noticeChannel = Channel<CameraNotice>(Channel.UNLIMITED)
     val notices = noticeChannel.receiveAsFlow()
     private val processing = Mutex()
@@ -353,7 +390,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /** Independent switch in shooting settings. Re-enabling is a fresh grant: budgets reset. */
+    /** Independent switch in shooting settings. Re-enabling starts a fresh nudge session. */
     fun setLookAdviceEnabled(enabled: Boolean) {
         update { it.copy(
             lookAdviceEnabled = enabled,
@@ -365,6 +402,25 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             revertTrialLook()
             _lookAdviceCard.value = null
         }
+    }
+
+    /** Exposure hints have their own switch; turning them off also drops the visible card. */
+    fun setExposureAdviceEnabled(enabled: Boolean) {
+        update { it.copy(exposureAdviceEnabled = enabled) }
+        if (!enabled) {
+            exposureAdviser.resetSession()
+            _exposureAdviceCard.value = null
+        }
+    }
+
+    /** × on an exposure card: hidden for the rest of this foreground session, no persistence. */
+    fun dismissExposureAdvice() {
+        val issue = exposureAdviser.visibleIssue ?: run {
+            _exposureAdviceCard.value = null
+            return
+        }
+        exposureAdviser.dismiss(issue)
+        _exposureAdviceCard.value = null
     }
 
     /** Apply the suggested look as a WYSIWYG preview; the previous look is kept for revert. */
@@ -442,13 +498,17 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         foreground = active
         if (active) {
             // New foreground session: per-session budgets and the manual-pick silence reset.
+            adviceBudget.reset()
             lookAdviser.resetSession()
+            exposureAdviser.resetSession()
             trialLook = null
             _lookAdviceCard.value = null
+            _exposureAdviceCard.value = null
         } else {
             // A trial is a viewfinder preview, not a committed choice; undo it on backgrounding.
             revertTrialLook()
             _lookAdviceCard.value = null
+            _exposureAdviceCard.value = null
         }
         if (_settingsLoaded.value) {
             syncComposition()
@@ -461,10 +521,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         focalLengthMm = _settings.value.focalLength.takeIf { it > 0 } ?: 28,
         lookAdvice = _settings.value.lookAdviceEnabled)
 
-    /** The analysis stream is bound only while the histogram OSD is wanted. */
+    /** The analysis stream is bound for the histogram OSD or realtime exposure hints. */
     private fun syncMeter() {
-        val wanted = _settingsLoaded.value && foreground &&
-            _settings.value.viewfinderOsd != ViewfinderOsd.OFF
+        val wanted = _settingsLoaded.value && foreground && (
+            _settings.value.viewfinderOsd != ViewfinderOsd.OFF ||
+                _settings.value.exposureAdviceEnabled)
         lumaMeter.active = wanted
         if (!wanted) _histogram.value = null
     }

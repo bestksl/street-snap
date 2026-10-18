@@ -387,8 +387,9 @@ private fun Viewfinder(
     val streaming by model.previewStreaming.collectAsStateWithLifecycle()
     val histogram by model.histogram.collectAsStateWithLifecycle()
     val lookAdviceCard by model.lookAdviceCard.collectAsStateWithLifecycle()
+    val exposureAdviceCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
     val osdMode = settings.viewfinderOsd
-    val meteringWanted = osdMode != ViewfinderOsd.OFF
+    val meteringWanted = osdMode != ViewfinderOsd.OFF || settings.exposureAdviceEnabled
     val hasSize = width > 0 && height > 0
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     val manualFocus = state.settings.focusDistanceDiopters != null
@@ -591,6 +592,11 @@ private fun Viewfinder(
             // OSD card is showing (OFF: beside HDR, HISTOGRAM: under it, PARAMS: lowest).
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
+            // Clipped-highlight/shadow hint under the HDR button it may point at; text-only.
+            exposureAdviceCard?.let { card ->
+                ExposureAdviceCardView(card, model::dismissExposureAdvice,
+                    Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 100.dp))
+            }
             val badgeTop by animateDpAsState(
                 when (osdMode) {
                     ViewfinderOsd.HISTOGRAM -> 106.dp
@@ -798,6 +804,25 @@ private fun LookAdviceAction(
         modifier = Modifier.heightIn(min = 36.dp).semantics { if (description != null) contentDescription = description }) {
         Text(label, fontSize = 12.sp,
             color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+    }
+}
+
+/**
+ * Exposure hint card under the HDR button. Suggest-only: no button changes exposure,
+ * the × dismisses for the rest of the session (T31).
+ */
+@Composable
+private fun ExposureAdviceCardView(card: ExposureAdviceCard, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .widthIn(max = 210.dp)
+            .background(Color.Black.copy(alpha = .72f), RoundedCornerShape(8.dp))
+            .padding(start = 10.dp, end = 2.dp, top = 7.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(card.message, Modifier.weight(1f).padding(end = 4.dp),
+            color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        LookAdviceAction("×", onDismiss, description = "忽略曝光提示")
     }
 }
 
@@ -1570,6 +1595,9 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     ToggleRow("水平仪", settings.level) { model.toggleLevel() }
     ToggleRow("影调建议", settings.lookAdviceEnabled) { model.setLookAdviceEnabled(it) }
     Text("根据取景画面的光线与色彩，偶尔推荐合适的胶片或影调；只建议，不会自动更改。点取景器卡片可试用，也能一键还原。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    ToggleRow("曝光提示", settings.exposureAdviceEnabled) { model.setExposureAdviceEnabled(it) }
+    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示 HDR；只建议，不会自动改曝光。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)
