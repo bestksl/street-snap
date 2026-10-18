@@ -640,8 +640,20 @@ private fun Viewfinder(
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
                     .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)) {
-                    compositionOverlay?.suggestion?.modelText?.let {
-                        Text(it, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    compositionOverlay?.suggestion?.let { s ->
+                        // T33: the executable move is the headline; terminology ("三分构图 · …")
+                        // stays as the supporting line. Styles whose copy is already a move
+                        // carry actionText = null and keep their single-line rendering.
+                        if (s.actionText != null) {
+                            Text(s.actionText, color = Color.White, fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.modelText, Modifier.padding(top = 2.dp),
+                                color = Color.White.copy(alpha = .78f), fontSize = 11.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        } else {
+                            Text(s.modelText, color = Color.White, fontSize = 12.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                     compositionOverlay?.easterEgg?.let {
                         Text(it, color = Color(0xFFE2FF79), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)

@@ -209,6 +209,35 @@ class FastCompositionAdvisorTest {
         assertFalse(FastCompositionAdvisor.suggest(96, 64, uniform).subjectLooksDistant)
     }
 
+    // --- T33: executable move sentences from crop geometry ---
+
+    @Test
+    fun actionSentencesFollowGeometryAndStyleContract() {
+        val builtIn = setOf(CompositionStyle.EDGE_CUT, CompositionStyle.TOO_TIGHT,
+            CompositionStyle.HORIZON_SPLIT, CompositionStyle.CONSERVATIVE)
+        val verbs = listOf("向左", "向右", "抬高", "降低", "靠近")
+        for (builder in listOf(::horizonBands, ::terracedBands, ::diagonalBands, ::dotGrid)) {
+            val candidates = FastCompositionAdvisor.suggest(96, 64, builder()).candidates
+            for (candidate in candidates) {
+                val fullFrame = candidate.crop.right - candidate.crop.left >= 0.999f &&
+                    candidate.crop.left <= 0.001f && candidate.crop.top <= 0.001f
+                if (candidate.style in builtIn || fullFrame) {
+                    assertTrue("${builder.name} ${candidate.style} must carry no action",
+                        candidate.action == null)
+                } else {
+                    val action = candidate.action
+                    assertTrue("${builder.name} ${candidate.style} needs an action, got null", action != null)
+                    assertTrue("action must be a move, was: $action", verbs.any { action!!.contains(it) })
+                    assertTrue("action must not duplicate terminology: ${candidate.reason}",
+                        action != candidate.reason)
+                }
+            }
+        }
+        // Featureless frames stay conservative and never invent moves.
+        assertTrue(FastCompositionAdvisor.suggest(96, 64, IntArray(96 * 64) { 0xFF707070.toInt() })
+            .candidates.all { it.action == null })
+    }
+
     // --- T32: third wave of composition language ---
 
     @Test

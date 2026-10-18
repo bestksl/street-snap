@@ -17,6 +17,8 @@ internal data class CompositionCandidate(
     val supportsModelComparison: Boolean = true,
     /** Which composition language the suggestion copy uses. */
     val style: CompositionStyle = CompositionStyle.GENERIC,
+    /** Executable framing move derived from crop geometry (T33); null when no move is warranted. */
+    val action: String? = null,
 )
 
 /** Crop proposals plus scene readings the UI layer may use (e.g. a rare focal-length nudge). */
@@ -121,7 +123,10 @@ internal object FastCompositionAdvisor {
         val enriched = enrichWithStyleSeeds(selected, ranked, features)
         val subjectLooksDistant = detectDistantSubject(w, signal, selected.first())
         val styled = assignStyles(enriched, features).map { (crop, style) ->
-            CompositionCandidate(crop.rectangle(), crop.score.toFloat(), describe(style, crop, features), true, style)
+            val move = CompositionActions.plan(
+                crop.rectangle(), style, crop.u.toFloat(), crop.v.toFloat())?.sentence
+            CompositionCandidate(crop.rectangle(), crop.score.toFloat(),
+                describe(style, crop, features), true, style, move)
         }
         return FastCompositionResult(styled, subjectLooksDistant)
     }

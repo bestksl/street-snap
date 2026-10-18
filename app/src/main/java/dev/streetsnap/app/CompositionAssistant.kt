@@ -84,6 +84,7 @@ internal fun CompositionOverlay.carriesSameGuidance(
     newEasterEgg: String?,
 ): Boolean = newEasterEgg == null && easterEgg == null && this.origin == origin &&
     suggestion.modelText == candidate.reason &&
+    suggestion.actionText == candidate.action &&
     suggestion.left == candidate.crop.left && suggestion.top == candidate.crop.top &&
     suggestion.right == candidate.crop.right && suggestion.bottom == candidate.crop.bottom
 private data class CompletedRanking(val first: CropRanking?, val validation: CropRanking?)
@@ -211,7 +212,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
             return
         }
         val answer = CompositionOverlay(
-            CompositionSuggestion(crop.left, crop.top, crop.right, crop.bottom, candidate.reason),
+            CompositionSuggestion(crop.left, crop.top, crop.right, crop.bottom,
+                candidate.reason, candidate.action),
             now + 30_000L,
             origin,
             egg,

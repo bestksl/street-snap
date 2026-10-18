@@ -75,6 +75,11 @@ data class CompositionSuggestion(
     val right: Float,
     val bottom: Float,
     val modelText: String,
+    /**
+     * Rule-layer executable move (T33), shown above the terminology line. Always null for
+     * model-produced suggestions: [parse] never sets it, so untrusted model text cannot.
+     */
+    val actionText: String? = null,
 ) {
     companion object {
         // Model text is untrusted data. Accept one bounded numeric rectangle, never instructions.
