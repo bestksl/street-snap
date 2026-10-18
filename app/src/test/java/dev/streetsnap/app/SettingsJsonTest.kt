@@ -1,5 +1,7 @@
 package dev.streetsnap.app
 
+import dev.streetsnap.app.edge.EdgeModelCatalog
+import dev.streetsnap.app.edge.EdgeModelKind
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
 import org.json.JSONObject
@@ -210,5 +212,20 @@ class SettingsJsonTest {
         val encoded = SettingsJson.decode(SettingsJson.encode(AppSettings(mascotCamera = "UNKNOWN", captureOrientation = "UNKNOWN")))
         assertEquals("RICOH_GR", encoded.mascotCamera)
         assertEquals("AUTO", encoded.captureOrientation)
+    }
+
+    @Test fun freshInstallSelectsTheRecommendedD1RankerAndUnknownIdsFallBack() {
+        assertEquals("d1-omni-600m", EdgeModelCatalog.DEFAULT_MODEL_ID)
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)
+        assertEquals(EdgeModelKind.D1_OMNI_CHOICE,
+            EdgeModelCatalog.find(AppSettings().compositionModel)!!.kind)
+        // A document without the field (upgrades) and one with a removed/unknown id both recover to the default.
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+            SettingsJson.decode("""{"version":4,"preset":"MONO"}""").compositionModel)
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+            SettingsJson.decode("""{"version":4,"compositionModel":"removed-model"}""").compositionModel)
+        // An explicit, still-shipped selection is preserved rather than silently migrated.
+        assertEquals("smolvlm-256m",
+            SettingsJson.decode("""{"version":4,"compositionModel":"smolvlm-256m"}""").compositionModel)
     }
 }

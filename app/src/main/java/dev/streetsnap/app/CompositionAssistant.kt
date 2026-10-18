@@ -45,7 +45,7 @@ internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAI
 internal enum class CompositionOutcome { RETURNED, NO_RESULT, UNSTABLE_SELECTION, TIMED_OUT, SCENE_CHANGED, FAILED }
 internal enum class AdviceOrigin { IMAGE_ANALYSIS, MODEL_SELECTION }
 internal data class CompositionUiState(
-    val modelId: String = "smolvlm-256m",
+    val modelId: String = EdgeModelCatalog.DEFAULT_MODEL_ID,
     val install: ModelInstallStatus = ModelInstallStatus.CHECKING,
     val bytes: Long? = null,
     val downloadedBytes: Long = 0,
@@ -128,7 +128,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     fun configure(id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false, focalLengthMm: Int = 28) {
         if (closed) return
         this.focalLengthMm = focalLengthMm.takeIf { it > 0 } ?: 28
-        val next = Configuration(EdgeModelCatalog.find(id)?.id ?: "smolvlm-256m", enabled, foreground, realtime)
+        val next = Configuration(EdgeModelCatalog.find(id)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID, enabled, foreground, realtime)
         if (configuration == next) return
         val changedModel = configuration?.id != next.id
         configuration = next

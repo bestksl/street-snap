@@ -26,6 +26,9 @@ data class EdgeModelEntry(
 }
 
 object EdgeModelCatalog {
+    /** The ranker a fresh install selects and unknown/legacy ids fall back to. */
+    const val DEFAULT_MODEL_ID = "d1-omni-600m"
+
     val models = listOf(
         EdgeModelEntry(
             "smolvlm-256m", "SmolVLM 256M", "HuggingFaceTB/SmolVLM-256M-Instruct",

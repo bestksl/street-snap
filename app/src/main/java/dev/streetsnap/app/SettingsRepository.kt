@@ -56,7 +56,7 @@ data class AppSettings(
     val captureOrientation: String = CameraPreferences.DEFAULT_ORIENTATION,
     val compositionEnabled: Boolean = false,
     val compositionRealtime: Boolean = false,
-    val compositionModel: String = "smolvlm-256m",
+    val compositionModel: String = EdgeModelCatalog.DEFAULT_MODEL_ID,
     val looks: Map<String, LookSettings> = emptyMap(),
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
@@ -131,7 +131,7 @@ internal object SettingsJson {
         put("captureOrientation", CameraPreferences.orientation(settings.captureOrientation))
         put("compositionEnabled", settings.compositionEnabled)
         put("compositionRealtime", settings.compositionRealtime)
-        put("compositionModel", EdgeModelCatalog.find(settings.compositionModel)?.id ?: "smolvlm-256m")
+        put("compositionModel", EdgeModelCatalog.find(settings.compositionModel)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID)
         put("lutName", settings.lutName ?: JSONObject.NULL)
         put("looks", JSONObject().apply {
             settings.looks.forEach { (preset, look) ->
@@ -198,7 +198,7 @@ internal object SettingsJson {
                 captureOrientation = CameraPreferences.orientation(json.optString("captureOrientation")),
                 compositionEnabled = json.optBoolean("compositionEnabled", false),
                 compositionRealtime = json.optBoolean("compositionRealtime", false),
-                compositionModel = EdgeModelCatalog.find(json.optString("compositionModel"))?.id ?: "smolvlm-256m",
+                compositionModel = EdgeModelCatalog.find(json.optString("compositionModel"))?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID,
                 looks = looks,
                 lutName = if (json.isNull("lutName")) null else json.optString("lutName").takeIf(String::isNotBlank)?.take(120),
                 hdfEnabled = json.optBoolean("hdfEnabled", false),
