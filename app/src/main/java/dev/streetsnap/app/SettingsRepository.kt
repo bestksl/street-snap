@@ -71,6 +71,12 @@ data class AppSettings(
     val whiteBalance: String = "AUTO",
     val whiteBalanceAmber: Int = 0,
     val whiteBalanceGreen: Int = 0,
+    // Independent switch for the realtime look-suggestion card; on by default (T30).
+    val lookAdviceEnabled: Boolean = true,
+    // look key → dismiss timestamp (epoch ms); adviser suppresses keys within a 7-day window.
+    val lookDismissedAt: Map<String, Long> = emptyMap(),
+    // Three consecutive dismisses flip lookAdviceEnabled off; trying/keeping a look resets it.
+    val lookAdviceDismissStreak: Int = 0,
 ) {
     val activeLookKey: String get() = FilmRegistry.find(filmId)?.let { "FILM:${it.id}" } ?: preset
     val activeLook: LookSettings get() = looks[activeLookKey]
@@ -192,6 +198,11 @@ internal object SettingsJson {
         put("whiteBalance", settings.whiteBalance)
         put("whiteBalanceAmber", settings.whiteBalanceAmber)
         put("whiteBalanceGreen", settings.whiteBalanceGreen)
+        put("lookAdviceEnabled", settings.lookAdviceEnabled)
+        put("lookDismissedAt", JSONObject().apply {
+            settings.lookDismissedAt.forEach { (lookKey, at) -> put(lookKey, at) }
+        })
+        put("lookAdviceDismissStreak", settings.lookAdviceDismissStreak)
     }.toString()
 
     fun decode(value: String?): AppSettings {
@@ -244,6 +255,16 @@ internal object SettingsJson {
                     .takeIf { name -> WhiteBalanceMode.entries.any { it.name == name } } ?: "AUTO",
                 whiteBalanceAmber = json.optInt("whiteBalanceAmber", 0).coerceIn(-9, 9),
                 whiteBalanceGreen = json.optInt("whiteBalanceGreen", 0).coerceIn(-9, 9),
+                lookAdviceEnabled = json.optBoolean("lookAdviceEnabled", true),
+                lookDismissedAt = json.optJSONObject("lookDismissedAt")?.let { dismissed ->
+                    dismissed.keys().asSequence()
+                        .mapNotNull { lookKey ->
+                            val at = dismissed.optLong(lookKey, 0L)
+                            lookKey.takeIf { it.length <= 64 }?.let { key -> if (at > 0L) key to at else null }
+                        }
+                        .toMap()
+                } ?: emptyMap(),
+                lookAdviceDismissStreak = json.optInt("lookAdviceDismissStreak", 0).coerceIn(0, 3),
             )
         }.getOrDefault(AppSettings())
     }

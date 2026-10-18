@@ -6,6 +6,8 @@ import android.provider.OpenableColumns
 import androidx.camera.core.MeteringPoint
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.streetsnap.app.composition.LookAdviser
+import dev.streetsnap.app.composition.LookTarget
 import dev.streetsnap.app.edge.EdgeModelCatalog
 import dev.streetsnap.camera.CameraController
 import dev.streetsnap.camera.ExposureMode
@@ -34,12 +36,26 @@ import kotlinx.coroutines.withContext
 
 data class CameraNotice(val text: String)
 
+/** Realtime look-suggestion card. [trying] = the suggested look is applied as a preview. */
+data class LookAdviceCard(
+    val key: String,
+    val label: String,
+    val reason: String,
+    val trying: Boolean = false,
+)
+
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
     val camera = CameraController(application)
     val colors = ColorEngine()
     private val repository = SettingsRepository(application)
     private val saver = PhotoSaver(application)
     internal val composition = CompositionAssistant(application, viewModelScope)
+    private val lookAdviser = LookAdviser()
+    private val _lookAdviceCard = MutableStateFlow<LookAdviceCard?>(null)
+    val lookAdviceCard = _lookAdviceCard.asStateFlow()
+    private var pendingLookTarget: LookTarget? = null
+    private var trialLook: TrialLook? = null
+    private data class TrialLook(val preset: String, val filmId: String?)
     private var foreground = false
     private val _settings = MutableStateFlow(AppSettings())
     val settings = _settings.asStateFlow()
@@ -90,6 +106,29 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _settingsLoaded.value = true
                 syncComposition()
                 syncMeter()
+            }
+        }
+    }
+
+    init {
+        composition.sceneChangeListener = {
+            // Same scene-change contract as composition advice: pending streak and card die
+            // with the old scene; session history survives so the same card cannot bounce back.
+            lookAdviser.onSceneChanged()
+            if (trialLook == null) _lookAdviceCard.value = null
+        }
+        viewModelScope.launch {
+            composition.sceneReading.collect { reading ->
+                if (!_settingsLoaded.value) return@collect
+                val settings = _settings.value
+                if (!settings.lookAdviceEnabled || !foreground) return@collect
+                val advice = lookAdviser.onFrame(reading, settings.activeLookKey, settings.lookDismissedAt)
+                if (advice != null) {
+                    pendingLookTarget = advice.target
+                    if (trialLook == null) {
+                        _lookAdviceCard.value = LookAdviceCard(advice.key, advice.target.label, advice.target.reason)
+                    }
+                }
             }
         }
     }
@@ -277,16 +316,111 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
             notify("请先导入 .cube LUT")
             return
         }
+        applyPreset(preset)
+        onUserPickedLook()
+    }
+
+    private fun applyPreset(preset: ColorPreset) {
         update { it.copy(preset = preset.name, filmId = null) }
         applyColor()
     }
 
     fun setFilm(id: String?) {
+        applyFilm(id)
+        onUserPickedLook()
+    }
+
+    private fun applyFilm(id: String?) {
         val profile = FilmRegistry.find(id)
         update {
             if (profile == null) it.copy(filmId = null)
             else it.copy(filmId = profile.id)
         }
+        applyColor()
+    }
+
+    /**
+     * Manual look choices silence realtime suggestions for the rest of the foreground session
+     * (Fujifilm rule: picking a film simulation by hand ends AUTO), and clear any active trial.
+     */
+    private fun onUserPickedLook() {
+        val wasTrying = trialLook != null
+        trialLook = null
+        _lookAdviceCard.value = null
+        lookAdviser.onUserPickedLook()
+        if (wasTrying || _settings.value.lookAdviceDismissStreak != 0) {
+            update { it.copy(lookAdviceDismissStreak = 0) }
+        }
+    }
+
+    /** Independent switch in shooting settings. Re-enabling is a fresh grant: budgets reset. */
+    fun setLookAdviceEnabled(enabled: Boolean) {
+        update { it.copy(
+            lookAdviceEnabled = enabled,
+            lookAdviceDismissStreak = if (enabled) 0 else it.lookAdviceDismissStreak,
+        ) }
+        if (enabled) {
+            lookAdviser.resetSession()
+        } else {
+            revertTrialLook()
+            _lookAdviceCard.value = null
+        }
+    }
+
+    /** Apply the suggested look as a WYSIWYG preview; the previous look is kept for revert. */
+    fun trySuggestedLook() {
+        val target = pendingLookTarget ?: return
+        val card = _lookAdviceCard.value ?: return
+        if (trialLook != null || card.trying || card.key != target.key) return
+        val current = _settings.value
+        trialLook = TrialLook(current.preset, current.filmId)
+        if (target.filmId != null) applyFilm(target.filmId) else applyPreset(target.preset)
+        lookAdviser.markConsumed(target.key)
+        update { it.copy(lookAdviceDismissStreak = 0) }
+        _lookAdviceCard.value = card.copy(trying = true)
+    }
+
+    /** Keep the trialled look: it becomes the user's own choice, so suggestions fall silent. */
+    fun keepSuggestedLook() {
+        if (trialLook == null) return
+        trialLook = null
+        lookAdviser.onUserPickedLook()
+        update { it.copy(lookAdviceDismissStreak = 0) }
+        _lookAdviceCard.value = null
+    }
+
+    /** Undo the trial and restore the look the user had before. */
+    fun revertSuggestedLook() {
+        revertTrialLook()
+        _lookAdviceCard.value = null
+    }
+
+    /** × on the card: remember the key for 7 days and count a consecutive-dismiss streak. */
+    fun dismissLookAdvice() {
+        val card = _lookAdviceCard.value ?: return
+        revertTrialLook()
+        lookAdviser.markConsumed(card.key)
+        var turnedOff = false
+        update { settings ->
+            val streak = settings.lookAdviceDismissStreak + 1
+            turnedOff = streak >= DISMISS_STREAK_AUTO_OFF
+            settings.copy(
+                lookDismissedAt = settings.lookDismissedAt + (card.key to System.currentTimeMillis()),
+                lookAdviceDismissStreak = if (turnedOff) 0 else streak,
+                lookAdviceEnabled = if (turnedOff) false else settings.lookAdviceEnabled,
+            )
+        }
+        _lookAdviceCard.value = null
+        if (turnedOff) {
+            lookAdviser.resetSession()
+            notify("已连续忽略 $DISMISS_STREAK_AUTO_OFF 次，影调建议已关闭，可在拍摄设置中重新开启")
+        }
+    }
+
+    private fun revertTrialLook() {
+        val trial = trialLook ?: return
+        trialLook = null
+        update { it.copy(preset = trial.preset, filmId = trial.filmId) }
         applyColor()
     }
 
@@ -306,6 +440,16 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun onForegroundChanged(active: Boolean) {
         foreground = active
+        if (active) {
+            // New foreground session: per-session budgets and the manual-pick silence reset.
+            lookAdviser.resetSession()
+            trialLook = null
+            _lookAdviceCard.value = null
+        } else {
+            // A trial is a viewfinder preview, not a committed choice; undo it on backgrounding.
+            revertTrialLook()
+            _lookAdviceCard.value = null
+        }
         if (_settingsLoaded.value) {
             syncComposition()
             syncMeter()
@@ -314,7 +458,8 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private fun syncComposition() = composition.configure(
         _settings.value.compositionModel, _settings.value.compositionEnabled, foreground,
         realtime = _settings.value.compositionRealtime,
-        focalLengthMm = _settings.value.focalLength.takeIf { it > 0 } ?: 28)
+        focalLengthMm = _settings.value.focalLength.takeIf { it > 0 } ?: 28,
+        lookAdvice = _settings.value.lookAdviceEnabled)
 
     /** The analysis stream is bound only while the histogram OSD is wanted. */
     private fun syncMeter() {
@@ -378,6 +523,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 colors.setCustomLut(lut)
                 update { it.copy(preset = ColorPreset.CUSTOM.name, filmId = null, lutName = result.second.take(120)) }
                 applyColor()
+                onUserPickedLook()
                 notify("已导入 ${result.second}")
             } catch (error: Exception) {
                 if (error is CancellationException) throw error
@@ -436,5 +582,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         camera.close()
         colors.close()
         noticeChannel.close()
+    }
+
+    companion object {
+        /** Three consecutive × taps switch the suggestion feature off until re-enabled in settings. */
+        const val DISMISS_STREAK_AUTO_OFF = 3
     }
 }

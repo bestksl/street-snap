@@ -125,6 +125,13 @@ Dazz Cam、OldRoll、NOMO（含 NOMO RAW）、Hipstamatic 四款代表性胶片�
 - mobileos.it 为 SEO 聚合源，仅用于「实时评分/框变绿」趋势旁证；「对齐变绿」的一手先例是 ProCamera 3D Tiltmeter 与 Halide。
 - 本文回答的是「怎么建议才不讨厌、建议怎么才做得出来」，不回答「推荐的影调对不对」——后者唯一的下一步证据仍是独立人工标注照片集。
 
+## 5. 落地注记（T30 实现后）
+
+- 实现件：`composition/LookRecommendations.kt`（SceneReading→LookTarget 纯映射）、`composition/LookAdviser.kt`（门闸状态机）、`CompositionAssistant` look-only 分析会话（构图开关关闭时，影调建议仍以同一 250ms/384px 帧源驱动 SceneReadings，不跑 FastCompositionAdvisor、不绑模型）、`CameraViewModel`（试用/保留/还原/忽略/开关）、取景器胶片徽章下建议卡、拍摄设置「影调建议」开关。
+- 最终保守参数：稳定 8 帧（≈2s，分析帧 250ms 时钟）；每前台会话最多 2 条；同 key 会话内不重提；dismiss 压制 7 天；连续 dismiss 累计 3 次自动关总开关（试用/保留/手动换影调清零计数，恢复入口在拍摄设置）；手动选影调或胶片后本会话噤声；试用是可一键还原的预览，后台化自动还原。
+- 映射五条：夜+反差≥0.16→TRI-X 400（MONO_01）；黄昏→CLASSIC_NEGATIVE；昼+上半幅天空≥0.35→正片（暖/冷两种理由文案）；非夜+绿植≥0.30、天空<0.12、非暖→CLASSIC_CHROME；昼+饱和度≤0.10 且反差<0.13→粉末蓝；其余弃权不出卡。
+- 证据：映射与门闸为合成帧 JVM 单测（含昼夜/暖冷/黑白/预算/7 天窗口/弃权）；AVD 为 loaded-only——真实暖暗室内帧端到端触发「经典负片」卡、试用真实换色、还原/dismiss/跨会话 7 天压制/设置开关均按设计工作；模拟器虚拟场景站位移动由主机键鼠消费、adb 无法转向，「随不同站位色彩变化」的多场景证据只到单测级，审美正确性仍 not-verified，等独立人工标注照片集。
+
 ## 参考来源
 
 - VSCO 工程实践：[Suggesting Presets for Images: Building “For This Photo” at VSCO — TensorFlow Blog](https://blog.tensorflow.org/2019/06/vsco-suggesting-presets-for-images.html)；[Let VSCO find the perfect filter — App Store 故事](https://apps.apple.com/ge/story/id1483965840)

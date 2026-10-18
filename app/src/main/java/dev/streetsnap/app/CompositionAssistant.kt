@@ -90,7 +90,14 @@ private data class CompletedRanking(val first: CropRanking?, val validation: Cro
 
 /** Optional inference has its own lifetime and never takes the camera's controls or shutter locks. */
 internal class CompositionAssistant(context: Context, private val scope: CoroutineScope) : AutoCloseable {
-    private data class Configuration(val id: String, val enabled: Boolean, val foreground: Boolean, val realtime: Boolean)
+    private data class Configuration(
+        val id: String, val enabled: Boolean, val foreground: Boolean, val realtime: Boolean,
+        /** Look advice needs the cheap rule-analysis frames even while composition itself is off. */
+        val lookAdvice: Boolean,
+    )
+
+    /** Fired on Main when the frame source's scene signature changes; look advice uses it to drop pending cards. */
+    @Volatile var sceneChangeListener: (() -> Unit)? = null
 
     /** Focal length changes must not restart the camera session; the egg reads it live. */
     @Volatile private var focalLengthMm: Int = 28
@@ -130,10 +137,16 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         }
     }
 
-    fun configure(id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false, focalLengthMm: Int = 28) {
+    fun configure(
+        id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false,
+        focalLengthMm: Int = 28, lookAdvice: Boolean = false,
+    ) {
         if (closed) return
         this.focalLengthMm = focalLengthMm.takeIf { it > 0 } ?: 28
-        val next = Configuration(EdgeModelCatalog.find(id)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID, enabled, foreground, realtime)
+        val next = Configuration(
+            EdgeModelCatalog.find(id)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID,
+            enabled, foreground, realtime, lookAdvice,
+        )
         if (configuration == next) return
         val changedModel = configuration?.id != next.id
         configuration = next
@@ -463,17 +476,24 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
 
                 try {
                     val model = requireNotNull(EdgeModelCatalog.find(config.id))
-                    if (config.enabled && config.foreground) {
+                    val analysisWanted = config.foreground && (config.enabled || config.lookAdvice)
+                    if (analysisWanted) {
                         // Rule advice runs in single-digit milliseconds, so the cadence is
                         // set by the frame clocks, not by compute: ~4 advice refreshes/s.
                         // Model ranking stays on its own 3-15 s cadence gate below and is
-                        // unaffected by this interval.
+                        // unaffected by this interval. Look advice keeps the same cheap
+                        // frames flowing while composition itself is switched off.
                         frames = CompositionFrameSource(minimumIntervalMs = 250L, maximumEdge = 384,
                             sceneIntervalMs = 250L,
-                            shouldCaptureFrame = { isCurrentSession() && (manualRequestPending || config.realtime) },
+                            shouldCaptureFrame = {
+                                isCurrentSession() && (manualRequestPending || config.realtime || config.lookAdvice)
+                            },
                             onSceneChanged = {
                                 scope.launch(Dispatchers.Main.immediate) {
-                                    if (isCurrentSession()) clearVisibleAdvice()
+                                    if (isCurrentSession()) {
+                                        clearVisibleAdvice()
+                                        sceneChangeListener?.invoke()
+                                    }
                                 }
                             }, onError = { error ->
                                 scope.launch(Dispatchers.Main.immediate) {
@@ -485,26 +505,36 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                 }
                             }, onFrame = frameCallback@{ frame ->
                                 val ticket = resultGate.ticket(frame.receivedAtElapsedRealtimeMs) ?: return@frameCallback
-                                val manual = withContext(Dispatchers.Main.immediate) {
+                                // First member = manual composition request; second = look-only
+                                // frame (readings only: no composition overlay, no model ranking).
+                                val frameMode = withContext(Dispatchers.Main.immediate) {
                                     if (!isCurrentSession() || !frame.isCurrent ||
                                         !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
                                     if (visibleScene?.invoke() == false) clearVisibleAdvice()
                                     val requested = manualRequestPending
-                                    if (!requested && !config.realtime) return@withContext null
+                                    if (!requested && !config.realtime && !config.lookAdvice) return@withContext null
                                     if (requested) {
                                         manualRequestPending = false
                                         requestFrameTimeout?.cancel()
                                     }
-                                    requested
+                                    requested to (!requested && !config.realtime)
                                 } ?: return@frameCallback
+                                val manual = frameMode.first
+                                val lookOnly = frameMode.second
                                 try {
                                     val started = SystemClock.elapsedRealtime()
                                     val bitmap = frame.bitmap
                                     val pixels = IntArray(bitmap.width * bitmap.height)
                                     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-                                    val advice = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
-                                    // Same frame, same pixels: a single extra <=96px statistics pass.
+                                    // Same frame, same pixels: a single <=96px statistics pass.
                                     val reading = SceneReadings.read(bitmap.width, bitmap.height, pixels)
+                                    if (lookOnly) {
+                                        withContext(Dispatchers.Main.immediate) {
+                                            if (isCurrentSession()) _sceneReading.value = reading
+                                        }
+                                        return@frameCallback
+                                    }
+                                    val advice = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
                                     val candidates = advice.candidates
                                     val first = candidates.firstOrNull() ?: error("当前画面无法生成构图建议")
                                     val fastMs = SystemClock.elapsedRealtime() - started
@@ -581,10 +611,19 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             })
                         // Publish input before copying assets or creating native sessions.
                         _source.value = frames
-                        _state.update { it.copy(status = AssistStatus.READY, statusText = "点击构图获取画面建议") }
-                        // Show the first photographic suggestion automatically, so enabling the
-                        // feature always produces a visible frame without hunting for the button.
-                        requestAdvice()
+                        if (config.enabled) {
+                            _state.update { it.copy(status = AssistStatus.READY, statusText = "点击构图获取画面建议") }
+                            // Show the first photographic suggestion automatically, so enabling the
+                            // feature always produces a visible frame without hunting for the button.
+                            requestAdvice()
+                        }
+                    }
+                    if (config.foreground && !config.enabled) {
+                        // Look-only session: no model install or composition overlay; park here
+                        // so the frame source stays bound and scene readings keep flowing.
+                        rankingDisabled = true
+                        runtimeReady.complete(null)
+                        awaitCancellation()
                     }
                     try {
                         val installed = withContext(Dispatchers.IO) {

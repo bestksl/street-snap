@@ -260,6 +260,31 @@ class SettingsJsonTest {
         assertEquals(listOf(ViewfinderOsd.HISTOGRAM, ViewfinderOsd.PARAMS, ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM), sequence)
     }
 
+    @Test fun lookAdviceDefaultsOnAndDismissMemorySurvivesRoundTrip() {
+        // Fresh installs get suggestions; legacy documents without the field default to on.
+        assertTrue(AppSettings().lookAdviceEnabled)
+        assertEquals(0, AppSettings().lookAdviceDismissStreak)
+        assertTrue(AppSettings().lookDismissedAt.isEmpty())
+        val legacy = SettingsJson.decode("""{"version":4,"preset":"MONO"}""")
+        assertTrue(legacy.lookAdviceEnabled)
+        val at = 1_700_000_000_000L
+        val saved = AppSettings(
+            lookAdviceEnabled = false,
+            lookAdviceDismissStreak = 2,
+            lookDismissedAt = mapOf("POSITIVE" to at, "FILM:MONO_01" to at + 1L),
+        )
+        val loaded = SettingsJson.decode(SettingsJson.encode(saved))
+        assertEquals(saved, loaded)
+        assertFalse(loaded.lookAdviceEnabled)
+        assertEquals(2, loaded.lookAdviceDismissStreak)
+        assertEquals(at, loaded.lookDismissedAt["POSITIVE"])
+        // Bad streak values are clamped back into the valid 0..3 range.
+        val repaired = SettingsJson.decode(
+            """{"version":4,"lookAdviceEnabled":false,"lookAdviceDismissStreak":99,"lookDismissedAt":{"X":0,"VALID":123}}""")
+        assertEquals(3, repaired.lookAdviceDismissStreak)
+        assertEquals(setOf("VALID"), repaired.lookDismissedAt.keys)
+    }
+
     @Test fun freshInstallSelectsTheRecommendedD1RankerAndUnknownIdsFallBack() {
         assertEquals("d1-omni-600m", EdgeModelCatalog.DEFAULT_MODEL_ID)
         assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)

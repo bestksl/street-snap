@@ -386,6 +386,7 @@ private fun Viewfinder(
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
     val streaming by model.previewStreaming.collectAsStateWithLifecycle()
     val histogram by model.histogram.collectAsStateWithLifecycle()
+    val lookAdviceCard by model.lookAdviceCard.collectAsStateWithLifecycle()
     val osdMode = settings.viewfinderOsd
     val meteringWanted = osdMode != ViewfinderOsd.OFF
     val hasSize = width > 0 && height > 0
@@ -601,6 +602,15 @@ private fun Viewfinder(
                 ?: badgePreset.displayName
             FilmFrameBadge(settings.filmId, badgePreset, badgeLabel, onOpenLooks,
                 Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop))
+            // Anchored to the film badge (T30): suggest only, tap to preview, × to dismiss.
+            lookAdviceCard?.let { card ->
+                LookAdviceCardView(card,
+                    onTry = model::trySuggestedLook,
+                    onKeep = model::keepSuggestedLook,
+                    onRevert = model::revertSuggestedLook,
+                    onDismiss = model::dismissLookAdvice,
+                    Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 54.dp))
+            }
             // DSLR-style readout under the histogram. Every value is reported by the
             // camera: automatic slots read AUTO rather than a guessed number, aperture is
             // shown only when the device actually reports a fixed one (most phones do not).
@@ -732,6 +742,62 @@ private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
                     size = androidx.compose.ui.geometry.Size(barWidth, barHeight))
             }
         }
+    }
+}
+
+/**
+ * Realtime look-suggestion card, anchored under the film badge. Suggesting state: the
+ * whole card is a tap-to-preview target with a separate × dismiss. Trying state: the look
+ * is already applied as a preview, so the only exits are Keep or Revert (T30).
+ */
+@Composable
+private fun LookAdviceCardView(
+    card: LookAdviceCard,
+    onTry: () -> Unit,
+    onKeep: () -> Unit,
+    onRevert: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .widthIn(max = 224.dp)
+            .background(Color.Black.copy(alpha = .72f), RoundedCornerShape(8.dp))
+            .then(if (card.trying) Modifier else Modifier.clickable(role = Role.Button, onClick = onTry))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text(
+            (if (card.trying) "已试用 · " else "现在适合 · ") + card.label,
+            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(card.reason, Modifier.padding(top = 3.dp),
+            color = Color.White.copy(alpha = .82f), fontSize = 11.sp,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp),
+            horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            if (card.trying) {
+                LookAdviceAction("还原", onRevert)
+                LookAdviceAction("保留", onKeep, emphasized = true)
+            } else {
+                LookAdviceAction("×", onDismiss, description = "忽略此建议")
+                LookAdviceAction("试用", onTry, emphasized = true, description = "试用 ${card.label}")
+            }
+        }
+    }
+}
+
+@Composable
+private fun LookAdviceAction(
+    label: String,
+    onClick: () -> Unit,
+    emphasized: Boolean = false,
+    description: String? = null,
+) {
+    TextButton(onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+        modifier = Modifier.heightIn(min = 36.dp).semantics { if (description != null) contentDescription = description }) {
+        Text(label, fontSize = 12.sp,
+            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
     }
 }
 
@@ -1502,6 +1568,9 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     }
     ToggleRow("三分网格", settings.grid) { model.toggleGrid() }
     ToggleRow("水平仪", settings.level) { model.toggleLevel() }
+    ToggleRow("影调建议", settings.lookAdviceEnabled) { model.setLookAdviceEnabled(it) }
+    Text("根据取景画面的光线与色彩，偶尔推荐合适的胶片或影调；只建议，不会自动更改。点取景器卡片可试用，也能一键还原。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)
     }
