@@ -28,8 +28,9 @@ data class ColorRecipe(
     val clarity: Float = 0f,
     val hdfEnabled: Boolean = false,
     val hdfStrength: Float = .4f,
-    // Independent HDR look: filmic highlight shoulder plus a wide outer halo.
-    // Decoupled from HDF diffusion; see docs/hdr-film-research.md for the parameter model.
+    // Ricoh-style HDF look (legacy field name kept): only near-clipping highlights get a
+    // faint roll-off and a restrained halo — no midtone tone mapping. Decoupled from the
+    // softer uHdf bloom; see docs/hdr-film-research.md for the parameter model.
     val hdrEnabled: Boolean = false,
     val hdrStrength: Float = .6f,
     val whiteBalanceAmber: Int = 0,
@@ -40,7 +41,7 @@ data class ColorRecipe(
         require(grain.isFinite() && grain in 0f..1f) { "颗粒强度须在 0–1 之间" }
         require(vignette.isFinite() && vignette in 0f..1f) { "暗角强度须在 0–1 之间" }
         require(hdfStrength.isFinite() && hdfStrength in 0f..1f) { "柔光强度须在 0–1 之间" }
-        require(hdrStrength.isFinite() && hdrStrength in 0f..1f) { "HDR 强度须在 0–1 之间" }
+        require(hdrStrength.isFinite() && hdrStrength in 0f..1f) { "HDF 强度须在 0–1 之间" }
         for ((name, amount) in listOf(
             "饱和度" to saturation, "色相" to hue, "对比度" to contrast, "亮度" to brightness,
             "高光" to highlights, "阴影" to shadows, "锐度" to sharpness, "清晰度" to clarity,

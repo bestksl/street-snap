@@ -266,9 +266,10 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         GLES30.glUniform1i(uniform("uPass"), 2)
         // Two successive scales widen the visible halo and soften sparse point highlights.
         // Both run only on the bounded bloom textures, reusing the same two buffers.
-        // HDR adds two wider scales on the same FBO pair (zero new textures) to form the
-        // "soft core plus an outer halo"; see docs/hdr-film-research.md.
-        val fractions = if (wideHalo) floatArrayOf(.008f, .014f, .026f, .042f)
+        // HDF adds two only-slightly-wider scales on the same FBO pair (zero new textures)
+        // for a soft core with a short outer halo — a real HDF spreads tightly, so the old
+        // .026/.042 HDR-look radii were reined in; see docs/hdr-film-research.md.
+        val fractions = if (wideHalo) floatArrayOf(.008f, .014f, .020f, .030f)
         else floatArrayOf(.008f, .014f)
         for (fraction in fractions) {
             val radius = minOf(bloomWidth, bloomHeight) * fraction

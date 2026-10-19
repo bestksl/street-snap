@@ -724,7 +724,7 @@ private fun Viewfinder(
                         onKeep = model::keepSuggestedLook,
                         onRevert = model::revertSuggestedLook,
                         onDismiss = model::dismissLookAdvice,
-                        Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 54.dp))
+                        Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 56.dp))
                 }
             }
             // DSLR-style readout under the histogram. Every value is reported by the
@@ -747,9 +747,12 @@ private fun Viewfinder(
                 }
             }
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
+            // Compact by design: capped width, tight padding, single-line supporting rows so
+            // it never covers more than a corner of the frame (user feedback, 2026-10-19).
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
-                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)
+                    .widthIn(max = 208.dp)
+                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp)
                     // T35: long-press the card to preview the suggested framing; releasing restores.
                     // Consuming the down also stops the canvas underneath from tapping focus / AF-L.
                     .pointerInput(compositionOverlay) {
@@ -775,20 +778,24 @@ private fun Viewfinder(
                         // stays as the supporting line. Styles whose copy is already a move
                         // carry actionText = null and keep their single-line rendering.
                         if (s.actionText != null) {
-                            Text(s.actionText, color = Color.White, fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(s.modelText, Modifier.padding(top = 2.dp),
-                                color = Color.White.copy(alpha = .78f), fontSize = 11.sp,
+                            Text(s.actionText, color = Color.White, fontSize = 11.sp,
+                                lineHeight = 14.sp, fontWeight = FontWeight.Medium,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.modelText, Modifier.padding(top = 1.dp),
+                                color = Color.White.copy(alpha = .72f), fontSize = 9.5.sp,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         } else {
-                            Text(s.modelText, color = Color.White, fontSize = 12.sp,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.modelText, color = Color.White, fontSize = 11.sp,
+                                lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     compositionOverlay?.easterEgg?.let {
-                        Text(it, color = Color(0xFFE2FF79), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(it, Modifier.padding(top = 1.dp), color = Color(0xFFE2FF79),
+                            fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Text(compositionTimingLabel(compositionState), color = Color.White.copy(alpha = .78f), fontSize = 10.sp, maxLines = 2)
+                    Text(compositionTimingLabel(compositionState), Modifier.padding(top = 1.dp),
+                        color = Color.White.copy(alpha = .72f), fontSize = 9.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
                 }
             }
             val focusHint = when {
@@ -1086,10 +1093,12 @@ private fun ViewfinderNameplate(
 ) {
     Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         // Same mid-grey card as the body-picker tiles (#2D3335): the dark vector bodies
-        // only separate from a lighter field, not from black chrome.
-        Box(Modifier.size(92.dp, 52.dp).clip(RoundedCornerShape(11.dp))
+        // only separate from a lighter field, not from black chrome. Sized to the artwork's
+        // native 180:112 study ratio (~1.6): the old 92x52 (1.77) card left the body reading
+        // as squashed, and the 80dp row had unused vertical headroom (2026-10-19).
+        Box(Modifier.size(98.dp, 62.dp).clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF2D3335))
-            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(11.dp))
+            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(12.dp))
             .clickable(role = Role.Button, onClick = onPick)
             .semantics {
                 contentDescription = if (camera != null) "相机铭牌：${camera.brand} ${camera.model}，点按更换"
@@ -1097,8 +1106,8 @@ private fun ViewfinderNameplate(
             },
             contentAlignment = Alignment.Center) {
             // Canvas has no intrinsic size; an explicit size is mandatory in the wrapped row.
-            if (camera != null) CameraArtwork(camera, Modifier.size(82.dp, 50.dp))
-            else NeutralLookArtwork(Modifier.size(32.dp))
+            if (camera != null) CameraArtwork(camera, Modifier.size(90.dp, 56.dp))
+            else NeutralLookArtwork(Modifier.size(38.dp))
         }
         Spacer(Modifier.width(12.dp))
         Column {

@@ -175,7 +175,50 @@
 - AVD（emulator-5580）逐影调截图核对：TRI-X 灰阶片格、正片高密度反转蓝+小红块、负片奶白→灰蓝+砖红、原色灰底 RGB 三点、晴街晴空蓝+阳光黄、500T 深钨蓝+小红、C200 冷绿+极小红点，48dp 下片孔/渐变/彩点均可辨；点击 (938,473) 直达影调面板且落在影调 tab；OSD 三档徽章平滑下移、与直方图/PARAMS 卡零重叠；宽横屏 side rail 落在取景器右上 AF 胶囊下方、不压侧栏控件。
 - 重截 `docs/images/viewfinder.png`（720×1560，TRI-X 默认态、OSD 关、HDR 关），同步更新 images/README 与根 README alt（补胶片小画与 HDR 钮、影调改为 TRI-X）。**仍 not-verified：真机肉眼可辨度（高分屏 48dp 片孔 2.6dp）、真机 GPU 渐变观感**。
 
-## 五、主要参考
+## 五、T39 二次回调（2026-10-19）：HDF 克制化、胶片包装徽章、建议卡与铭牌比例
+
+用户实机反馈四条：HDF「太过了」、胶片小画「只是比较像」且不显示具体型号、AI 建议卡挡住半个屏幕、左上角机身矢量压扁。全部落在取景器视觉层，无链路改动。
+
+### 1. HDF 对标真品后的参数回调（loaded-only：软件渲染 AVD，未外推真机）
+
+对标基线（理光 GR III HDF / GR IIIx HDF，2024-09 起售的厂内 Highlight Diffusion Filter 版本）：硬件滤镜**只柔和/扩散接近溢出的高光边缘、带出克制的光晕**；中暗部保持清晰锐利、整图不雾化；固定强度、非多帧 HDR 包围。T24 实现把它做成了「强 HDR 风格」（中灰以上即进入 ACES 肩部、宽 halo、低阈值亮部提取），三处参数全部回调：
+
+| 位置 | T24 旧值（默认 uHdr=.6 实效） | T39 新值（同强度实效） | 理由 |
+| --- | --- | --- | --- |
+| 亮部提取 `brightAt` uHdr 分支 | `smoothstep(.57,.72,max-channel)` | `smoothstep(.74,.92,max-channel)` | 只有接近溢出的光源才进 halo；普通天空/中调不再扩散，仍保留彩灯颜色（max-channel 键控） |
+| 肩部 mask / amount / headroom | `.50→.90`；`mix(.45,.85)=.69`；`mix(1.10,1.60)=1.40` | `.78→.97`；`mix(.10,.28)=.208`；`mix(1.04,1.14)=1.10` | HDF 是扩散不是色调映射：中灰以上不再被整片 ACES 重映射，只在溢出边缘保留一点柔化挽色 |
+| halo 权重 / 染色 | `mix(.90,1.90)=1.50`，85% 彩色 | `mix(.30,.70)=.54`，70% 彩色 | 光晕收敛到真品的克制量级，近中性不污染中调 |
+| 宽模糊轮次（GlRenderer `prepareBloom`） | `.008/.014/.026/.042` 四轮 | `.008/.014/.020/.030` 四轮 | 外 halo 半径收窄约 30%，「软核+短外晕」而非大范围雾状泛光 |
+
+`uHdr=0` 输出逐路径不变（三个分支都在 `uHdr>0` 内）；T08 原有 uHdf 柔光路径未动；uniform 名与 JSON key 继续保留 `hdr*`。同 shader 同时驱动预览与成片，二者自动一致。代码注释从「HDR look」改写为理光 HDF 语义（`ColorShaders.kt`、`GlRenderer.kt`、`ColorRecipe.kt` 字段注与非法值提示）。
+
+### 2. 胶片小画重做为「胶片包装」并印出具体型号（原创绘制，无厂方素材）
+
+`FilmBadge.kt` 的 48dp 抽象片格重做为 **84×50dp 微型胶片纸盒**：左侧 16dp 签名色带，右侧三行印刷字（6.5sp 厂/类标签 + 10sp 粗体型号首行 + 9sp 半粗次行），外 1dp 发丝边保证浅盒在亮画面上可读。新增 `FilmPackCopy.of(filmId, preset)`：七卷胶片印真实型号（VISION3 250D/500T/50D、EKTAR 100、PORTRA 400、FUJICOLOR C200、TRI-X 400，标签行带 KODAK·CINE/COLOR/B&W、FUJIFILM·COLOR），13 个机内 preset 明确印「IN-CAMERA SIM」与缩写（NC/CC/NA/ACROS…），不伪装实体胶片。
+
+个性按包装家族分化（`LookBadgePalette.art: PackArt`，旧色表与 `FilmBadgePaletteTest` 全部保留）：CINE 深盒+渐变窄带；COLOR 奶白纸盒+渐变齿孔带+厂色三角块（Ektar 金蓝红角、Portra 奶青）；FUJI 绿盒+白带+红角；MONO 白盒黑带强反差；BUILTIN 深卡细渐变带；ORIGINAL 中性卡+竖向 RGB 三点。contentDescription 改「胶片包装：<名>，点按调整影调」。
+
+### 3. AI 构图建议卡收紧（CameraScreen 浮层卡）
+
+- 宽度：wrap content（实测约占取景器 92%）→ `widthIn(max = 208.dp)`；内边距 8dp → 横 8/竖 6。
+- 字号：动作句 13sp/2 行 → 11sp/行高 14；术语副行 11sp → 9.5sp；彩蛋 10sp → 9sp；「画面分析建议 · Nms」10sp/2 行 → 9sp/1 行省略。
+- 长按试取景手势、黑 68% 底、圆角 8dp 不变。
+
+### 4. 机身铭牌比例修正
+
+矢量本体（`CameraArtwork`）一直按 180:112 画布等比缩放，压扁感来自卡片 92×52（1.77）+ 矢量框 82×50 使整机顶到上下边、拨盘/棱镜局促。铭牌行固定 80dp 有富余：卡片改 **98×62dp（圆角 12）**、矢量框 **90×56dp**——恰为 180:112 的 0.5 倍等比（scale=.500，旧 .446），五机身放大约 12%、四周留 4/3dp 边；无机身时 NeutralLookArtwork 32→38dp。行高仍 80dp，3:4 取景器尺寸不变。
+
+### 5. 证据与遗留
+
+- 单测：新增 `FilmPackCopy` 覆盖测试（7 胶片 + 13 preset 两行型号均非空、未知 filmId 回退 preset）；`:app :color :camera` 全量单测通过；`:app:assemblePreview` 通过。
+- AVD（emulator-5580，软件 GL，VirtualScene 固定房间）截图复核四项：
+  - **HDF 开/关同帧像素差分（0–255 通道均值绝对差）**：近溢出亮窗区 R6.6/G7.4/B8.2，书架电视中调区与右下中暗区均仅 0.5–0.6（噪声量级），差异热图沿亮窗框、电视白格等高光边缘分布——量化证实「只扩散接近溢出高光、中暗部不动」，与旧 uHdr 路径中灰以上整片重映射形成对比；
+  - 包装徽章逐家族实拍：ORIGINAL 浅灰卡竖向 RGB 三点、TRI-X 400 白盒黑带白齿孔、PORTRA 400 奶盒+奶→teal 渐变带+铜色三角、FUJICOLOR C200 绿盒+白带+红角、VISION3 250D 深棕盒+米→蓝窄带，三行型号在 84×50dp 内均可读（`includeFontPadding=false` 是三行不溢出的关键）；
+  - 建议卡宽实测约 557px≈206dp（旧版接近取景器全宽），三行 11/9.5/9sp 可读；
+  - 铭牌 GR III 矢量 90×56dp=180:112 等比 0.5×，拨盘/握柄/镜头不再局促。
+  软件渲染只证路径与量级，**真机光晕观感仍 not-verified**；审美质量唯一证据仍是独立人工标注照片集。
+
+## 六、主要参考
 
 - [LearnOpenGL Bloom](https://learnopengl.com/Advanced-Lighting/Bloom) / [Physically Based Bloom 2022](https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom) / [GPU Gems 21 Real-Time Glow](https://developer.nvidia.com/gpugems/gpugems/part-iv-image-processing/chapter-21-real-time-glow)
 - [Catlike Coding Bloom（soft knee）](https://catlikecoding.com/unity/tutorials/advanced-rendering/bloom/) / [Unity post-processing Bloom](https://docs.unity3d.com/Packages/com.unity.postprocessing@2.2/manual/Bloom.html)
