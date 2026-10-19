@@ -142,7 +142,7 @@ internal data class FilmPackCopy(val tag: String, val line1: String, val line2: 
             "NEG_01" -> FilmPackCopy("KODAK · CINE", "VISION3", "50D")
             "CHROME_01" -> FilmPackCopy("KODAK · COLOR", "EKTAR", "100")
             "PORTRAIT_01" -> FilmPackCopy("KODAK · COLOR", "PORTRA", "400")
-            "PASTEL_01" -> FilmPackCopy("FUJIFILM · COLOR", "FUJICOLOR", "C200")
+            "PASTEL_01" -> FilmPackCopy("FUJI · COLOR", "FUJICOLOR", "C200")
             "MONO_01" -> FilmPackCopy("KODAK · B&W", "TRI-X", "400")
             else -> when (preset) {
                 ColorPreset.ORIGINAL -> FilmPackCopy("IN-CAMERA", "原色", "ORIGINAL")
@@ -200,9 +200,15 @@ internal fun FilmFrameBadge(
         // otherwise overflow from the font's built-in top/bottom bearings.
         val tight = androidx.compose.ui.text.TextStyle(
             platformStyle = PlatformTextStyle(includeFontPadding = false))
-        val tagAlpha = if (palette.art == PackArt.FUJI) .82f else .62f
-        Column(Modifier.padding(start = 22.dp, end = 5.dp, top = 5.dp, bottom = 4.dp)) {
-            Text(copy.tag, color = ink.copy(alpha = tagAlpha), fontSize = 6.5.sp, style = tight,
+        // The cine carton prints its maker line in foil gold; everyone else stays quiet ink.
+        val tagColor = when (palette.art) {
+            PackArt.CINE -> Color(0xFFD9BC7E)
+            PackArt.FUJI -> ink.copy(alpha = .82f)
+            else -> ink.copy(alpha = .6f)
+        }
+        val tagStyle = tight.copy(letterSpacing = 0.5.sp)
+        Column(Modifier.padding(start = 21.dp, end = 5.dp, top = 5.dp, bottom = 4.dp)) {
+            Text(copy.tag, color = tagColor, fontSize = 6.5.sp, style = tagStyle,
                 maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             Text(copy.line1, color = ink, fontSize = 10.sp, lineHeight = 12.sp, style = tight,
                 fontWeight = FontWeight.Bold, maxLines = 1,
@@ -219,62 +225,74 @@ private fun DrawScope.drawCarton(p: LookBadgePalette, paper: Color) {
     val h = size.height
     val r = 10.dp.toPx()
     val radius = CornerRadius(r, r)
-    // Clip the whole carton to its outer rounded rectangle, so the square colour band
-    // stays square on its inner edge while the outer edge follows the card rounding.
+    // Clip the whole carton to its outer rounded rectangle, so the square rail
+    // stays square on its inner edge while the outer edge follows the rounding.
     clipPath(Path().apply {
         addRoundRect(androidx.compose.ui.geometry.RoundRect(0f, 0f, w, h, radius))
     }) {
         drawRect(paper)
-        val band = 16.dp.toPx()
-        when (p.art) {
-            PackArt.CINE, PackArt.BUILTIN -> {
-                // Signature gradient stripe down the left edge of the dark card.
-                drawRect(
-                    Brush.verticalGradient(listOf(p.gateStart, p.gateEnd)),
-                    topLeft = Offset(0f, 0f), size = Size(band, h),
-                )
+        // Subtle top sheen / bottom shade gives the flat paper a printed-carton body
+        // instead of one dead fill (the old card read as a flat tagged rectangle).
+        drawRect(
+            Brush.verticalGradient(
+                0f to Color.White.copy(alpha = .07f),
+                0.18f to Color.White.copy(alpha = 0f),
+                0.82f to Color.Black.copy(alpha = 0f),
+                1f to Color.Black.copy(alpha = .16f)),
+            topLeft = Offset.Zero, size = Size(w, h))
+        val rail = 15.dp.toPx()
+        // The left rail is a strip of 35mm film: a dressed edge rail with light
+        // passing through regular perforations. This is the strongest "film" cue at
+        // 84x50dp and replaces the old gradient swatch, whose hard seam read as a tag.
+        val (railTop, railBottom) = when (p.art) {
+            PackArt.CINE -> Color(0xFF7A6034) to Color(0xFF3C2F18)       // aged gold foil
+            PackArt.BUILTIN -> Color(0xFF3B4044) to Color(0xFF222528)    // neutral graphite
+            PackArt.COLOR -> p.gateStart to p.gateEnd                    // maker colour
+            PackArt.FUJI -> Color(0xFFF4F6F0) to Color(0xFFE3E9DF)       // white rail on green
+            PackArt.MONO -> Color(0xFF262626) to Color(0xFF080808)       // black rail on white
+            PackArt.ORIGINAL -> Color(0xFFD9D5CA) to Color(0xFFC4C0B6)
+        }
+        drawRect(Brush.verticalGradient(listOf(railTop, railBottom)),
+            topLeft = Offset(0f, 0f), size = Size(rail, h))
+        // Hairline metallic inner edge separates rail from the carton face.
+        val edgeColor = when (p.art) {
+            PackArt.CINE -> Color(0xFFE7CF9B)
+            PackArt.COLOR, PackArt.MONO -> Color.Black
+            PackArt.FUJI -> Color(0xFF0B5138)
+            else -> Color.White
+        }
+        drawRect(edgeColor.copy(alpha = if (p.art == PackArt.FUJI) .35f else .22f),
+            topLeft = Offset(rail - 0.75f.dp.toPx(), 0f),
+            size = Size(0.75f.dp.toPx(), h))
+        if (p.art == PackArt.ORIGINAL) {
+            // Three RGB primaries stacked on the neutral rail: colour available, ungraded.
+            val dot = 4.2f.dp.toPx()
+            val rgb = listOf(Color(0xFFD94E3E), Color(0xFFE3B23C), Color(0xFF3E7CB1))
+            for ((i, c) in rgb.withIndex()) {
+                drawCircle(c, dot / 2f, Offset(rail / 2f, h * (0.30f + i * 0.20f)))
             }
-            PackArt.COLOR, PackArt.FUJI -> {
-                if (p.art == PackArt.FUJI) {
-                    drawRect(Color(0xFFF4F6F0), topLeft = Offset(0f, 0f), size = Size(band, h))
-                } else {
-                    drawRect(
-                        Brush.verticalGradient(listOf(p.gateStart, p.gateEnd)),
-                        topLeft = Offset(0f, 0f), size = Size(band, h),
-                    )
-                }
-                // Vertical perforation knockouts, like the band is itself a strip of film.
-                val hole = 3.dp.toPx()
-                val holeW = 5.dp.toPx()
-                val holeColor = if (p.art == PackArt.FUJI) p.gateEnd else p.perf
-                for (i in 0..2) {
-                    val cy = h * (0.24f + i * 0.26f)
-                    drawRoundRect(holeColor.copy(alpha = .9f),
-                        Offset(band / 2f - holeW / 2f, cy - hole / 2f), Size(holeW, hole),
-                        CornerRadius(hole * .4f, hole * .4f))
-                }
+        } else {
+            // Perforations: five rounded slots with light behind them, like a film strip.
+            val holeW = 6.dp.toPx()
+            val hole = 3.2f.dp.toPx()
+            val holeColor = when (p.art) {
+                PackArt.CINE -> Color(0xFFF3E6C2)
+                PackArt.BUILTIN -> Color(0xFFD7DBDE)
+                PackArt.COLOR -> p.perf
+                PackArt.FUJI -> p.gateEnd
+                PackArt.MONO -> p.perf
+                else -> paper
             }
-            PackArt.MONO -> {
-                drawRect(p.edge, topLeft = Offset(0f, 0f), size = Size(band, h))
-                val holeW = 5.dp.toPx()
-                val hole = 3.dp.toPx()
-                for (i in 0..2) {
-                    val cy = h * (0.24f + i * 0.26f)
-                    drawRoundRect(p.perf,
-                        Offset(band / 2f - holeW / 2f, cy - hole / 2f), Size(holeW, hole),
-                        CornerRadius(hole * .4f, hole * .4f))
-                }
-            }
-            PackArt.ORIGINAL -> {
-                drawRect(Color(0xFFD9D5CA), topLeft = Offset(0f, 0f), size = Size(band, h))
-                // Three RGB primaries stacked: colour is available, ungraded.
-                val dot = 4.2f.dp.toPx()
-                val rgb = listOf(Color(0xFFD94E3E), Color(0xFFE3B23C), Color(0xFF3E7CB1))
-                for ((i, c) in rgb.withIndex()) {
-                    drawCircle(c, dot / 2f, Offset(band / 2f, h * (0.30f + i * 0.20f)))
-                }
+            val hr = CornerRadius(hole * .34f, hole * .34f)
+            for (i in 0..4) {
+                val cy = h * (0.15f + i * 0.175f)
+                drawRoundRect(holeColor.copy(alpha = .92f),
+                    Offset(rail / 2f - holeW / 2f, cy - hole / 2f), Size(holeW, hole), hr)
             }
         }
+        // Carton lid seam: a faint horizontal break near the top of the face only.
+        drawRect(Color.Black.copy(alpha = .10f),
+            topLeft = Offset(rail, 0f), size = Size(w - rail, 0.75f.dp.toPx()))
         // Small maker-colour block in the upper-right corner (cream/green cartons only).
         if (p.art == PackArt.COLOR || p.art == PackArt.FUJI) {
             p.accent?.let { accent ->

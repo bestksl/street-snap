@@ -20,6 +20,7 @@ import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -428,20 +429,33 @@ private fun Viewfinder(
     val histogram by model.histogram.collectAsStateWithLifecycle()
     val lookAdviceCard by model.lookAdviceCard.collectAsStateWithLifecycle()
     val exposureAdviceCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
-    // T34: one-shot "framing achieved" pulse. The green stroke/check is always shown;
-    // the buzz is opt-in and there is deliberately no sound path.
+    // T40: the one-shot pulse only fires the (opt-in) buzz; visibility is driven by the
+    // persistent confirmed phase, which stays true while the achieved framing holds and
+    // clears as soon as it drifts away — the goal no longer flashes for 1.3 s and vanishes.
     val alignmentPulse by model.composition.alignmentPulse.collectAsStateWithLifecycle()
-    var alignedVisible by remember { mutableStateOf(false) }
+    val alignmentConfirmed by model.composition.alignmentConfirmed.collectAsStateWithLifecycle()
+    // T40: the success sentence announces the achieved phase once, then the card fades out and
+    // only the persistent green frame + check remain (iPhone level/Mola restraint: a quiet
+    // steady-state, no permanent banner). Drifting out dismisses the timer and fades the card
+    // straight back in with the next move sentence.
+    var alignmentCardDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(alignmentConfirmed) {
+        if (alignmentConfirmed) {
+            alignmentCardDismissed = false
+            delay(2_200L)
+            alignmentCardDismissed = true
+        } else {
+            alignmentCardDismissed = false
+        }
+    }
+    val adviceCardAlpha by animateFloatAsState(
+        if (alignmentConfirmed && alignmentCardDismissed) 0f else 1f,
+        animationSpec = tween(320, easing = FastOutSlowInEasing), label = "adviceCardAlpha")
     val vibrator = remember(context) { context.getSystemService(Vibrator::class.java) }
     LaunchedEffect(alignmentPulse) {
-        if (alignmentPulse > 0L) {
-            alignedVisible = true
-            if (settings.alignmentHapticEnabled) {
-                @Suppress("MissingPermission") // VIBRATE is a normal permission, granted at install.
-                vibrator?.vibrate(VibrationEffect.createOneShot(20L, 60))
-            }
-            delay(1_300L)
-            alignedVisible = false
+        if (alignmentPulse > 0L && settings.alignmentHapticEnabled) {
+            @Suppress("MissingPermission") // VIBRATE is a normal permission, granted at install.
+            vibrator?.vibrate(VibrationEffect.createOneShot(20L, 60))
         }
     }
     val osdMode = settings.viewfinderOsd
@@ -603,48 +617,54 @@ private fun Viewfinder(
                 }
                 // While the T35 trial zoom fills the screen the guide rectangle and shade
                 // are the whole viewfinder, so hide them instead of masking the preview.
-                if (activeTrial == null) compositionOverlay?.let { overlay ->
+                if (activeTrial == null) {
                     // Reading the animated values here (inside the draw scope) means
                     // animation ticks only redraw this canvas, not recompose the screen.
+                    // Geometry, origin and alpha come from the smooth state rather than the
+                    // overlay itself, so the guide can cross-fade for ~180 ms after a scene
+                    // change / expiry instead of winking out (T40 anti-flicker pass).
                     val crop = smoothCrop.crop
-                    if (crop != null) {
+                    val guideAlpha = smoothCrop.alpha.value
+                    if (crop != null && guideAlpha > 0f) {
                     val left = (crop.left.coerceIn(0f, 1f) * size.width)
                     val top = (crop.top.coerceIn(0f, 1f) * size.height)
                     val right = (crop.right.coerceIn(0f, 1f) * size.width)
                     val bottom = (crop.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
                         val tint = when {
-                            alignedVisible -> Color(0xFF54C97E)
-                            overlay.origin == AdviceOrigin.MODEL_SELECTION -> Color(0xFFE2FF79)
+                            alignmentConfirmed -> Color(0xFF54C97E)
+                            smoothCrop.snappedOrigin == AdviceOrigin.MODEL_SELECTION -> Color(0xFFE2FF79)
                             else -> Color(0xFFB7E3F6)
                         }
-                        val shade = Color.Black.copy(alpha = .26f)
+                        // Once the framing is achieved the guide stops dimming the picture;
+                        // the thin green frame is enough while the user takes the shot.
+                        val shade = Color.Black.copy(alpha = (if (alignmentConfirmed) .10f else .26f) * guideAlpha)
                         drawRect(shade, size = androidx.compose.ui.geometry.Size(size.width, top))
                         drawRect(shade, Offset(0f, bottom), androidx.compose.ui.geometry.Size(size.width, size.height - bottom))
                         drawRect(shade, Offset(0f, top), androidx.compose.ui.geometry.Size(left, bottom - top))
                         drawRect(shade, Offset(right, top), androidx.compose.ui.geometry.Size(size.width - right, bottom - top))
-                        drawRect(tint.copy(alpha = .95f), Offset(left, top),
+                        drawRect(tint.copy(alpha = (if (alignmentConfirmed) .9f else .95f) * guideAlpha), Offset(left, top),
                             androidx.compose.ui.geometry.Size(right - left, bottom - top),
-                            style = Stroke(if (alignedVisible) 3.dp.toPx() else 2.dp.toPx()))
+                            style = Stroke(if (alignmentConfirmed) 3.dp.toPx() else 2.dp.toPx()))
                         for (i in 1..2) {
                             val x = left + (right - left) * i / 3f
                             val y = top + (bottom - top) * i / 3f
-                            drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
-                            drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
+                            drawLine(tint.copy(alpha = (if (alignmentConfirmed) .26f else .40f) * guideAlpha), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
+                            drawLine(tint.copy(alpha = (if (alignmentConfirmed) .26f else .40f) * guideAlpha), Offset(left, y), Offset(right, y), .75.dp.toPx())
                         }
-                        if (alignedVisible) {
-                            // Brief confirmation mark inside the guide's top-right corner (T34).
+                        if (alignmentConfirmed) {
+                            // Persistent confirmation mark for as long as the framing holds (T40).
                             val mark = minOf(26.dp.toPx(), (right - left) / 5f, (bottom - top) / 5f)
                             // Inside the bottom-right corner: the advice card lives bottom-left
                             // and the top-right can be covered by the optional histogram card.
                             val center = Offset(right - mark * 1.35f, bottom - mark * 1.35f)
-                            drawCircle(Color.Black.copy(alpha = .40f), mark * .95f, center)
+                            drawCircle(Color.Black.copy(alpha = .40f * guideAlpha), mark * .95f, center)
                             val checkStroke = 2.5.dp.toPx()
                             val p0 = Offset(center.x - mark * .45f, center.y + mark * .05f)
                             val p1 = Offset(center.x - mark * .12f, center.y + mark * .38f)
                             val p2 = Offset(center.x + mark * .48f, center.y - mark * .35f)
-                            drawLine(tint, p0, p1, checkStroke, cap = StrokeCap.Round)
-                            drawLine(tint, p1, p2, checkStroke, cap = StrokeCap.Round)
+                            drawLine(tint.copy(alpha = guideAlpha), p0, p1, checkStroke, cap = StrokeCap.Round)
+                            drawLine(tint.copy(alpha = guideAlpha), p1, p2, checkStroke, cap = StrokeCap.Round)
                         }
                     }
                     }
@@ -751,6 +771,7 @@ private fun Viewfinder(
             // it never covers more than a corner of the frame (user feedback, 2026-10-19).
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
+                    .graphicsLayer { alpha = adviceCardAlpha }
                     .widthIn(max = 208.dp)
                     .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp)
                     // T35: long-press the card to preview the suggested framing; releasing restores.
@@ -773,7 +794,13 @@ private fun Viewfinder(
                             }
                         }
                     }) {
-                    compositionOverlay?.suggestion?.let { s ->
+                    if (alignmentConfirmed) {
+                        // T40 closed loop: once the asked-for move is satisfied, the card stops
+                        // issuing instructions and states the achieved phase for as long as it
+                        // holds; drifting out of the band returns the move sentence automatically.
+                        Text("构图到位 · 可以拍了", color = Color(0xFF54C97E), fontSize = 11.sp,
+                            lineHeight = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    } else compositionOverlay?.suggestion?.let { s ->
                         // T33: the executable move is the headline; terminology ("三分构图 · …")
                         // stays as the supporting line. Styles whose copy is already a move
                         // carry actionText = null and keep their single-line rendering.
@@ -789,11 +816,11 @@ private fun Viewfinder(
                                 lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    compositionOverlay?.easterEgg?.let {
+                    if (!alignmentConfirmed) compositionOverlay?.easterEgg?.let {
                         Text(it, Modifier.padding(top = 1.dp), color = Color(0xFFE2FF79),
                             fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Text(compositionTimingLabel(compositionState), Modifier.padding(top = 1.dp),
+                    if (!alignmentConfirmed) Text(compositionTimingLabel(compositionState), Modifier.padding(top = 1.dp),
                         color = Color.White.copy(alpha = .72f), fontSize = 9.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
@@ -900,12 +927,32 @@ private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
     }
 }
 
+/** Tiny three-bar "analysis" mark: reads as an instrument readout, not a promo dot. */
+@Composable
+private fun AnalysisGlyph(modifier: Modifier = Modifier, tint: Color = Color.White.copy(alpha = .72f)) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val bar = w * .18f
+        val heights = listOf(h * .45f, h * .9f, h * .62f)
+        val xs = listOf(w * .12f, w * .41f, w * .70f)
+        for (i in 0..2) {
+            drawRoundRect(
+                tint,
+                Offset(xs[i], h - heights[i]),
+                androidx.compose.ui.geometry.Size(bar, heights[i]),
+                androidx.compose.ui.geometry.CornerRadius(bar * .5f, bar * .5f),
+            )
+        }
+    }
+}
+
 /**
- * Compact nameplate form of the realtime look suggestion (T30 card redesigned 2026-10-19):
- * a single small capsule sharing the top nameplate row with the film badge, instead of a
- * card floating over the picture. Suggesting state: the whole label area previews the look
- * and a separate × dismisses. Trying state: only Revert/Keep remain. The reason text stays
- * available through semantics so the visual form can be one quiet line.
+ * Compact nameplate form of the realtime look suggestion. Deliberately styled as a system
+ * analysis readout — hairline outline, cool glyph, neutral text actions, no accent CTA
+ * colour — so it never reads as an in-viewfinder promotion (user feedback, 2026-10-19).
+ * Suggesting state: the label area previews the look, × dismisses. Trying state: only
+ * Revert/Keep remain; the reason stays available through semantics.
  */
 @Composable
 private fun NameplateLookChip(
@@ -918,35 +965,40 @@ private fun NameplateLookChip(
 ) {
     Row(
         modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color.Black.copy(alpha = .62f))
+            .height(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(Color.Black.copy(alpha = .42f))
+            .border(1.dp, Color.White.copy(alpha = .18f), RoundedCornerShape(15.dp))
             .then(if (card.trying) Modifier else
                 Modifier.clickable(role = Role.Button, onClick = onTry)
-                    .semantics { contentDescription = "影调建议：${card.label}，${card.reason}，点按试用" })
-            .padding(start = 9.dp, end = 2.dp),
+                    .semantics { contentDescription = "AI 影调建议：${card.label}，${card.reason}，点按试用" })
+            .padding(start = 9.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(7.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFFE2FF79)))
-        Spacer(Modifier.width(6.dp))
-        // The row only has room for the Chinese name; built-in labels carry a code prefix
-        // ("NC · 经典负片") that the chip drops. The trying state shares the row with two
-        // text actions, so it falls back to the short code ("NC") to keep both on screen.
-        // Semantics keep the full label.
+        // System-notification pattern: the whole chip IS the primary action (tap to try /
+        // tap to keep), and the only inline control is the dismiss/exit affordance. A
+        // separate coloured "试用" CTA both read as an ad banner and overflowed the 412dp
+        // nameplate row, crushing itself to a few pixels (2026-10-19).
+        if (!card.trying) {
+            AnalysisGlyph(Modifier.size(13.dp, 11.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        // Built-in labels carry a code prefix ("NC · 经典负片") the chip drops; the trying
+        // state shares the row with two text actions and falls back to the short code.
         val shortLabel = card.label.substringAfter(" · ")
         val chipLabel = if (card.trying && " · " in card.label)
-            "已试用 · " + card.label.substringBefore(" · ")
-        else (if (card.trying) "已试用 · " else "适合 · ") + shortLabel
+            "试用中 · " + card.label.substringBefore(" · ")
+        else (if (card.trying) "试用中 · " else "AI 建议 · ") + shortLabel
         Text(
             chipLabel,
-            Modifier.widthIn(max = if (card.trying) 104.dp else 150.dp),
-            color = Color.White.copy(alpha = .92f), fontSize = 12.sp,
+            Modifier.then(if (card.trying) Modifier.padding(end = 4.dp) else Modifier)
+                .widthIn(max = if (card.trying) 92.dp else 108.dp),
+            color = Color.White.copy(alpha = .9f), fontSize = 11.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (card.trying) {
             NameplateChipAction("还原", onRevert)
             NameplateChipAction("保留", onKeep, emphasized = true)
         } else {
             NameplateChipAction("×", onDismiss, description = "忽略此建议")
-            NameplateChipAction("试用", onTry, emphasized = true, description = "试用 ${card.label}")
         }
     }
 }
@@ -958,12 +1010,16 @@ private fun NameplateChipAction(
     emphasized: Boolean = false,
     description: String? = null,
 ) {
+    // Quiet hierarchy through alpha and a faint fill on the primary action — never the
+    // brand yellow, which made the suggestion look like a banner advertisement.
     TextButton(onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-        modifier = Modifier.height(32.dp)
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        modifier = Modifier.height(30.dp)
+            .then(if (emphasized)
+                Modifier.background(Color.White.copy(alpha = .14f), RoundedCornerShape(11.dp)) else Modifier)
             .semantics { if (description != null) contentDescription = description }) {
-        Text(label, fontSize = 12.sp,
-            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+        Text(label, fontSize = 11.sp,
+            color = if (emphasized) Color.White.copy(alpha = .95f) else Color.White.copy(alpha = .6f))
     }
 }
 
@@ -990,7 +1046,7 @@ private fun LookAdviceCardView(
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Text(
-            (if (card.trying) "已试用 · " else "现在适合 · ") + card.label,
+            (if (card.trying) "试用中 · " else "AI 建议 · ") + card.label,
             color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(card.reason, Modifier.padding(top = 3.dp),
@@ -1016,11 +1072,15 @@ private fun LookAdviceAction(
     emphasized: Boolean = false,
     description: String? = null,
 ) {
+    // Neutral actions only: the primary one gets a faint fill instead of brand yellow.
     TextButton(onClick = onClick,
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-        modifier = Modifier.heightIn(min = 36.dp).semantics { if (description != null) contentDescription = description }) {
+        modifier = Modifier.heightIn(min = 36.dp)
+            .then(if (emphasized)
+                Modifier.background(Color.White.copy(alpha = .14f), RoundedCornerShape(14.dp)) else Modifier)
+            .semantics { if (description != null) contentDescription = description }) {
         Text(label, fontSize = 12.sp,
-            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+            color = if (emphasized) Color.White.copy(alpha = .95f) else Color.White.copy(alpha = .6f))
     }
 }
 
@@ -2032,6 +2092,9 @@ private data class SmoothCrop(val left: Float, val top: Float, val right: Float,
 private class SmoothCropState {
     // Order: left, top, right, bottom.
     val edges = Array(4) { Animatable(0f) }
+    // 0f while no guide is shown; eased to 1f on appearance and back on clear so scene
+    // changes / expiry cross-fade instead of blinking (T40).
+    val alpha = Animatable(0f)
     var ready by mutableStateOf(false)
     var snappedOrigin: AdviceOrigin? = null
 
@@ -2055,7 +2118,12 @@ private fun rememberSmoothCrop(overlay: CompositionOverlay?): SmoothCropState {
     LaunchedEffect(overlay) {
         val current = overlay
         if (current == null) {
-            // Zoom, rotation or model switch invalidated the guide; next guidance snaps.
+            // Zoom, rotation or model switch invalidated the guide; fade the last frame out
+            // before dropping it (next guidance still snaps). A new overlay arriving inside
+            // this window cancels the fade and raises the alpha straight back to 1.
+            if (state.ready) {
+                state.alpha.animateTo(0f, tween(durationMillis = 180, easing = FastOutSlowInEasing))
+            }
             state.ready = false
             state.snappedOrigin = null
             return@LaunchedEffect
@@ -2081,6 +2149,8 @@ private fun rememberSmoothCrop(overlay: CompositionOverlay?): SmoothCropState {
                 }
             }
         }
+        // No-op while already visible; eases the first appearance (and recovers a fade-out).
+        state.alpha.animateTo(1f, tween(durationMillis = 220, easing = FastOutSlowInEasing))
     }
     return state
 }

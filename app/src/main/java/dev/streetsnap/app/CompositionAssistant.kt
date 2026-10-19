@@ -45,6 +45,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * How long a scene-mismatched overlay may linger while the next analysed frame republishes
+ * advice (T40 anti-flicker). Two analysis frames at 250 ms fit inside, so continuous camera
+ * motion never blanks the guide; a real scene cut with no fresh advice drops it within this.
+ */
+private const val OVERLAY_CLEAR_GRACE_MS = 600L
+
 internal enum class ModelInstallStatus { CHECKING, ABSENT, PREPARING, AVAILABLE, DOWNLOADING, INSTALLED, REMOVING, FAILED }
 internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAILED }
 internal enum class CompositionOutcome { RETURNED, NO_RESULT, UNSTABLE_SELECTION, TIMED_OUT, SCENE_CHANGED, FAILED }
@@ -122,7 +129,23 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
      */
     private val _alignmentPulse = MutableStateFlow(0L)
     val alignmentPulse = _alignmentPulse.asStateFlow()
+    /**
+     * Persistent "framing is aligned right now" phase (T40). Unlike [alignmentPulse] (a one-
+     * shot edge used for the buzz/check animation), this stays true while the achieved framing
+     * holds so the UI can keep a visible "ready to shoot" state instead of flashing for 1.3 s.
+     */
+    private val _alignmentConfirmed = MutableStateFlow(false)
+    val alignmentConfirmed = _alignmentConfirmed.asStateFlow()
     private val alignmentTracker = AlignmentTracker()
+    /**
+     * T40 anti-flicker: while the user moves with the guide, every analysed frame briefly
+     * reads as a scene mismatch. The old code nulled the overlay on each mismatch and the
+     * same frame republished it after the advisor pass, so a null gap reached the screen
+     * ~4x/s and the guide visibly winked. The visual clear waits one grace window; the
+     * republished advice of any later frame cancels it. The alignment state machine still
+     * resets immediately, so no praise can be earned across a genuine scene break.
+     */
+    private var overlayClearGrace: Job? = null
     /** Coarse colour/light statistics from the latest rule-analysis frame; consumed later by look/exposure advice. */
     private val _sceneReading = MutableStateFlow<SceneReading?>(null)
     val sceneReading = _sceneReading.asStateFlow()
@@ -178,7 +201,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     fun invalidateView() {
         resultGate.invalidate(SystemClock.elapsedRealtime())
         _source.value?.invalidateFrames()
+        overlayClearGrace?.cancel()
+        overlayClearGrace = null
         alignmentTracker.reset()
+        _alignmentConfirmed.value = false
         _overlay.value = null
         _sceneReading.value = null
         expiryJob?.cancel()
@@ -214,10 +240,18 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         // Feed the alignment state machine before the same-guidance early return:
         // a static near-final scene keeps republishing the same overlay every frame,
         // and those frames are exactly the confirmation streak we count.
-        val framed = AlignmentFeedback.isFramed(crop, candidate.style)
-        if (alignmentTracker.observe(framed, candidate.action != null) == AlignmentEvent.ALIGNED) {
+        // T40: alignment reads "the asked-for move is satisfied" (centred, near-full frame),
+        // not "crop == full frame within 3 %", which the 0.92 band could never reach.
+        val guidance = AlignmentFeedback.guidanceFor(crop, candidate.style)
+        val event = alignmentTracker.observe(guidance)
+        _alignmentConfirmed.value = alignmentTracker.isConfirmedAligned
+        if (event == AlignmentEvent.ALIGNED) {
             _alignmentPulse.value = now
         }
+        // Fresh advice for the current view supersedes any pending scene-mismatch clear,
+        // so moving with the guide glides the overlay instead of blinking it each frame.
+        overlayClearGrace?.cancel()
+        overlayClearGrace = null
         val egg = easterEgg(subjectLooksDistant, origin, draw, now)
         if (egg != null) lastEasterEggAtMs = now
         // Rule analysis now runs several times per second. On a static scene the same
@@ -385,15 +419,33 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 var selectedCandidate: CompositionCandidate? = null
 
                 fun clearVisibleAdvice() {
+                    overlayClearGrace?.cancel()
+                    overlayClearGrace = null
                     visibleScene = null
                     selectedScene = null
                     selectedCandidate = null
                     alignmentTracker.reset()
+                    _alignmentConfirmed.value = false
                     _overlay.value = null
                     _sceneReading.value = null
                     expiryJob?.cancel()
                     _state.update { it.copy(adviceOrigin = null, lastOutcome = null,
                         lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
+                }
+
+                // Scene mismatch while the camera is moving: reset praise immediately, but let
+                // the overlay survive [OVERLAY_CLEAR_GRACE_MS] — the same frame's advisor pass
+                // usually republishes via showAdvice, which cancels the grace. Only a genuine
+                // cut with no fresh guidance lets the timer clear the rectangle (T40).
+                fun requestGracefulClear() {
+                    alignmentTracker.reset()
+                    _alignmentConfirmed.value = false
+                    if (overlayClearGrace?.isActive != true) {
+                        overlayClearGrace = sessionScope.launch(Dispatchers.Main.immediate) {
+                            delay(OVERLAY_CLEAR_GRACE_MS)
+                            if (isCurrentSession()) clearVisibleAdvice()
+                        }
+                    }
                 }
 
                 // Runs as a session child on Main. Only independent sheets survive
@@ -513,7 +565,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             onSceneChanged = {
                                 scope.launch(Dispatchers.Main.immediate) {
                                     if (isCurrentSession()) {
-                                        clearVisibleAdvice()
+                                        requestGracefulClear()
                                         sceneChangeListener?.invoke()
                                     }
                                 }
@@ -532,7 +584,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                 val frameMode = withContext(Dispatchers.Main.immediate) {
                                     if (!isCurrentSession() || !frame.isCurrent ||
                                         !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
-                                    if (visibleScene?.invoke() == false) clearVisibleAdvice()
+                                    if (visibleScene?.invoke() == false) requestGracefulClear()
                                     val requested = manualRequestPending
                                     if (!requested && !config.realtime && !config.lookAdvice) return@withContext null
                                     if (requested) {

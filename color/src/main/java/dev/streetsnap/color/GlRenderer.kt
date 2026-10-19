@@ -194,7 +194,11 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
             state.recipe.sharpness, state.recipe.clarity)
         GLES30.glUniform1f(uniform("uHdf"), if (state.recipe.hdfEnabled) state.recipe.hdfStrength else 0f)
         val hdrTarget = if (state.recipe.hdrEnabled) state.recipe.hdrStrength.coerceIn(0f, 1f) else 0f
-        hdrLevel = if (externalInput) hdrLevel + (hdrTarget - hdrLevel) * 0.2f else hdrTarget
+        // Ease in while on (no halo pop on toggle), but snap to zero the moment it is
+        // switched off: a decaying uHdr kept sampling the previous frame's stale bloom
+        // texture, so the halo visibly lingered after the user disabled HDF.
+        hdrLevel = if (!externalInput || hdrTarget == 0f) hdrTarget
+        else hdrLevel + (hdrTarget - hdrLevel) * 0.2f
         GLES30.glUniform1f(uniform("uHdr"), hdrLevel)
         val amber = state.recipe.whiteBalanceAmber / 9f
         val green = state.recipe.whiteBalanceGreen / 9f
@@ -213,9 +217,14 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         GLES30.glUniform1i(uniform("uBloom"), 2)
         if (diffusionOn || hdrOn) {
             // Photo strips share a single whole-image bloom texture. Preview updates every frame.
-            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight, hdrOn)
+            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
+        } else {
+            // Unbind any bloom texture from a previously-enabled frame so a stale halo can
+            // never be sampled now that uHdf/uHdr are both zero.
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
         GLES30.glViewport(0, 0, width, height)
@@ -226,7 +235,7 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     }
 
     /** At most two 384px-long-edge RGBA textures, reused until output aspect/size changes. */
-    private fun prepareBloom(width: Int, height: Int, wideHalo: Boolean) {
+    private fun prepareBloom(width: Int, height: Int) {
         val scale = minOf(1f, 384f / maxOf(width, height))
         val targetWidth = maxOf(1, (width * scale).toInt())
         val targetHeight = maxOf(1, (height * scale).toInt())
@@ -266,11 +275,10 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         GLES30.glUniform1i(uniform("uPass"), 2)
         // Two successive scales widen the visible halo and soften sparse point highlights.
         // Both run only on the bounded bloom textures, reusing the same two buffers.
-        // HDF adds two only-slightly-wider scales on the same FBO pair (zero new textures)
-        // for a soft core with a short outer halo — a real HDF spreads tightly, so the old
-        // .026/.042 HDR-look radii were reined in; see docs/hdr-film-research.md.
-        val fractions = if (wideHalo) floatArrayOf(.008f, .014f, .020f, .030f)
-        else floatArrayOf(.008f, .014f)
+        // HDF deliberately uses the SAME tight radii as the plain soft bloom: earlier extra
+        // wide scales spread window light deep into midtones and read as a washed-out white
+        // veil, which a real diffusion filter never does; see docs/hdr-film-research.md.
+        val fractions = floatArrayOf(.008f, .014f)
         for (fraction in fractions) {
             val radius = minOf(bloomWidth, bloomHeight) * fraction
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[1])

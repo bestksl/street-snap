@@ -30,9 +30,9 @@ internal object ColorShaders {
         uniform vec4 uColor; // saturation, hue, contrast, brightness
         uniform vec4 uDetail; // highlights, shadows, sharpness, clarity
         uniform float uHdf;
-        // 0 = Ricoh-style HDF off (identical output); >0 = strength. HDF only diffuses
-        // highlights near clipping: a faint top roll-off plus a restrained halo, with
-        // midtones and shadows left crisp. (Uniform keeps its legacy "hdr" name.)
+        // 0 = Ricoh-style HDF off (identical output); >0 = strength. HDF is pure optical
+        // diffusion of highlights near clipping (a tight restrained halo); there is no tone
+        // mapping at all, and midtones/shadows are left crisp. (Uniform keeps its legacy name.)
         uniform float uHdr;
         uniform vec3 uWhiteBalanceGain;
         uniform vec2 uHueRotation; // precomputed cosine/sine, +/-20 degrees
@@ -77,16 +77,6 @@ internal object ColorShaders {
             float tonal = (y - 0.5) * uColor.z * 0.65 + uColor.w * 0.25;
             tonal += uDetail.x * highMask * 0.23 + uDetail.y * lowMask * 0.23;
             return clamp(color + tonal, 0.0, 1.0);
-        }
-
-        // Narkowicz ACES filmic fit: keeps hue in the highlight roll-off (UE4 default).
-        vec3 acesFilm(vec3 x) {
-            const float a = 2.51;
-            const float b = 0.03;
-            const float c = 2.43;
-            const float d = 0.59;
-            const float e = 0.14;
-            return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
         }
 
         vec3 brightAt(vec2 uv) {
@@ -151,16 +141,9 @@ internal object ColorShaders {
                 float midtone = smoothstep(0.0, 0.2, y) * (1.0 - smoothstep(0.8, 1.0, y));
                 color += clamp(detail * uDetail.w * 0.8, -0.10, 0.10) * midtone;
             }
-            if (uHdr > 0.0) {
-                // HDF is diffusion, not an HDR tone map: nothing happens through the midtones.
-                // A faint roll-off right at clipping keeps blown whites soft with some colour,
-                // instead of the old shoulder that remapped everything above middle grey.
-                float shoulderMask = smoothstep(0.78, 0.97, y);
-                float shoulderAmount = mix(0.10, 0.28, uHdr) * shoulderMask;
-                float headroom = 1.0 + (mix(1.04, 1.14, uHdr) - 1.0) * shoulderMask;
-                vec3 toned = acesFilm(color * headroom);
-                color = mix(color, toned, shoulderAmount);
-            }
+            // HDF is purely optical diffusion: no tone mapping at all (the old ACES
+            // shoulder re-graded the highlights and read as "washed out"). The only
+            // effect is the scattered halo added below, keyed on near-clipping light.
             if (uHdf > 0.0 || uHdr > 0.0) {
                 vec3 glow = texture(uBloom, vUv).rgb;
                 // Screen-style light scattering preserves the original bright center and
@@ -173,10 +156,11 @@ internal object ColorShaders {
                     color += scatterGap * glow * uHdf * 1.25;
                 }
                 if (uHdr > 0.0) {
-                    // Restrained, mostly-neutral halo (real HDF never stains midtones); the
-                    // weight is well under the old 0.90-1.90 HDR-look range by design.
-                    vec3 halo = mix(vec3(luminance(glow)), glow, 0.70);
-                    color += scatterGap * halo * mix(0.30, 0.70, uHdr);
+                    // Tight, mostly-neutral halo hugging the highlight edge (a real diffusion
+                    // filter never washes the midtones); weight is a fraction of the old
+                    // 0.90-1.90 HDR-look range, and the blur radius matches the plain bloom.
+                    vec3 halo = mix(vec3(luminance(glow)), glow, 0.60);
+                    color += scatterGap * halo * mix(0.18, 0.45, uHdr);
                 }
             }
             vec2 centered = (vUv - 0.5) * 1.41421356;

@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -15,13 +16,29 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.nativeCanvas
 
+/**
+ * Content bounding box of each study inside the shared 180x112 canvas (including the soft
+ * lens shadow). The art is fitted to THIS box rather than the full canvas, so a body whose
+ * study occupies a wide slice no longer renders as a thin strip with large empty margins —
+ * the earlier source of the "squashed camera" look even though the canvas scale was uniform.
+ */
+private val artworkBoxes = mapOf(
+    CameraModel.RICOH_GR to Rect(20f, 16f, 160f, 96f),
+    CameraModel.FUJIFILM_X100VI to Rect(16f, 6f, 164f, 103f),
+    CameraModel.SIGMA_FP to Rect(30f, 14f, 150f, 100f),
+    CameraModel.PANASONIC_LX100 to Rect(16f, 18f, 156f, 104f),
+    CameraModel.NIKON_F3 to Rect(10f, 13f, 168f, 103f),
+)
+
 /** Original vector studies of recognisable camera bodies; no downloaded product artwork. */
 @Composable
 internal fun CameraArtwork(camera: CameraModel, modifier: Modifier = Modifier) {
     Canvas(modifier) {
-        val factor = minOf(size.width / 180f, size.height / 112f)
+        val box = artworkBoxes.getValue(camera)
+        val factor = minOf(size.width / box.width, size.height / box.height)
         withTransform({
-            translate((size.width - 180f * factor) / 2f, (size.height - 112f * factor) / 2f)
+            translate((size.width - box.width * factor) / 2f - box.left * factor,
+                (size.height - box.height * factor) / 2f - box.top * factor)
             scale(factor, factor, Offset.Zero)
         }) {
             when (camera) {
@@ -84,23 +101,27 @@ private fun DrawScope.dial(x: Float, topY: Float, r: Float, silver: Boolean = tr
     drawLine(metal, Offset(x, topY + r * .5f), Offset(x, topY + r * 1.5f), 1.2f)
 }
 
-/* Ricoh GR III: the flattest, widest body here — absolutely flat top with
- * no hump, no built-in finder or flash (hot shoe only), a centered fixed
- * lens (an off-center barrel is a documented lens fault, not the design)
- * and a small grip ridge on the viewer-left, i.e. the holder's right hand.
- * The single mode dial rides that same viewer-left shoulder. */
+/* Ricoh GR III: a compact flat-top rectangle whose real front face is about
+ * 1.77:1. The old study drew the body as a 152x52 (~2.9:1) strip, which is the
+ * actual source of the "stretched camera" complaint. Redrawn to 140x80 (1.75:1):
+ * flat top with only a sliver of the mode dial visible, hot shoe viewer-right,
+ * centered fixed lens (an off-center barrel is a documented lens fault), and a
+ * grip ridge on the viewer-left (the holder's right hand). */
 private fun DrawScope.ricohGr() {
-    dial(36f, 31f, 6.5f, silver = false) // mode dial over the holder's right shoulder
-    panel(16f, 39f, 148f, 6f, Color(0xFF323839), 2f)
-    body(14f, 44f, 152f, 52f, 5f)
+    body(20f, 16f, 140f, 80f, 6f)
+    // top-deck seam across the front, with a sliver of the mode dial at viewer-left
+    panel(22f, 19f, 136f, 5f, Color(0xFF323839), 2f)
+    drawCircle(Color(0xFF171C1D), 4.5f, Offset(40f, 21.5f))
     // hot shoe near center, toward the viewer-right
-    panel(108f, 48f, 20f, 4f, inset, 1f)
+    panel(112f, 22f, 20f, 3.5f, inset, 1f)
     // small anti-slip grip on the viewer-left
-    panel(19f, 50f, 24f, 42f, inset, 4f)
-    for (y in 55..87 step 4) drawLine(Color(0xFF3A4141), Offset(23f, y.toFloat()), Offset(39f, y.toFloat()), .8f)
-    // centered fixed lens, all black
-    lens(90f, 71f, 23f)
-    lettering("GR", 131f, 91f, 10f)
+    panel(25f, 27f, 19f, 63f, inset, 4f)
+    for (y in 33..85 step 4) drawLine(Color(0xFF3A4141), Offset(29f, y.toFloat()), Offset(40f, y.toFloat()), .8f)
+    // centered fixed lens, all black; diameter ~63% of body height like the real thing
+    lens(90f, 57f, 25f)
+    // AF assist lamp, small dot viewer-right of the lens
+    panel(131f, 50f, 5f, 3.5f, inset, 1f)
+    lettering("GR", 131f, 86f, 10f)
 }
 
 /* Fujifilm X100VI: flat silver top deck (no prism), two control dials,
