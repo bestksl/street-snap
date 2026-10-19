@@ -26,6 +26,20 @@ data class CaptureSettings(
     val exposureMode: ExposureMode get() = ExposurePolicy.mode(iso, exposureTimeNs)
 }
 
+/**
+ * The camera's ACTUAL metered exposure for the latest preview frame, read from a real
+ * Camera2 CaptureResult — never a fabricated AUTO stand-in. In P/S the ISO and shutter are
+ * chosen by the device AE and change live; in M they mirror the manual request. Aperture and
+ * focal length are reported only when the result/characteristics actually carry them.
+ */
+data class LiveExposureReading(
+    val iso: Int?,
+    val exposureTimeNs: Long?,
+    val aperture: Float? = null,
+    val focalLengthMm: Float? = null,
+    val frameTimestampNs: Long = 0L,
+)
+
 data class CameraState(
     val isBound: Boolean = false,
     val isReady: Boolean = false,
@@ -35,6 +49,7 @@ data class CameraState(
     val isFocusLocked: Boolean = false,
     val capabilities: CameraCapabilities? = null,
     val settings: CaptureSettings = CaptureSettings(),
+    val liveExposure: LiveExposureReading? = null,
     val zoomRatio: Float = 1f,
     val error: String? = null,
     val compositionAnalysisActive: Boolean = false,

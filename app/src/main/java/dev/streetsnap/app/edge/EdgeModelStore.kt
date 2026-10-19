@@ -40,37 +40,19 @@ class EdgeModelStore(context: Context) {
                 add(ModelFile(path, item.getLong("size"), digest ?: requireNotNull(fallback), digest != null))
             }
         }
-        val graphs: List<String>
-        val required: List<String>
-        when (model.kind) {
-            EdgeModelKind.SMOLVLM_CHOICE -> {
-                fun graph(stem: String): String = listOf(
-                    // q4 is smaller for vision/decoder; embeddings have a much smaller
-                    // official int8/uint8 graph, so prefer it for that one.
-                    if (stem == "embed_tokens") "onnx/${stem}_quantized.onnx" else "onnx/${stem}_q4.onnx",
-                    if (stem == "embed_tokens") "onnx/${stem}_q4.onnx" else "onnx/${stem}_quantized.onnx"
-                ).firstOrNull { candidate -> all.any { it.path == candidate } }
-                    ?: error("官方仓库暂无可用的 $stem 小体积 ONNX 文件")
-                // The third slot is the generative decoder for SmolVLM; d1 puts its
-                // decision head in the same plan field instead.
-                graphs = listOf(graph("vision_encoder"), graph("embed_tokens"), graph("decoder_model_merged"))
-                required = listOf("config.json", "tokenizer.json", "tokenizer_config.json", "preprocessor_config.json")
-            }
-            EdgeModelKind.D1_OMNI_CHOICE -> {
-                // fp16 SigLIP2 vision tower, Q4 block-gather embeddings and the 4-bit
-                // MatMulNBits decision graph. The official 8-bit decision graph cannot
-                // run on ORT 1.22 (its nodes lack accuracy_level=4, so ORT takes the
-                // unpacked path that only supports 4-bit); q4 is the supported path.
-                graphs = listOf(
-                    "onnx/vision_encoder_fp16.onnx",
-                    "onnx/embed_tokens_quantized.onnx",
-                    "onnx/decision_q4.onnx",
-                )
-                // The LFM Open License requires the license text to travel with the weights.
-                required = listOf("config.json", "tokenizer.json", "tokenizer_config.json",
-                    "preprocessor_config.json", "LICENSE")
-            }
-        }
+        // The only catalog ranker is the Liquid d1-omni decision model: fp16 SigLIP2
+        // vision tower, Q4 block-gather embeddings and the 4-bit MatMulNBits decision
+        // graph. The official 8-bit decision graph cannot run on ORT 1.22 (its nodes
+        // lack accuracy_level=4, so ORT takes the unpacked path that only supports
+        // 4-bit); q4 is the supported path.
+        val graphs = listOf(
+            "onnx/vision_encoder_fp16.onnx",
+            "onnx/embed_tokens_quantized.onnx",
+            "onnx/decision_q4.onnx",
+        )
+        // The LFM Open License requires the license text to travel with the weights.
+        val required = listOf("config.json", "tokenizer.json", "tokenizer_config.json",
+            "preprocessor_config.json", "LICENSE")
         require(graphs.all { expected -> all.any { it.path == expected } }) { "模型 ONNX 图不完整" }
         val (vision, embedding, decoder) = graphs
         require(required.all { expected -> all.any { it.path == expected } }) { "模型配套配置不完整" }

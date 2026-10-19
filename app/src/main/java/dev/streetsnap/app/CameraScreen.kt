@@ -67,6 +67,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -459,7 +460,8 @@ private fun Viewfinder(
         }
     }
     val osdMode = settings.viewfinderOsd
-    val meteringWanted = osdMode != ViewfinderOsd.OFF || settings.exposureAdviceEnabled
+    val histogramWanted = ViewfinderOsd.showsHistogram(osdMode)
+    val meteringWanted = histogramWanted || settings.exposureAdviceEnabled
     val hasSize = width > 0 && height > 0
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     val manualFocus = state.settings.focusDistanceDiopters != null
@@ -577,9 +579,13 @@ private fun Viewfinder(
                     val levelColor = if (abs(roll) < 1.5f) Color(0xFFE2FF79) else Color.White.copy(alpha = .78f)
                     drawLine(levelColor, pivot - delta, pivot + delta, 2.dp.toPx())
                 }
-                if (meteringWanted) histogram?.let { counts ->
-                    val panelWidth = 118.dp.toPx()
-                    val panelHeight = 48.dp.toPx()
+                // Small corner histogram window (Lightroom/ProShot convention): a quiet
+                // 100x42 translucent panel tucked under the top-right pills. The numeric
+                // exposure readout moved to the always-on shoulder strip above the shutter,
+                // so this never grows into a wide card covering the frame.
+                if (histogramWanted) histogram?.let { counts ->
+                    val panelWidth = 100.dp.toPx()
+                    val panelHeight = 42.dp.toPx()
                     val margin = 10.dp.toPx()
                     // Below the top-right composition/realtime/AF pills.
                     val panelLeft = size.width - panelWidth - margin
@@ -713,7 +719,7 @@ private fun Viewfinder(
                     })
             }
             // Persistent HDF toggle, stacked under the OSD corner button; the right column
-            // hosts the histogram/readout card.
+            // hosts only the optional small histogram window.
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
             // Clipped-highlight/shadow hint under the HDF button it may point at; text-only.
@@ -723,15 +729,12 @@ private fun Viewfinder(
             }
             // In framed portrait the film badge and look suggestion live in the nameplate
             // row (outside the picture), so they float in-frame only on landscape paths and
-            // when the nameplate is hidden. There they must step below whichever OSD card
-            // is showing (OFF: beside HDF, HISTOGRAM: under it, PARAMS: lowest).
+            // when the nameplate is hidden. The right column holds at most the small
+            // histogram window now (the numeric readout moved to the shoulder strip), so
+            // the badge has one stable slot: under the histogram or on the top row.
             if (!framed || nameplateHidden) {
                 val badgeTop by animateDpAsState(
-                    when (osdMode) {
-                        ViewfinderOsd.HISTOGRAM -> 106.dp
-                        ViewfinderOsd.PARAMS -> 180.dp
-                        else -> 52.dp
-                    }, label = "filmBadgeTop")
+                    if (histogramWanted) 102.dp else 52.dp, label = "filmBadgeTop")
                 val badgePreset = settings.colorRecipe().preset
                 val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
                     ?: badgePreset.displayName
@@ -747,25 +750,8 @@ private fun Viewfinder(
                         Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 56.dp))
                 }
             }
-            // DSLR-style readout under the histogram. Every value is reported by the
-            // camera: automatic slots read AUTO rather than a guessed number, aperture is
-            // shown only when the device actually reports a fixed one (most phones do not).
-            if (osdMode == ViewfinderOsd.PARAMS) {
-                val caps = state.capabilities
-                val capture = state.settings
-                val ev = capture.exposureCompensationIndex * (caps?.exposureCompensationStepEv ?: 0.0)
-                Column(Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = 106.dp).width(118.dp)
-                    .background(Color.Black.copy(alpha = .42f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 5.dp)) {
-                    OsdReadoutRow(capture.exposureMode.label,
-                        if (capture.exposureMode == ExposureMode.MANUAL) "EV —" else "EV %+.1f".format(ev))
-                    OsdReadoutRow("快门", capture.exposureTimeNs?.let(::shutterLabel) ?: "AUTO")
-                    OsdReadoutRow("ISO", capture.iso?.toString() ?: "AUTO")
-                    caps?.fixedAperture?.let { aperture ->
-                        OsdReadoutRow("光圈", "f/%.1f".format(aperture))
-                    }
-                }
-            }
+            // The DSLR-style numeric readout (mode/aperture/shutter/ISO/EV) is now the
+            // always-on shoulder strip above the shutter, where it never covers the picture.
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
             // Compact by design: capped width, tight padding, single-line supporting rows so
             // it never covers more than a corner of the frame (user feedback, 2026-10-19).
@@ -900,12 +886,8 @@ private fun OverlayPill(
 /** Top-left corner entry for the viewfinder OSD cycle; quiet when off, primary-tinted while showing. */
 @Composable
 private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
-    val active = mode != ViewfinderOsd.OFF
-    val description = when (mode) {
-        ViewfinderOsd.HISTOGRAM -> "正在显示直方图，点按追加拍摄参数"
-        ViewfinderOsd.PARAMS -> "正在显示直方图与拍摄参数，点按关闭取景信息"
-        else -> "显示曝光直方图"
-    }
+    val active = ViewfinderOsd.showsHistogram(mode)
+    val description = if (active) "正在显示直方图，点按关闭取景信息" else "显示曝光直方图"
     val tint = if (active) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
     Box(Modifier.size(38.dp).clip(CircleShape)
         .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
@@ -1121,18 +1103,6 @@ private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifie
     }
 }
 
-/** One labelled, reported-by-camera value in the OSD readout; never a fabricated number. */
-@Composable
-private fun OsdReadoutRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp),
-        horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = Color.White.copy(alpha = .55f), fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace, maxLines = 1)
-        Text(value, color = Color.White.copy(alpha = .92f), fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace, maxLines = 1)
-    }
-}
-
 /**
  * Phone portrait top chrome. In follow-look mode the body tracks the active look/film
  * family (the general family shows the neutral lens mark) and the subtitle names the
@@ -1242,6 +1212,9 @@ private fun ViewfinderOverlayBar(
         // one block, so on tall 20:9 screens the slack splits above/below it instead of
         // opening a void between the focal row and the shutter (T22).
         if (framed) Spacer(Modifier.weight(1f))
+        // Always-on DSLR shoulder strip: live P/S meter values, mode and EV popups.
+        ExposureShoulderStrip(state, model,
+            Modifier.padding(bottom = if (framed) 5.dp else 4.dp))
         // Active manual overrides: visible tappable reminders that jump to the section.
         if (overrides.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = if (framed) 3.dp else 4.dp)
@@ -1299,17 +1272,176 @@ private fun ViewfinderOverlayBar(
                 .semantics { contentDescription = "打开控制面板" },
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text("调整", fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
-                Text(when (exposureMode) {
-                        ExposureMode.MANUAL -> "M · ISO ${state.settings.iso ?: "—"}"
-                        ExposureMode.SHUTTER_PRIORITY -> "S · ${shutterLabel(state.settings.exposureTimeNs ?: 8_000_000L)}"
-                        ExposureMode.PROGRAM -> "P · %+.1f EV".format(ev)
-                    },
-                    fontFamily = FontFamily.Monospace, fontSize = 10.sp,
-                    color = Color.White.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Live mode/shutter/ISO/EV live on the shoulder strip above, so the gateway
+                // stays a clean labelled button instead of carrying a compressed readout.
+                Text("参数", fontSize = 10.sp, color = Color.White.copy(alpha = .72f), maxLines = 1)
             }
         }
         // Counterweight to the leading spacer: keeps the whole control group centred.
         if (framed) Spacer(Modifier.weight(1f))
+    }
+}
+
+/**
+ * DSLR-style shoulder readout directly above the shutter: mode / fixed aperture / shutter /
+ * ISO / EV on one quiet monospace strip. In P and S the shutter and ISO are the camera's
+ * ACTUAL live values from CaptureResult — never an "AUTO" placeholder, never a guessed
+ * number; in M they are the dials. The mode letter and EV open small popups anchored on the
+ * strip, so no extra control ever floats over the picture. Aperture appears only on devices
+ * that actually report one. The green pip marks values driven by live metering.
+ */
+@Composable
+private fun ExposureShoulderStrip(
+    state: CameraState,
+    model: CameraViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val caps = state.capabilities
+    val capture = state.settings
+    val mode = capture.exposureMode
+    val live = state.liveExposure
+    val shutterNs = if (mode == ExposureMode.MANUAL) capture.exposureTimeNs else live?.exposureTimeNs
+    val iso = if (mode == ExposureMode.MANUAL) capture.iso else live?.iso
+    val liveFresh = mode != ExposureMode.MANUAL && live != null &&
+        (live.iso != null || live.exposureTimeNs != null)
+    val ev = capture.exposureCompensationIndex * (caps?.exposureCompensationStepEv ?: 0.0)
+    val modes = caps?.exposureModes ?: listOf(ExposureMode.PROGRAM)
+
+    Row(modifier.clip(RoundedCornerShape(18.dp)).background(Color.Black.copy(alpha = .42f))
+        .horizontalScroll(rememberScrollState())
+        .semantics(mergeDescendants = true) {}
+        .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ExposureModeChip(mode, modes, enabled = state.isReady && modes.size > 1, onSelect = model::setExposureMode)
+        caps?.fixedAperture?.let { aperture ->
+            ShoulderText("f/%.1f".format(aperture), description = "固定光圈")
+        }
+        ShoulderText(shutterNs?.let(::shutterLabel) ?: "—", strong = true,
+            description = if (liveFresh) "实时快门速度" else "快门速度")
+        ShoulderText(iso?.let { "ISO $it" } ?: "—", strong = true,
+            description = if (liveFresh) "实时感光度" else "感光度")
+        if (liveFresh) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF54C97E))
+                .semantics { contentDescription = "实时测光读数" })
+        }
+        ExposureEvChip(
+            ev = ev,
+            manual = mode == ExposureMode.MANUAL,
+            enabled = state.isReady && mode != ExposureMode.MANUAL &&
+                (caps?.let { it.exposureCompensationMin < it.exposureCompensationMax } == true),
+            evIndex = capture.exposureCompensationIndex,
+            evMin = caps?.exposureCompensationMin ?: 0,
+            evMax = caps?.exposureCompensationMax ?: 0,
+            onChange = model::setExposure,
+        )
+    }
+}
+
+@Composable
+private fun ShoulderText(value: String, strong: Boolean = false, description: String) {
+    Text(value, color = Color.White.copy(alpha = if (strong) .95f else .72f),
+        fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1,
+        fontWeight = if (strong) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier.semantics { contentDescription = description })
+}
+
+/** Mode letter with a P/S/M popup (A never appears: phone apertures are fixed). */
+@Composable
+private fun ExposureModeChip(
+    mode: ExposureMode,
+    modes: List<ExposureMode>,
+    enabled: Boolean,
+    onSelect: (ExposureMode) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val modeHint = when (mode) {
+        ExposureMode.PROGRAM -> "P 档：快门、ISO 自动"
+        ExposureMode.SHUTTER_PRIORITY -> "S 档：设定快门，ISO 自动"
+        ExposureMode.MANUAL -> "M 档：手动快门、ISO"
+    }
+    Box {
+        Row(Modifier.clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, role = Role.DropdownList) { expanded = true }
+            .semantics {
+                contentDescription = "拍摄档位，$modeHint"
+                this.selected = true
+            }.padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(mode.label, color = Color.White.copy(alpha = if (enabled) .95f else .8f),
+                fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, maxLines = 1)
+            if (enabled) Text("▾", color = Color.White.copy(alpha = .6f), fontSize = 9.sp, maxLines = 1)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            modes.forEach { candidate ->
+                val hint = when (candidate) {
+                    ExposureMode.PROGRAM -> "快门、ISO 自动"
+                    ExposureMode.SHUTTER_PRIORITY -> "设定快门，ISO 自动"
+                    ExposureMode.MANUAL -> "手动快门、ISO"
+                }
+                Row(Modifier.fillMaxWidth().clickable(role = Role.Button) {
+                    expanded = false
+                    onSelect(candidate)
+                }.padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(candidate.label, fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = if (candidate == mode) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface)
+                    Text(hint, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+/** EV readout that pops a small compensation scale anchored to the strip (never over the frame). */
+@Composable
+private fun ExposureEvChip(
+    ev: Double,
+    manual: Boolean,
+    enabled: Boolean,
+    evIndex: Int,
+    evMin: Int,
+    evMax: Int,
+    onChange: (Int) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    // At zero the strip shows just "EV"; a non-zero compensation reads as EV +0.3 etc.
+    val label = when {
+        manual -> "EV —"
+        kotlin.math.abs(ev) > 0.001 -> "EV %+.1f".format(ev)
+        else -> "EV"
+    }
+    Box {
+        Text(label, color = Color.White.copy(alpha = if (enabled) .95f else .55f),
+            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            fontWeight = if (kotlin.math.abs(ev) > 0.001) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                .clickable(enabled = enabled, role = Role.DropdownList) { expanded = true }
+                .semantics {
+                    contentDescription = if (manual) "手动档不适用曝光补偿"
+                    else "曝光补偿，当前 ${if (kotlin.math.abs(ev) > 0.001) "%+.1f EV".format(ev) else "0 EV"}"
+                }.padding(horizontal = 4.dp, vertical = 2.dp))
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            Column(Modifier.width(236.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("曝光补偿", Modifier.weight(1f), fontSize = 13.sp)
+                    Text("%+.1f EV".format(ev), fontFamily = FontFamily.Monospace, fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold)
+                }
+                Slider(value = evIndex.toFloat(),
+                    onValueChange = { onChange(it.roundToInt()) },
+                    valueRange = evMin.toFloat()..evMax.toFloat(),
+                    steps = (evMax - evMin - 1).coerceAtLeast(0))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { onChange(0) }, enabled = evIndex != 0) { Text("归零") }
+                }
+            }
+        }
     }
 }
 
@@ -1424,6 +1556,8 @@ private fun ShootingControls(
                     color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        // Same live shoulder readout as the phone capture screen (mode/aperture/shutter/ISO/EV).
+        ExposureShoulderStrip(state, model, Modifier.fillMaxWidth().padding(vertical = 2.dp))
         if (focalHint != null) Text(focalHint, Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 4.dp),
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (adjustmentTab != AdjustmentTab.LOOK) {
@@ -1475,13 +1609,7 @@ private fun ShootingControls(
                 Text(if (adjustmentTab == null) "ADJ" else "收起", fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     color = if (adjustmentTab != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
-                Text(when (state.settings.exposureMode) {
-                    ExposureMode.MANUAL -> "M · ISO ${state.settings.iso}"
-                    ExposureMode.SHUTTER_PRIORITY -> "S · ${shutterLabel(state.settings.exposureTimeNs ?: 8_000_000L)}"
-                    ExposureMode.PROGRAM -> "P · %+.1f EV".format(ev)
-                },
-                    fontFamily = FontFamily.Monospace, fontSize = 10.sp,
+                Text("参数", fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -1886,13 +2014,18 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)
     }
-    CompositionAssistantControls(compositionState, settings, model)
+    CompositionAssistantControls(compositionState, settings, model, state)
     Text("参数自动记忆。音量键可直接拍照。", Modifier.padding(vertical = 10.dp),
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-private fun CompositionAssistantControls(state: CompositionUiState, settings: AppSettings, model: CameraViewModel) {
+private fun CompositionAssistantControls(
+    state: CompositionUiState,
+    settings: AppSettings,
+    model: CameraViewModel,
+    cameraState: CameraState,
+) {
     HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
     Text("构图辅助 · 实验性", style = MaterialTheme.typography.titleSmall)
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1920,20 +2053,13 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
     if (state.status == AssistStatus.READY && settings.compositionRealtime) Text(
         "画面分析约每秒更新 · AI 完成后至少间隔 ${formatInferenceTime(state.sampleIntervalMs)}，画面未变则复用",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    // Only one ranker ships now; show its real name instead of a picker (legacy SmolVLM
+    // selections migrate to it automatically).
     val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
+        ?: dev.streetsnap.app.edge.EdgeModelCatalog.find(dev.streetsnap.app.edge.EdgeModelCatalog.DEFAULT_MODEL_ID)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        dev.streetsnap.app.edge.EdgeModelCatalog.models.forEach { entry ->
-            val chosen = entry.id == settings.compositionModel
-            TextButton(onClick = { model.setCompositionModel(entry.id) }, modifier = Modifier.heightIn(min = 48.dp)
-                .semantics { selected = chosen; contentDescription = "构图模型：${entry.title}" }) {
-                Text(entry.title, fontSize = 11.sp,
-                    color = if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
+    DeveloperDiagnostics(state, cameraState, modelEntry)
     when (state.install) {
         ModelInstallStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
         ModelInstallStatus.ABSENT -> TextButton(onClick = model.composition::prepareInstall,
@@ -1973,6 +2099,83 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
     Text("点“构图”分析一次，也可开启实时。先显示画面分析建议，AI 比较候选后再择优；框仅供取景参考，照片不会自动裁切。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(bottom = 8.dp))
+}
+
+/**
+ * Collapsed by default: on-device inference performance (rolling recent/median/min/max),
+ * the scheduler budget/cooldown, the camera's ACTUAL live AE values and the capability
+ * ranges. Every number is observed state — nothing here is estimated or fabricated.
+ */
+@Composable
+private fun DeveloperDiagnostics(
+    state: CompositionUiState,
+    cameraState: CameraState,
+    modelEntry: dev.streetsnap.app.edge.EdgeModelEntry?,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .clickable(role = Role.Button) { expanded = !expanded }
+        .semantics { contentDescription = if (expanded) "收起开发者诊断" else "展开开发者诊断" },
+        verticalAlignment = Alignment.CenterVertically) {
+        Text("开发者诊断", Modifier.weight(1f), fontSize = 12.sp)
+        Text(if (expanded) "收起 ▴" else "展开 ▾", fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (expanded) {
+        Column(Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            DiagLine("模型", "${modelEntry?.id ?: "—"} · ${modelEntry?.revision?.take(7) ?: "—"}")
+            DiagLine("运行态", state.status.name + (state.statusText?.let { " · $it" } ?: ""))
+            val history = state.inferenceHistoryMs
+            if (history.isNotEmpty()) {
+                val sorted = history.sorted()
+                DiagLine("AI 耗时",
+                    "最近 ${history.last()} ms · 中位 ${sorted[sorted.size / 2]} ms · 最小 ${sorted.first()} · 最大 ${sorted.last()}（${history.size} 次）")
+            }
+            state.fastAdviceMs?.let { DiagLine("画面分析", "$it ms") }
+            DiagLine("调度", "预算 %.0f s · 冷却 %d ms".format(state.inferenceBudgetMs / 1000f, state.sampleIntervalMs))
+            state.lastOutcome?.let { DiagLine("上次结果", when (it) {
+                CompositionOutcome.RETURNED -> "已选择构图"
+                CompositionOutcome.NO_RESULT -> "模型未明确选择"
+                CompositionOutcome.UNSTABLE_SELECTION -> "一致性检查未过"
+                CompositionOutcome.TIMED_OUT -> "超时"
+                CompositionOutcome.SCENE_CHANGED -> "画面变化，旧结果忽略"
+                CompositionOutcome.FAILED -> "失败"
+            }) }
+            val live = cameraState.liveExposure
+            if (live != null) {
+                DiagLine("实时测光", buildString {
+                    append(live.iso?.let { iso -> "ISO $iso" } ?: "ISO —")
+                    append(" · ")
+                    append(live.exposureTimeNs?.let(::shutterLabel) ?: "快门 —")
+                    live.aperture?.let { append(" · f/%.1f".format(it)) }
+                    live.focalLengthMm?.let { append(" · 实际焦距 %.1f mm".format(it)) }
+                })
+            } else {
+                DiagLine("实时测光", "尚无相机读数")
+            }
+            cameraState.capabilities?.let { caps ->
+                DiagLine("曝光档", caps.exposureModes.joinToString(" / ") { it.label } +
+                    if (caps.fixedAperture != null) " · 固定 f/%.1f".format(caps.fixedAperture) else " · 无光圈档")
+                DiagLine("ISO 范围", "${caps.isoMin ?: "—"}–${caps.isoMax ?: "—"}")
+                val timeMin = caps.exposureTimeMinNs?.let(::shutterLabel) ?: "—"
+                val timeMax = caps.exposureTimeMaxNs?.let(::shutterLabel) ?: "—"
+                DiagLine("快门范围", "$timeMin – $timeMax")
+                DiagLine("EV 范围", "${caps.exposureCompensationMin}…${caps.exposureCompensationMax} × ${caps.exposureCompensationStepEv}")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, Modifier.width(64.dp), fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(value, Modifier.weight(1f), fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f),
+            fontFamily = FontFamily.Monospace)
+    }
 }
 
 private fun formatBytes(bytes: Long): String = when {
@@ -2079,7 +2282,8 @@ private fun CapabilitiesDialog(capabilities: CameraCapabilities?, error: String?
     })
 }
 
-private fun shutterLabel(timeNs: Long): String = if (timeNs < 1_000_000_000L)
+/** Formats a real CaptureResult exposure time as a camera-style fraction or seconds. */
+internal fun shutterLabel(timeNs: Long): String = if (timeNs < 1_000_000_000L)
     "1/${(1_000_000_000.0 / timeNs).roundToInt()} s" else "%.1f s".format(timeNs / 1_000_000_000.0)
 
 /** Normalized crop rectangle eased toward each incoming rule suggestion. */

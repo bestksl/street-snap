@@ -1,7 +1,9 @@
 package dev.streetsnap.camera
 
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
 import android.os.SystemClock
 import android.util.Rational
@@ -79,6 +81,9 @@ class CameraController(context: Context) {
     private var imageAnalysis: ImageAnalysis? = null
     private var compositionSource: CompositionFrameSource? = null
     private var meteringExecutor: ExecutorService? = null
+    // setSessionCaptureCallback runs on CameraX's own camera thread; the callback only reads a
+    // handful of keys and does a thread-safe StateFlow.update, so no extra executor is needed.
+    @Volatile private var lastLiveExposureAtMs = 0L
     private var sessionGeneration = 0L
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateObserver: Observer<CameraXState>? = null
@@ -93,6 +98,9 @@ class CameraController(context: Context) {
         // Camera2 controls should acknowledge promptly; a stuck HAL must not disable every
         // control until the activity is recreated.
         const val CAMERA_CONTROL_TIMEOUT_MS = 2_000L
+        // Live AE readouts drive a small OSD strip; a few updates/second is plenty and avoids
+        // recomposing on every 30 fps CaptureResult.
+        const val LIVE_EXPOSURE_MIN_INTERVAL_MS = 200L
     }
 
     @RequiresPermission(android.Manifest.permission.CAMERA)
@@ -128,7 +136,9 @@ class CameraController(context: Context) {
                 detachSession()
                 val generation = sessionGeneration
                 mutableState.update { it.copy(isBound = false, isReady = false, error = null,
-                    compositionAnalysisActive = false, compositionAnalysisError = fallbackReason) }
+                    compositionAnalysisActive = false, compositionAnalysisError = fallbackReason,
+                    liveExposure = null) }
+                lastLiveExposureAtMs = 0L
                 var fallbackScheduled = false
                 try {
                     val cameraProvider = ProcessCameraProvider.getInstance(appContext)
@@ -146,6 +156,21 @@ class CameraController(context: Context) {
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                         .setJpegQuality(95)
                         .setResolutionSelector(resolutionSelector(Size(4000, 3000), 12_000_000L))
+                    // Live metered exposure (real ISO/shutter while in AUTO): read the actual
+                    // per-frame Camera2 result from the always-bound preview use case. Pinned
+                    // to this generation so a torn-down session can never publish stale values.
+                    val exposureCallbackGeneration = generation
+                    Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(
+                        object : CameraCaptureSession.CaptureCallback() {
+                            override fun onCaptureCompleted(
+                                session: CameraCaptureSession,
+                                request: CaptureRequest,
+                                result: TotalCaptureResult,
+                            ) {
+                                publishLiveExposure(result, exposureCallbackGeneration)
+                            }
+                        },
+                    )
                     sensor.physicalCameraId?.let { physicalId ->
                         Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(physicalId)
                         Camera2Interop.Extender(captureBuilder).setPhysicalCameraId(physicalId)
@@ -568,6 +593,36 @@ class CameraController(context: Context) {
         meteringExecutor = null
     }
 
+    /**
+     * Reads the frame's ACTUAL metered exposure from a real Camera2 CaptureResult (T11: never
+     * fabricated AUTO numbers). Throttled and de-duplicated so a converged AE or a fixed manual
+     * setting does not recompose the OSD. [generation] drops callbacks from a torn-down session.
+     * Runs on CameraX's camera thread; StateFlow.update is thread-safe and the work is trivial.
+     */
+    private fun publishLiveExposure(result: android.hardware.camera2.CaptureResult, generation: Long) {
+        if (closed || generation != sessionGeneration) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLiveExposureAtMs < LIVE_EXPOSURE_MIN_INTERVAL_MS) return
+        val iso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
+        val exposureTimeNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)
+        if (iso == null && exposureTimeNs == null) return
+        val aperture = result.get(android.hardware.camera2.CaptureResult.LENS_APERTURE)?.takeIf { it > 0f }
+        val focalLengthMm = result.get(android.hardware.camera2.CaptureResult.LENS_FOCAL_LENGTH)?.takeIf { it > 0f }
+        val frameTimestampNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) ?: 0L
+        val reading = LiveExposureReading(iso, exposureTimeNs, aperture, focalLengthMm, frameTimestampNs)
+        lastLiveExposureAtMs = now
+        mutableState.update { current ->
+            val previous = current.liveExposure
+            if (previous != null && previous.iso == reading.iso &&
+                previous.exposureTimeNs == reading.exposureTimeNs &&
+                previous.aperture == reading.aperture && previous.focalLengthMm == reading.focalLengthMm) {
+                current
+            } else {
+                current.copy(liveExposure = reading)
+            }
+        }
+    }
+
     private fun detachSession() {
         sessionGeneration++
         focusSession.invalidate()
@@ -580,13 +635,16 @@ class CameraController(context: Context) {
         if (useCases.isNotEmpty()) provider?.unbind(*useCases.toTypedArray())
         oldCompositionSource?.shutdownExecutor()
         shutdownMeteringExecutor()
+        // sessionGeneration is bumped above the callback's pinned value, so any in-flight
+        // result delivered during the unbind handoff is dropped instead of going stale.
+        lastLiveExposureAtMs = 0L
         preview?.setSurfaceProvider(null)
         camera = null
         preview = null
         imageCapture = null
         imageAnalysis = null
         compositionSource = null
-        mutableState.update { it.copy(compositionAnalysisActive = false) }
+        mutableState.update { it.copy(compositionAnalysisActive = false, liveExposure = null) }
         cameraOpen = false
         settingsApplied = false
     }

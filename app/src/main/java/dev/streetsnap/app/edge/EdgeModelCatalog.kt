@@ -2,46 +2,27 @@ package dev.streetsnap.app.edge
 
 import java.io.File
 
-/** Which runtime contract a pinned model uses; graph selection follows this, not file-name guesses. */
-enum class EdgeModelKind {
-    /** SmolVLM generative VLM: vision + embeddings + decoder-with-cache, A/B/C read from last logits. */
-    SMOLVLM_CHOICE,
-
-    /**
-     * Liquid d1-omni decision model: vision + embeddings + bidirectional decision head,
-     * zero generated tokens; A/B/C are softmax probabilities over option markers.
-     */
-    D1_OMNI_CHOICE,
-}
-
 /** Weights are optional, fetched only after the user explicitly starts a download. */
 data class EdgeModelEntry(
     val id: String,
     val title: String,
     val repository: String,
     val revision: String,
-    val kind: EdgeModelKind = EdgeModelKind.SMOLVLM_CHOICE,
 ) {
     val sourceUrl: String get() = "https://huggingface.co/$repository"
 }
 
 object EdgeModelCatalog {
-    /** The ranker a fresh install selects and unknown/legacy ids fall back to. */
+    /** The ranker a fresh install selects and unknown/legacy ids (including the retired SmolVLM picks) fall back to. */
     const val DEFAULT_MODEL_ID = "d1-omni-600m"
 
+    // The two SmolVLM generative rankers were retired on 2026-10-20: the non-autoregressive
+    // d1 decision head is markedly faster on-device and more stable on the marker contract.
+    // Legacy persisted ids migrate to the default via SettingsJson's find(...) ?: DEFAULT.
     val models = listOf(
         EdgeModelEntry(
-            "smolvlm-256m", "SmolVLM 256M", "HuggingFaceTB/SmolVLM-256M-Instruct",
-            "7e3e67edbbed1bf9888184d9df282b700a323964",
-        ),
-        EdgeModelEntry(
-            "smolvlm-500m", "SmolVLM 500M", "HuggingFaceTB/SmolVLM-500M-Instruct",
-            "a588b6298f96d180aff4c31e259409d106b5571e",
-        ),
-        EdgeModelEntry(
-            "d1-omni-600m", "d1 决策 600M", "onnx-community/d1-omni-600M-ONNX",
+            "d1-omni-600m", "d1-omni 600M", "onnx-community/d1-omni-600M-ONNX",
             "4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0",
-            EdgeModelKind.D1_OMNI_CHOICE,
         ),
     )
     fun find(id: String?): EdgeModelEntry? = models.firstOrNull { it.id == id }

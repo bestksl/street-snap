@@ -2,7 +2,7 @@
 
 本轮目标：针对当前取景显示一个推荐构图框和一句中文建议，并分别显示快速画面分析与模型选择的耗时。默认在取景页点击“构图”执行一次，可选开启实时建议；功能已开启时进入相机会自动给出首轮建议。建议必须随画面变化并覆盖多种构图语言（三分、中心、对角线、三角形、引导线、框式、前景层次、留白、环境），禁止退化成恒定一句话。框表达建议保留的画面范围，不是主体检测框；拍摄参数与快门由用户控制。
 
-模型择优支持固定 revision 下载的 SmolVLM 256M/500M 与 Liquid d1-omni-600M（marker 选项契约，见 §2），由 `EdgeModelKind` 选择图文件与运行时；未下载模型时规则建议独立可用。YOLO 尚未接入。`FastCompositionAdvisor` 是图像统计规则，不是另一个神经网络。实现与验收状态见文末，本文件不把历史测试算成本轮通过。
+模型择优自 2026-10-20 起仅保留固定 revision 的 onnx-community/d1-omni-600M（marker 选项契约，见 §2 与文末「模型与本地打包」）；SmolVLM 256M/500M 已下架，旧设置中的模型 id 自动迁移到 d1。未下载模型时规则建议独立可用。YOLO 尚未接入。`FastCompositionAdvisor` 是图像统计规则，不是另一个神经网络。实现与验收状态见文末，本文件不把历史测试算成本轮通过。
 
 ## 准备阶段：先定义什么是好构图
 
@@ -181,6 +181,26 @@ T28 §2.2 标准 4 的落地。纯逻辑在 `composition/CropTrial.kt`：`CropTr
 
 - 证据等级：状态机时序与 UI 相位为 AVD 合成轨迹 **loaded-only**；桌面探针为合成几何，不是照片。真实「人拿手机按句子走到位」的端到端手感、真机（荣耀 Vs3）与真实街拍审美仍 **not-verified**，唯一下一步是独立人工标注照片集 + 真机站位；本特性不声称审美质量。
 
+### 2026-10-20 晚批次（T41–T58）：实时 AE 肩屏、OSD 对标重排、HDF 双层辉光、SmolVLM 下架、预热与开发者诊断
+
+用户通宵指令的逐字要点：实图功能「还是比较慢，按照这个方向继续优化」；「HDF 的特效还是不明显……高光的时候那个灯，它会有个光晕在那里面」；「ISO、快门虽然是 Auto，要显示它当前实时的是多少，不能只显示个 Auto」；「滤镜的建议也可以给个位置」；「EV 曝光补偿那个亮暗位置挡着了」；光圈/直方图/EV 的位置「整体结合最佳实践，主流相机 APP 都放哪里」；「模型前两个是不是都不用了？淘汰掉可以去掉」；建议模型「就显示实际的名字，不要有决策这样的东西」；「放一个开发者选项，比如当前的推理性能」；「拍摄的档位 P/A/S/M 可以放到界面上，跟正常相机一样」（手机光圈固定，无 A 档）；铁律是「别优化某个点之后牺牲了其他的体验」。
+
+**① 实时 AE 读数：真实 Camera2 CaptureResult，绝不只显示 AUTO（AE-1/AE-2）。** camera 模块新增 `LiveExposureReading(iso, exposureTimeNs, aperture, focalLengthMm, frameTimestampNs)`；`CameraController` 用 `Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback`（本 CameraX 版本只有单参重载，回调在 CameraX 自己的相机线程，只读数与线程安全 `StateFlow.update`，不需额外 executor）挂在**始终绑定的预览 use case** 上，`onCaptureCompleted(TotalCaptureResult)` 读 `SENSOR_SENSITIVITY` / `SENSOR_EXPOSURE_TIME` / `LENS_APERTURE`（>0 才取）/ `LENS_FOCAL_LENGTH` / `SENSOR_TIMESTAMP`。200 ms 自节流，AE 收敛后去重不重组 UI；回调带 session generation，解绑/重建后旧会话不能发陈旧值，解绑时置 null。读数经 `CameraState.liveExposure` 透传到 UI。P/S 档显示设备 AE 的实时真实值，M 档显示拨盘请求值，无光圈能力就不出现光圈字段（T11：不虚构）。
+
+**② DSLR 肩屏范式取代画面内 PARAMS 卡（OSD-1…OSD-5，对标主流相机 App）。** 快门上方黑底控制区新增常驻等宽字体条 `ExposureShoulderStrip`（大横屏侧栏同组件复用）：**拍摄档位 chip（P/S/M，无 A）→ 固定光圈「f/x.x」（仅 `fixedAperture` 非空）→ 实时快门（1/125 s 格式）→ 实时 ISO → 新鲜读数绿点 → EV chip**。档位 chip 用锚定在黑底区的 `DropdownMenu`（绝不浮在画面上），仅当 `CameraCapabilities.exposureModes` 多于一档时可点并显示 ▾，每档带中文说明；该 AVD 只暴露 P，故 S/M 下拉与 M 档拨盘值仅代码走查。EV 从原来挡画面的亮暗指示改为点按 chip 弹出锚定菜单：−3…+3 滑条 + 数值 + 归零钮（0 位禁用）。画面内旧 PARAMS 只读卡整组删除；`ViewfinderOsd` 收敛为 **OFF/HISTOGRAM 两态循环**，旧持久化值 PARAMS 仍可 decode、按 HISTOGRAM 渲染（`showsHistogram()`，单测覆盖迁移）；直方图缩为右上角 100×42 dp 半透明小窗。影调/滤镜建议与胶片徽章在竖屏 framed 布局下固定在取景屏外的铭牌行（只在横屏路径或铭牌隐藏时浮在屏内），曝光亮暗提示卡固定在 HDF 钮下方，位置不再随其他控件漂移。所有下拉都锚定在黑底控制区，取景画面内零悬浮菜单。
+
+**③ 推理加速方向继续：session 预热 + 丢帧审计（PERF-1/PERF-2）。** PERF-1：模型安装查找、bundled asset 导入与三个 `ALL_OPT` OrtSession 的构建移到 `Dispatchers.IO` 上的 session-scoped 预热 job，在 `ImageAnalysis` 绑定**之前**启动，图优化与 CameraX 绑定重叠；runtime 经 ready-deferred 发布，会话在此期间被拆掉则自关闭，不发布陈旧 runtime。PERF-2：审计确认四层丢帧/合并，无需改码——`STRATEGY_KEEP_ONLY_LATEST`、CONFLATED 单消费者帧闸、串行帧时钟里的 in-flight gate + rest、模型侧 single-flight（busy flag + 推理 mutex + model job），旧帧被替换回收、永不排队，慢设备只产生更少的完整排序而不是积压。推理工程库 case 文档 roadmap 两项已标 applied。
+
+**④ HDF 双层光学辉光（HDF-1/HDF-2，详见 hdr-film-research.md 本轮小节）。** 关键命名事实：UI 上标「HDF」的按钮实际驱动 `hdrEnabled → uHdr`（legacy uniform 名），「柔光」chip 驱动 `hdfEnabled → uHdf`。bloom 从单一被拉宽的模糊对改为**两对独立 FBO**：tight core（长边 ≤384 px）+ 独立宽光晕（长边 ≤192 px，下采样自带 box 预模糊）；`scatterGap=(1−color)` 保证暗部零抬升；亮部键控为 max-channel 软膝（彩灯也能出辉光）。排查到一个实质 bug：宽光晕 FBO 之前只在柔光 uHdf 路径准备/绑定，真正的 HDF 按钮（uHdr）路径采样不到宽层——已修为 `wideWanted = diffusionOn || hdrOn`，两种 look 都绑 unit3；uHdr 分支改为 core*0.70 + wide*0.45 的双层叠加（amount=mix(.22,.68,uHdr)）。AVD 静态房间无点光源，以电视棋盘格暗格做代理量化：两种开态暗格 luma 抬升 +24.03/+30.35（0–255），关态同区噪声级 +3.84，差分 p90 +127（n=83,929 暗像素），无 GL 错误、无 FATAL、拍照正常。**真实路灯/灯泡夜景辉光仍 not-verified，需真机夜景人工核对。**
+
+**⑤ SmolVLM 下架与真实模型名（MODEL-1/MODEL-2）。** `EdgeModelKind` enum 删除，catalog 仅 `d1-omni-600m`（`EdgeModelCatalog.DEFAULT_MODEL_ID` 单一事实源，显示名「d1-omni 600M」，无「决策/decision」字样）；`EdgeModelStore.prepare` 固定三张图（vision_encoder_fp16 / embed_tokens_quantized / decision_q4）+ 五个配置/LICENSE 文件；`SmolVlmRuntime.kt`（478 行）与 debug `CompositionRankingValidation.kt` 删除（ByteBpeTokenizer 保留，D1 runtime 在用）。旧设置中的 smolvlm-256m/500m/未知 id 经 SettingsJson decode 的 `EdgeModelCatalog.find(...) ?: DEFAULT_MODEL_ID` 自动迁移，显式模型选择 Row 从构图面板移除，只显示实际模型名，单测覆盖 256m/500m/removed/缺字段全部迁移、d1 保留、PARAMS OSD 遗留值。
+
+**⑥ 开发者诊断折叠区（DEV-1）。** 构图助手面板新增默认折叠的「开发者诊断」：实际模型 id + revision 前 7 位、运行态、**AI 推理 wall-clock 历史（最近 10 次，成功/超时/失败都记，显示最近/中位/最小/最大与样本数，`CompositionUiState.inferenceHistoryMs`）**、画面分析 fastAdviceMs、调度预算与冷却、上次结果六态中文映射、实时测光（ISO/快门/f//实际焦距，无读数显「尚无相机读数」）、设备曝光档与光圈情况、ISO/快门/EV 能力范围。数据全部来自真实 state/capabilities/CaptureResult，不造性能数值。
+
+- 测试：新增 `ExposureReadoutFormatTest`（快门格式化 8 例：1/250–1/30、1/10–2.5 s），SettingsJsonTest 改模型迁移与 OSD 两态/PARAMS 兼容；全模块 `./gradlew testDebugUnitTest` **296 条全绿（app 209、camera 61、color 26，0 failures/0 errors）**，`:app:compilePreviewKotlin` 与 `:app:assemblePreview`（含 R8/lintVital）通过。
+- AVD 回归（emulator-5580，1080×2340，loaded-only；shot-01…17 相位）：肩屏条实时读数（实测 1/100 s、ISO 200、绿点；诊断页另见 f/4.0、实际焦距 1.0mm）、档位 chip（该 AVD 仅 P 档无 ▾）、EV 弹层（−3…+3、归零钮 0 位禁用）、模型名「d1-omni 600M」无决策字样、开发者诊断展开、HDF 差分、拍照后缩略图正常、无 FATAL。
+- 证据边界：全部数值与视觉结论为 qemu 软件渲染 AVD 上的 **loaded-only**，禁止外推真机。**not-verified 遗留（荣耀 Vs3）**：实时 AE 数值与绿点、S/M 档下拉与 M 拨盘、夜景真实点光源辉光目视、大横屏侧栏、真机推理耗时中位数（诊断 UI 已具备采集能力）。
+
 ## 历史诊断：为什么先前没有框
 
 此前直接让通用 SmolVLM 生成裁切坐标，实际输出包含 `[0,0,0,0]`、残缺坐标或普通描述，被合法性检查拒绝。相机输入与 ONNX 推理已打通；未经过本项目构图/定位训练的模型不能仅凭提示词保证坐标和审美能力。此前 Q4 语义探针曾连续两次正确识别画面右侧电视，描述任务也出现人物幻觉，不能据此证明可靠定位。
@@ -189,9 +209,11 @@ T28 §2.2 标准 4 的落地。纯逻辑在 `composition/CropTrial.kt`：`CropTr
 
 ## 模型与本地打包
 
+> **2026-10-20 起仅保留 d1-omni-600M 一个 ranker。** SmolVLM 256M/500M 已从 catalog 下架：`EdgeModelKind` enum、`SmolVlmRuntime.kt` 与 debug 验证脚手架删除，`EdgeModelStore.prepare` 固定取 d1 三张图，不再按 kind 分支或做图名回退猜测；UI 只显示「d1-omni 600M」实际名字。旧安装的设置 JSON 里若是 smolvlm id，decode 时自动迁移到 `EdgeModelCatalog.DEFAULT_MODEL_ID`（单测覆盖）。以下 SmolVLM 段落与打包命令仅作历史记录保留，当前构建不再使用该脚本。
+
 一个 SmolVLM 256M 模型由视觉编码器、文本嵌入、decoder 三张 ONNX 图及四个配置/tokenizer 文件组成。固定 revision 为 `7e3e67edbbed1bf9888184d9df282b700a323964`。本轮选择已有本地 `cpu-int8` 配置，7 个运行文件共 263,439,781 bytes（251.24 MiB）；`compact` 为 173.9 MiB 的可选小包。来源、版本、大小和 SHA-256 随清单保留；许可参见官方模型卡，模型许可独立于项目代码许可。
 
-d1-omni-600M 为第二个可选 ranker，`EdgeModelCatalog` 固定 `onnx-community/d1-omni-600M-ONNX` revision `4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0`；图像栈三张图均带 `.onnx_data` 外部权重（vision_encoder_fp16 约 180 MiB、embed_tokens_quantized 约 41 MiB、decision_q4 约 192 MiB，11 个文件合计 `437,985,561` bytes / 417.7 MiB），另含 config/tokenizer×2/preprocessor 与仓库根 `LICENSE`（LFM Open License v1.0，含年收入门槛条款，`EdgeModelStore` 将 LICENSE 列为必需文件）。决策图固定 `decision_q4.onnx`：官方 8-bit `decision_quantized.onnx` 的 MatMulNBits 节点缺 `accuracy_level=4`，ORT 1.22 在 macOS x86_64 与 Android arm64 均报 `Only 4b quantization is supported for unpacked compute`；q4 已在两端实测跑通。`EdgeModelStore.prepare` 按 `EdgeModelKind` 选图，SmolVLM 保持 Q4/quantized 回退策略，d1 不做图名猜测。权重在独立的 edge-model-solutions 仓库入库；street-snap 仍不提交权重、APK 与清单。
+d1-omni-600M 为第二个可选 ranker，`EdgeModelCatalog` 固定 `onnx-community/d1-omni-600M-ONNX` revision `4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0`；图像栈三张图均带 `.onnx_data` 外部权重（vision_encoder_fp16 约 180 MiB、embed_tokens_quantized 约 41 MiB、decision_q4 约 192 MiB，11 个文件合计 `437,985,561` bytes / 417.7 MiB），另含 config/tokenizer×2/preprocessor 与仓库根 `LICENSE`（LFM Open License v1.0，含年收入门槛条款，`EdgeModelStore` 将 LICENSE 列为必需文件）。决策图固定 `decision_q4.onnx`：官方 8-bit `decision_quantized.onnx` 的 MatMulNBits 节点缺 `accuracy_level=4`，ORT 1.22 在 macOS x86_64 与 Android arm64 均报 `Only 4b quantization is supported for unpacked compute`；q4 已在两端实测跑通。2026-10-20 SmolVLM 下架后，`EdgeModelStore.prepare` 固定取 d1 三张图，不做图名猜测或回退。权重在独立的 edge-model-solutions 仓库入库；street-snap 仍不提交权重、APK 与清单。
 
 默认 Preview/CI 不内置权重。显式内置调试包使用项目外模型目录，首次在前台启用构图辅助时导入应用私有目录；普通构建清理残留 staging，避免意外带入模型。复现命令：
 

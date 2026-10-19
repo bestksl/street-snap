@@ -1,7 +1,6 @@
 package dev.streetsnap.app
 
 import dev.streetsnap.app.edge.EdgeModelCatalog
-import dev.streetsnap.app.edge.EdgeModelKind
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
 import org.json.JSONObject
@@ -254,10 +253,16 @@ class SettingsJsonTest {
         // Corrupt/unknown values never leave a phantom overlay on screen.
         assertEquals(ViewfinderOsd.OFF,
             SettingsJson.decode("""{"version":4,"viewfinderOsd":"LEVELS"}""").viewfinderOsd)
-        // The corner button walks the full cycle and returns to off.
+        // The corner button toggles the small histogram; the exposure readout moved to the
+        // always-on shoulder strip, so the in-picture cycle no longer has a PARAMS step.
         var mode: String? = null
-        val sequence = List(4) { mode = ViewfinderOsd.next(mode); mode }
-        assertEquals(listOf(ViewfinderOsd.HISTOGRAM, ViewfinderOsd.PARAMS, ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM), sequence)
+        val sequence = List(3) { mode = ViewfinderOsd.next(mode); mode }
+        assertEquals(listOf(ViewfinderOsd.HISTOGRAM, ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM), sequence)
+        // Legacy installs may still have PARAMS persisted: it decodes and draws as histogram.
+        assertEquals(ViewfinderOsd.PARAMS,
+            SettingsJson.decode("""{"version":4,"viewfinderOsd":"PARAMS"}""").viewfinderOsd)
+        assertTrue(ViewfinderOsd.showsHistogram(ViewfinderOsd.PARAMS))
+        assertFalse(ViewfinderOsd.showsHistogram(ViewfinderOsd.OFF))
     }
 
     @Test fun lookAdviceDefaultsOnAndDismissMemorySurvivesRoundTrip() {
@@ -292,15 +297,18 @@ class SettingsJsonTest {
     @Test fun freshInstallSelectsTheRecommendedD1RankerAndUnknownIdsFallBack() {
         assertEquals("d1-omni-600m", EdgeModelCatalog.DEFAULT_MODEL_ID)
         assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)
-        assertEquals(EdgeModelKind.D1_OMNI_CHOICE,
-            EdgeModelCatalog.find(AppSettings().compositionModel)!!.kind)
-        // A document without the field (upgrades) and one with a removed/unknown id both recover to the default.
+        // A document without the field (upgrades), a removed/unknown id, and a retired
+        // SmolVLM selection all recover to the shipped default (d1-omni-600m).
         assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"preset":"MONO"}""").compositionModel)
         assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"compositionModel":"removed-model"}""").compositionModel)
-        // An explicit, still-shipped selection is preserved rather than silently migrated.
-        assertEquals("smolvlm-256m",
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"compositionModel":"smolvlm-256m"}""").compositionModel)
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+            SettingsJson.decode("""{"version":4,"compositionModel":"smolvlm-500m"}""").compositionModel)
+        // The shipped selection is preserved rather than migrated.
+        assertEquals("d1-omni-600m",
+            SettingsJson.decode("""{"version":4,"compositionModel":"d1-omni-600m"}""").compositionModel)
     }
 }

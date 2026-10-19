@@ -20,6 +20,10 @@ internal object ColorShaders {
         uniform highp ${if (external) "samplerExternalOES" else "sampler2D"} uImage;
         uniform sampler3D uLut;
         uniform sampler2D uBloom;
+        // Independent, much lower-resolution broad-halo layer (HDF only). The tight bright
+        // core stays in uBloom; keeping the wide layer separate means heavily blurring the
+        // halo can never smear the core into the washed-out gray veil of the earlier design.
+        uniform sampler2D uBloomWide;
         uniform mat4 uInputTransform;
         uniform vec3 uDomainMin;
         uniform vec3 uDomainMax;
@@ -81,15 +85,20 @@ internal object ColorShaders {
 
         vec3 brightAt(vec2 uv) {
             vec3 color = grade(sourceAt(uv));
-            if (uHdr > 0.0) {
-                // HDF keys on the brightest channel (colored lamps keep their tint) but the
-                // knee is high: only light approaching clipping spreads, so ordinary skies
-                // and midtones never feed the halo.
+            if (uHdf > 0.0 || uHdr > 0.0) {
+                // Key on the BRIGHTEST CHANNEL, not on luma: a red/blue lamp has low luma but
+                // a high single channel, and must still bloom (this was the HDF regression —
+                // HDF set uHdf but this branch only looked at uHdr, so HDF fell through to the
+                // luma knee and coloured point lights were never extracted). The soft knee only
+                // admits light approaching clipping, so ordinary skies and midtones stay out
+                // and the shadows get zero lift downstream. HDF uses a slightly wider/knee than
+                // the HDR look so lamps read clearly at the default strength.
                 float key = max(color.r, max(color.g, color.b));
-                return color * smoothstep(0.74, 0.92, key);
+                float lo = uHdf > 0.0 ? 0.72 : 0.74;
+                float hi = uHdf > 0.0 ? 0.90 : 0.92;
+                return color * smoothstep(lo, hi, key);
             }
-            // A soft high-light knee excludes middle gray, so wider diffusion does not wash
-            // an evenly lit scene with a gray veil. Exposure still determines light sources.
+            // Defensive only: prepareBloom runs with uHdf/uHdr > 0, so this path is unused.
             return color * smoothstep(0.66, 0.94, luminance(color));
         }
 
@@ -150,17 +159,32 @@ internal object ColorShaders {
                 // keeps the dark regions clean (the 1-color factor is load-bearing).
                 vec3 scatterGap = 1.0 - clamp(color, 0.0, 1.0);
                 if (uHdf > 0.0) {
-                    // Diffuse bright light over the untouched center detail, instead of blurring it.
-                    // The broader bloom is visible around lamps/windows even at the default 0.4.
-                    // HDF-only output stays exactly as before (no HDR desaturation applied).
-                    color += scatterGap * glow * uHdf * 1.25;
+                    // Two-layer optical diffusion (Black Pro-Mist 1/4 style):
+                    //  - tight core keeps the lamp's tint and gains as the blurred highlight
+                    //    approaches clipping (the extracted sheet is clamped to RGBA8, so the
+                    //    near-clipping excess is driven from post-blur luminance);
+                    //  - broad halo is an independent low-resolution layer, mildly desaturated,
+                    //    reading as a soft spherical glow around point lamps/bright windows
+                    //    without the gray fog a single widened blur produces.
+                    // scatterGap (1 - color) is load-bearing for keeping shadows at zero lift.
+                    vec3 core = texture(uBloom, vUv).rgb;
+                    core *= 1.0 + 0.25 * luminance(core);
+                    vec3 wideTex = texture(uBloomWide, vUv).rgb;
+                    vec3 wide = mix(vec3(luminance(wideTex)), wideTex, 0.85);
+                    color += scatterGap * (core * 1.50 + wide * 0.55) * uHdf;
                 }
                 if (uHdr > 0.0) {
-                    // Tight, mostly-neutral halo hugging the highlight edge (a real diffusion
-                    // filter never washes the midtones); weight is a fraction of the old
-                    // 0.90-1.90 HDR-look range, and the blur radius matches the plain bloom.
-                    vec3 halo = mix(vec3(luminance(glow)), glow, 0.60);
-                    color += scatterGap * halo * mix(0.18, 0.45, uHdr);
+                    // The actual HDF button (legacy uniform name): same two-layer optical
+                    // model as the soft diffusion, tuned a touch tighter. A tinted tight
+                    // core plus the INDEPENDENT broad halo is what makes point lamps and
+                    // street lights read with a visible glow at the default strength — the
+                    // old tight-only, heavily desaturated single halo was the "HDF not
+                    // obvious" report. scatterGap still guarantees zero shadow lift.
+                    float amount = mix(0.22, 0.68, uHdr);
+                    vec3 coreHalo = mix(vec3(luminance(glow)), glow, 0.60);
+                    vec3 wideTex = texture(uBloomWide, vUv).rgb;
+                    vec3 wideHalo = mix(vec3(luminance(wideTex)), wideTex, 0.75);
+                    color += scatterGap * (coreHalo * 0.70 + wideHalo * 0.45) * amount;
                 }
             }
             vec2 centered = (vUv - 0.5) * 1.41421356;

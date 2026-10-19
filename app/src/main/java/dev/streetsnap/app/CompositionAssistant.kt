@@ -17,11 +17,10 @@ import dev.streetsnap.app.edge.CompositionSuggestion
 import dev.streetsnap.app.edge.CropRanking
 import dev.streetsnap.app.edge.CandidateRanker
 import dev.streetsnap.app.edge.D1OmniRuntime
+import dev.streetsnap.app.edge.EdgeModelEntry
 import dev.streetsnap.app.edge.EdgeModelCatalog
-import dev.streetsnap.app.edge.EdgeModelKind
 import dev.streetsnap.app.edge.EdgeModelStore
 import dev.streetsnap.app.edge.ModelDownloadPlan
-import dev.streetsnap.app.edge.SmolVlmRuntime
 import dev.streetsnap.camera.CompositionFrameSource
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -72,6 +71,8 @@ internal data class CompositionUiState(
     val adviceOrigin: AdviceOrigin? = null,
     val fastAdviceMs: Long? = null,
     val modelSelectionMs: Long? = null,
+    /** Wall-clock durations of the most recent ranking passes (success/timeout/failure), for dev diagnostics. */
+    val inferenceHistoryMs: List<Long> = emptyList(),
     val isRequestRunning: Boolean = false,
 )
 internal data class CompositionOverlay(
@@ -411,6 +412,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 var runtime: CandidateRanker? = null
                 var frames: CompositionFrameSource? = null
                 var modelJob: Job? = null
+                var runtimeJob: Job? = null
                 var rankingDisabled = false
                 var nextModelAtMs = 0L
                 var lastRankedScene: (() -> Boolean)? = null
@@ -506,6 +508,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         nextModelAtMs = now + next.cooldownMs
                         _state.update { it.copy(lastInferenceMs = elapsed.takeIf { fresh }, modelSelectionMs = elapsed.takeIf { fresh },
                             lastOutcome = outcome, inferenceStartedAtMs = null,
+                            inferenceHistoryMs = (it.inferenceHistoryMs + elapsed).takeLast(10),
                             sampleIntervalMs = next.cooldownMs, inferenceBudgetMs = budgetMs,
                             statusText = when (outcome) {
                                 CompositionOutcome.RETURNED -> "AI 已从候选中选择构图"
@@ -535,6 +538,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             val elapsed = started?.let { SystemClock.elapsedRealtime() - it }
                             _state.update { it.copy(lastOutcome = CompositionOutcome.FAILED,
                                 lastInferenceMs = elapsed, modelSelectionMs = elapsed,
+                                inferenceHistoryMs = if (elapsed != null)
+                                    (it.inferenceHistoryMs + elapsed).takeLast(10) else it.inferenceHistoryMs,
                                 statusText = "模型比较暂不可用，保留图像构图建议") }
                             Log.w("StreetSnapComposition", "model_outcome=FAILED elapsed_ms=$elapsed", error)
                         }
@@ -548,9 +553,75 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     }
                 }
 
+                // PERF-1: build the native ONNX sessions off the camera critical path. Asset
+                // import, the store lookup and the three ALL_OPT session constructions run on
+                // IO, launched before ImageAnalysis is bound, so graph optimization overlaps
+                // CameraX binding and the first analysed frame instead of serialising behind
+                // them. The session still owns the published [runtime] and closes it exactly
+                // once in finally; a runtime built for a stale generation closes itself.
+                suspend fun ensureRuntimePublished(model: EdgeModelEntry) {
+                    var created: CandidateRanker? = null
+                    try {
+                        val installed = withContext(Dispatchers.IO) {
+                            if (!modelPreferences.getBoolean("bundled-disabled-${model.id}", false)) {
+                                store.installBundled(model) ?: store.installed(model)
+                            } else {
+                                store.installed(model)
+                            }
+                        }
+                        if (!isCurrentSession()) {
+                            withContext(Dispatchers.IO) { runCatching { created?.close() } }
+                            return
+                        }
+                        if (_state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
+                                ModelInstallStatus.REMOVING, ModelInstallStatus.AVAILABLE)) {
+                            _state.update { it.copy(install = if (installed == null) ModelInstallStatus.ABSENT else ModelInstallStatus.INSTALLED,
+                                bytes = installed?.plan?.totalBytes ?: it.bytes) }
+                        }
+                        if (installed == null) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                            _state.update { it.copy(statusText = "图像构图建议可用，可安装模型进行择优") }
+                            return
+                        }
+                        val builtAt = SystemClock.elapsedRealtime()
+                        val engine = withContext(Dispatchers.IO) {
+                            D1OmniRuntime(installed)
+                        }.also { created = it }
+                        Log.i("StreetSnapComposition",
+                            "model_runtime_ready_ms=${SystemClock.elapsedRealtime() - builtAt} model=${model.id}")
+                        if (!isCurrentSession()) {
+                            withContext(Dispatchers.IO) { runCatching { engine.close() } }
+                            return
+                        }
+                        runtime = engine
+                        runtimeReady.complete(engine)
+                    } catch (cancelled: CancellationException) {
+                        withContext(Dispatchers.IO) { runCatching { created?.close() } }
+                        throw cancelled
+                    } catch (error: Exception) {
+                        if (isCurrentSession()) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                            _state.update { it.copy(statusText = "本地模型暂不可用，图像构图建议仍可使用") }
+                            Log.w("StreetSnapComposition", "model_load_failed", error)
+                        }
+                    }
+                }
+
                 try {
                     val model = requireNotNull(EdgeModelCatalog.find(config.id))
                     val analysisWanted = config.foreground && (config.enabled || config.lookAdvice)
+                    // Start warming native sessions before the frame source is bound. An
+                    // image-only restart (after model removal) has no model to load.
+                    if (config.enabled && config.foreground) {
+                        if (imageOnly) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                        } else {
+                            runtimeJob = sessionScope.launch(Dispatchers.Main.immediate) { ensureRuntimePublished(model) }
+                        }
+                    }
                     if (analysisWanted) {
                         // Rule advice runs in single-digit milliseconds, so the cadence is
                         // set by the frame clocks, not by compute: ~4 advice refreshes/s.
@@ -699,42 +770,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         runtimeReady.complete(null)
                         awaitCancellation()
                     }
-                    try {
-                        val installed = withContext(Dispatchers.IO) {
-                            if (imageOnly) null
-                            else if (config.enabled && config.foreground &&
-                                !modelPreferences.getBoolean("bundled-disabled-${model.id}", false)) {
-                                store.installBundled(model) ?: store.installed(model)
-                            } else store.installed(model)
-                        }
-                        currentCoroutineContext().ensureActive()
-                        if (!imageOnly && _state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
-                                ModelInstallStatus.REMOVING, ModelInstallStatus.AVAILABLE)) {
-                            _state.update { it.copy(install = if (installed == null) ModelInstallStatus.ABSENT else ModelInstallStatus.INSTALLED,
-                                bytes = installed?.plan?.totalBytes ?: it.bytes) }
-                        }
-                        if (!config.enabled || !config.foreground) return@withLock
-                        if (installed == null) {
-                            rankingDisabled = true
-                            runtimeReady.complete(null)
-                            _state.update { it.copy(statusText = "图像构图建议可用，可安装模型进行择优") }
-                        } else {
-                            withContext(Dispatchers.IO) {
-                                runtime = when (model.kind) {
-                                    EdgeModelKind.D1_OMNI_CHOICE -> D1OmniRuntime(installed)
-                                    EdgeModelKind.SMOLVLM_CHOICE -> SmolVlmRuntime(installed)
-                                }
-                            }
-                            currentCoroutineContext().ensureActive()
-                            runtimeReady.complete(requireNotNull(runtime))
-                        }
-                    } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (error: Exception) {
-                        rankingDisabled = true
-                        runtimeReady.complete(null)
-                        _state.update { it.copy(statusText = "本地模型暂不可用，图像构图建议仍可使用") }
-                        Log.w("StreetSnapComposition", "model_load_failed", error)
-                    }
+                    // enabled + foreground: runtimeJob has already warmed and published the
+                    // runtime off the critical path. A non-foreground session binds neither
+                    // frames nor a model and ends here instead of parking.
+                    if (!config.foreground) return@withLock
                     awaitCancellation()
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Throwable) {
@@ -747,6 +786,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     runtimeReady.complete(null)
                     withContext(NonCancellable) {
                         modelJob?.cancelAndJoin()
+                        // Join before closing: either the engine was published to [runtime]
+                        // (closed below) or a stale/cancelled build closed it itself.
+                        runtimeJob?.cancelAndJoin()
                         withContext(Dispatchers.IO) {
                             inferenceMutex.withLock { runCatching { runtime?.close() } }
                         }

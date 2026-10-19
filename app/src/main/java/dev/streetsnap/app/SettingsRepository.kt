@@ -131,18 +131,21 @@ internal object CameraPreferences {
     fun orientation(id: String?): String = id?.takeIf { it in orientations } ?: DEFAULT_ORIENTATION
 }
 
-/** Viewfinder overlay cycle. Nothing here is fabricated: the readout shows reported camera values only. */
+/**
+ * Viewfinder overlay cycle. The live exposure numbers now live on the always-on shoulder
+ * strip above the shutter, so the in-picture cycle is just the histogram; PARAMS is kept as
+ * a parseable legacy value (installed builds that stored it) and renders exactly like
+ * HISTOGRAM. Nothing here is fabricated: every readout value is reported by the camera.
+ */
 internal object ViewfinderOsd {
     const val OFF = "OFF"
     const val HISTOGRAM = "HISTOGRAM"
     const val PARAMS = "PARAMS"
     private val modes = setOf(OFF, HISTOGRAM, PARAMS)
     fun mode(value: String?): String = value?.takeIf { it in modes } ?: OFF
-    fun next(value: String?): String = when (mode(value)) {
-        OFF -> HISTOGRAM
-        HISTOGRAM -> PARAMS
-        else -> OFF
-    }
+    /** True whenever the small histogram window should be drawn (legacy PARAMS included). */
+    fun showsHistogram(value: String?): Boolean = mode(value) != OFF
+    fun next(value: String?): String = if (mode(value) == OFF) HISTOGRAM else OFF
 }
 
 /** Keep the old key so installing over v0.1 migrates settings without losing the selected look. */

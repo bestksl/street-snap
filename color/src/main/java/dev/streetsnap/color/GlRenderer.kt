@@ -37,6 +37,12 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     private val bloomBuffers = IntArray(2)
     private var bloomWidth = 0
     private var bloomHeight = 0
+    // Independent, much smaller pair for HDF's broad halo. Never ping-ponged with the tight
+    // core pair: widening the blur on the core buffers is what smeared earlier HDF revisions.
+    private val wideBloomTextures = IntArray(2)
+    private val wideBloomBuffers = IntArray(2)
+    private var wideBloomWidth = 0
+    private var wideBloomHeight = 0
     private var bloomValid = false
     // Smoothed HDR level for preview frames so AE jumps/toggles cannot pop the halo.
     // Stills are fresh renderers and settle immediately on the first draw.
@@ -215,15 +221,24 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         val diffusionOn = state.recipe.hdfEnabled && state.recipe.hdfStrength > 0f
         val hdrOn = state.recipe.hdrEnabled && state.recipe.hdrStrength > 0f
         GLES30.glUniform1i(uniform("uBloom"), 2)
+        GLES30.glUniform1i(uniform("uBloomWide"), 3)
         if (diffusionOn || hdrOn) {
-            // Photo strips share a single whole-image bloom texture. Preview updates every frame.
-            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight)
+            // Photo strips share a single whole-image bloom texture. Preview updates every
+            // frame. Both the soft-diffusion look and the HDF button get the independent
+            // wide halo: HDF's whole point is a visible glow around lamps/highlights.
+            val wideWanted = diffusionOn || hdrOn
+            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight, wideWanted)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D,
+                if (wideWanted) wideBloomTextures[0] else 0)
         } else {
-            // Unbind any bloom texture from a previously-enabled frame so a stale halo can
+            // Unbind both bloom textures from a previously-enabled frame so a stale halo can
             // never be sampled now that uHdf/uHdr are both zero.
             GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
@@ -234,65 +249,96 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         checkGl("渲染影调")
     }
 
-    /** At most two 384px-long-edge RGBA textures, reused until output aspect/size changes. */
-    private fun prepareBloom(width: Int, height: Int) {
-        val scale = minOf(1f, 384f / maxOf(width, height))
-        val targetWidth = maxOf(1, (width * scale).toInt())
-        val targetHeight = maxOf(1, (height * scale).toInt())
+    /**
+     * Tight core pair at at most 384 px long edge, plus — for HDF — an independent wide-halo
+     * pair at at most 192 px long edge. Keeping the broad blur on its own small pair is what
+     * lets a large radius read as a soft spherical glow around lamps cheaply, instead of
+     * widening the core into the washed-out gray veil that blurring one shared pair caused.
+     * All four are reused until the output size changes.
+     */
+    private fun prepareBloom(width: Int, height: Int, wideWanted: Boolean) {
+        val coreScale = minOf(1f, 384f / maxOf(width, height))
+        val coreW = maxOf(1, (width * coreScale).toInt())
+        val coreH = maxOf(1, (height * coreScale).toInt())
+        val wideScale = minOf(1f, 192f / maxOf(width, height))
+        val wideW = maxOf(1, (width * wideScale).toInt())
+        val wideH = maxOf(1, (height * wideScale).toInt())
         GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
-        if (targetWidth != bloomWidth || targetHeight != bloomHeight) {
+        if (coreW != bloomWidth || coreH != bloomHeight ||
+            (wideWanted && (wideW != wideBloomWidth || wideH != wideBloomHeight))) {
             releaseBloom()
-            GLES30.glGenTextures(2, bloomTextures, 0)
-            GLES30.glGenFramebuffers(2, bloomBuffers, 0)
-            for (index in 0..1) {
-                GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[index])
-                GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
-                GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
-                GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
-                GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
-                GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, targetWidth, targetHeight,
-                    0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
-                GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[index])
-                GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
-                    GLES30.GL_TEXTURE_2D, bloomTextures[index], 0)
-                check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) {
-                    "柔光 GPU 缓冲区创建失败"
-                }
+            createBloomPair(bloomTextures, bloomBuffers, coreW, coreH)
+            bloomWidth = coreW
+            bloomHeight = coreH
+            if (wideWanted) {
+                createBloomPair(wideBloomTextures, wideBloomBuffers, wideW, wideH)
+                wideBloomWidth = wideW
+                wideBloomHeight = wideH
             }
-            bloomWidth = targetWidth
-            bloomHeight = targetHeight
         }
-        GLES30.glViewport(0, 0, bloomWidth, bloomHeight)
         GLES30.glUniform4f(uniform("uTile"), 0f, 0f, 1f, 1f)
-        GLES30.glUniform2f(uniform("uBloomSize"), bloomWidth.toFloat(), bloomHeight.toFloat())
-
-        // Extract from the same source transform and grade as the final image.
-        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[0])
-        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[1])
         GLES30.glUniform1i(uniform("uPass"), 1)
-        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
-
-        GLES30.glUniform1i(uniform("uPass"), 2)
-        // Two successive scales widen the visible halo and soften sparse point highlights.
-        // Both run only on the bounded bloom textures, reusing the same two buffers.
-        // HDF deliberately uses the SAME tight radii as the plain soft bloom: earlier extra
-        // wide scales spread window light deep into midtones and read as a washed-out white
-        // veil, which a real diffusion filter never does; see docs/hdr-film-research.md.
-        val fractions = floatArrayOf(.008f, .014f)
-        for (fraction in fractions) {
-            val radius = minOf(bloomWidth, bloomHeight) * fraction
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[1])
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
-            GLES30.glUniform2f(uniform("uBloomStep"), radius / bloomWidth, 0f)
-            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
-
-            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[0])
-            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[1])
-            GLES30.glUniform2f(uniform("uBloomStep"), 0f, radius / bloomHeight)
-            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        // Extract the same graded near-clipping highlights into both sheets; bilinear
+        // downsampling gives the wide sheet a free box-filter pre-blur.
+        extractHighlights(bloomBuffers[0], bloomWidth, bloomHeight)
+        if (wideWanted) extractHighlights(wideBloomBuffers[0], wideBloomWidth, wideBloomHeight)
+        // Tight bright core: two short separable scales (ping-pong ends on texture [0]).
+        blurBloomPair(bloomTextures, bloomBuffers, bloomWidth, bloomHeight, floatArrayOf(.008f, .014f))
+        // Broad faint halo: much larger radii on the separate small pair.
+        if (wideWanted) {
+            blurBloomPair(wideBloomTextures, wideBloomBuffers,
+                wideBloomWidth, wideBloomHeight, floatArrayOf(.026f, .042f))
         }
         checkGl("扩散高光")
         bloomValid = true
+    }
+
+    private fun createBloomPair(textures: IntArray, buffers: IntArray, targetWidth: Int, targetHeight: Int) {
+        GLES30.glGenTextures(2, textures, 0)
+        GLES30.glGenFramebuffers(2, buffers, 0)
+        for (index in 0..1) {
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textures[index])
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MIN_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_MAG_FILTER, GLES30.GL_LINEAR)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_S, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexParameteri(GLES30.GL_TEXTURE_2D, GLES30.GL_TEXTURE_WRAP_T, GLES30.GL_CLAMP_TO_EDGE)
+            GLES30.glTexImage2D(GLES30.GL_TEXTURE_2D, 0, GLES30.GL_RGBA8, targetWidth, targetHeight,
+                0, GLES30.GL_RGBA, GLES30.GL_UNSIGNED_BYTE, null)
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, buffers[index])
+            GLES30.glFramebufferTexture2D(GLES30.GL_FRAMEBUFFER, GLES30.GL_COLOR_ATTACHMENT0,
+                GLES30.GL_TEXTURE_2D, textures[index], 0)
+            check(GLES30.glCheckFramebufferStatus(GLES30.GL_FRAMEBUFFER) == GLES30.GL_FRAMEBUFFER_COMPLETE) {
+                "柔光 GPU 缓冲区创建失败"
+            }
+        }
+    }
+
+    /** Pass 1: graded highlight extraction into [fbo] at the pair's own resolution. */
+    private fun extractHighlights(fbo: Int, targetWidth: Int, targetHeight: Int) {
+        GLES30.glViewport(0, 0, targetWidth, targetHeight)
+        GLES30.glUniform2f(uniform("uBloomSize"), targetWidth.toFloat(), targetHeight.toFloat())
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    /** Separable 5-tap Gaussian ping-pong; each fraction is one horizontal + one vertical pass. */
+    private fun blurBloomPair(
+        textures: IntArray, buffers: IntArray, targetWidth: Int, targetHeight: Int, fractions: FloatArray,
+    ) {
+        GLES30.glViewport(0, 0, targetWidth, targetHeight)
+        GLES30.glUniform1i(uniform("uPass"), 2)
+        for (fraction in fractions) {
+            val radius = minOf(targetWidth, targetHeight) * fraction
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, buffers[1])
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textures[0])
+            GLES30.glUniform2f(uniform("uBloomStep"), radius / targetWidth, 0f)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+
+            GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, buffers[0])
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, textures[1])
+            GLES30.glUniform2f(uniform("uBloomStep"), 0f, radius / targetHeight)
+            GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+        }
     }
 
     private fun releaseBloom() {
@@ -302,6 +348,13 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         bloomBuffers.fill(0)
         bloomWidth = 0
         bloomHeight = 0
+        // Deleting zero ids is a no-op, so this is safe even when no wide pair was built.
+        GLES30.glDeleteTextures(2, wideBloomTextures, 0)
+        GLES30.glDeleteFramebuffers(2, wideBloomBuffers, 0)
+        wideBloomTextures.fill(0)
+        wideBloomBuffers.fill(0)
+        wideBloomWidth = 0
+        wideBloomHeight = 0
         bloomValid = false
     }
 
