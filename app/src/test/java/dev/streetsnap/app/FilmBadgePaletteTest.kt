@@ -59,4 +59,22 @@ class FilmBadgePaletteTest {
         assertTrue(p.original)
         assertNull(p.accent)
     }
+
+    @Test fun everyStockAndPresetPrintsAConcreteTwoLineModelDesignation() {
+        for (film in FilmRegistry.entries) {
+            val c = FilmPackCopy.of(film.id, film.basePreset)
+            assertTrue("${film.id} tag", c.tag.isNotBlank())
+            assertTrue("${film.id} model line 1", c.line1.isNotBlank())
+            assertTrue("${film.id} model line 2", c.line2.isNotBlank())
+        }
+        for (preset in ColorPreset.values()) {
+            val c = FilmPackCopy.of(null, preset)
+            assertTrue(preset.name, c.line1.isNotBlank() && c.line2.isNotBlank())
+        }
+        // An unknown film id falls back to its preset copy instead of hiding the badge.
+        assertEquals(
+            FilmPackCopy.of(null, ColorPreset.SUNNY),
+            FilmPackCopy.of("NOT_A_REAL_FILM", ColorPreset.SUNNY),
+        )
+    }
 }

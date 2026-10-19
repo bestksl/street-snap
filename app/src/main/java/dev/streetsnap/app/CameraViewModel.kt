@@ -47,7 +47,7 @@ data class LookAdviceCard(
     val trying: Boolean = false,
 )
 
-/** Exposure hint card. The action text (EV stop / HDR suggestion) is formatted here. */
+/** Exposure hint card. The action text (EV stop / HDF suggestion) is formatted here. */
 data class ExposureAdviceCard(
     val message: String,
 )
@@ -108,7 +108,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val nextEv = (capture.exposureCompensationIndex + advice.issue.evDirection) * step
         _exposureAdviceCard.value = ExposureAdviceCard(
             when (advice.issue) {
-                ExposureIssue.WIDE_DYNAMIC_RANGE -> "明暗光比大，可开 HDR 或避开强光"
+                ExposureIssue.WIDE_DYNAMIC_RANGE -> "明暗光比大，可开 HDF 高光扩散或避开强光"
                 ExposureIssue.HIGHLIGHTS_CLIPPED -> "高光过亮，建议 EV %+.1f".format(nextEv)
                 ExposureIssue.SHADOWS_CLIPPED -> "暗部太黑，建议 EV %+.1f".format(nextEv)
             },

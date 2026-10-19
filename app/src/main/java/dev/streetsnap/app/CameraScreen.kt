@@ -46,6 +46,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
@@ -257,6 +258,9 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         val clusterMinHeight = 218.dp
                         val framedWidth = minOf(maxWidth, (maxHeight - nameplateHeight - clusterMinHeight) * 3f / 4f)
                         Column(Modifier.fillMaxSize().background(Color.Black)) {
+                            // Second collector of the same StateFlow: the Viewfinder keeps
+                            // its own for the landscape / hidden-nameplate floating path.
+                            val nameplateLookCard by model.lookAdviceCard.collectAsStateWithLifecycle()
                             if (!hideNameplate) {
                                 val following = settings.mascotCamera == null
                                 val activePreset = settings.colorRecipe().preset
@@ -281,11 +285,31 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                                         if (following) adjustmentTab = AdjustmentTab.LOOK
                                         else showMascotPicker = true
                                     },
-                                    modifier = Modifier.fillMaxWidth().height(nameplateHeight))
+                                    modifier = Modifier.fillMaxWidth().height(nameplateHeight),
+                                    trailing = {
+                                        val card = nameplateLookCard
+                                        // The row cannot fit both the full chip (label + dismiss +
+                                        // try/keep actions) and the badge at phone widths, so while a
+                                        // suggestion is active the chip owns the row — the body card
+                                        // already names the film family — and the badge otherwise
+                                        // remains the constant right-side resident.
+                                        Spacer(Modifier.weight(1f))
+                                        if (card != null) {
+                                            NameplateLookChip(card,
+                                                onTry = model::trySuggestedLook,
+                                                onKeep = model::keepSuggestedLook,
+                                                onRevert = model::revertSuggestedLook,
+                                                onDismiss = model::dismissLookAdvice)
+                                        } else {
+                                            FilmFrameBadge(settings.filmId, activePreset, lookName,
+                                                onClick = { adjustmentTab = AdjustmentTab.LOOK })
+                                        }
+                                    })
                             }
                             Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
                                 Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ },
-                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
+                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
+                                nameplateHidden = hideNameplate)
                             ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
                                 Modifier.fillMaxWidth().weight(1f), framed = true,
                                 onTab = { adjustmentTab = it },
@@ -358,6 +382,11 @@ private fun Viewfinder(
     // 3:4 screen, so overlays only need a small lift off its bottom edge.
     framed: Boolean = false,
     onOpenLooks: () -> Unit = {},
+    /**
+     * Portrait with the nameplate row hidden: the film badge and look suggestion have no
+     * out-of-frame row to live in, so they fall back to floating over the top-end corner.
+     */
+    nameplateHidden: Boolean = false,
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -663,35 +692,40 @@ private fun Viewfinder(
                         else -> "当前对焦模式"
                     })
             }
-            // Persistent HDR toggle, stacked under the OSD corner button; the right column
-            // hosts the histogram/readout card, so the film badge steps below whichever
-            // OSD card is showing (OFF: beside HDR, HISTOGRAM: under it, PARAMS: lowest).
+            // Persistent HDF toggle, stacked under the OSD corner button; the right column
+            // hosts the histogram/readout card.
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
-            // Clipped-highlight/shadow hint under the HDR button it may point at; text-only.
+            // Clipped-highlight/shadow hint under the HDF button it may point at; text-only.
             exposureAdviceCard?.let { card ->
                 ExposureAdviceCardView(card, model::dismissExposureAdvice,
                     Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 100.dp))
             }
-            val badgeTop by animateDpAsState(
-                when (osdMode) {
-                    ViewfinderOsd.HISTOGRAM -> 106.dp
-                    ViewfinderOsd.PARAMS -> 180.dp
-                    else -> 52.dp
-                }, label = "filmBadgeTop")
-            val badgePreset = settings.colorRecipe().preset
-            val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
-                ?: badgePreset.displayName
-            FilmFrameBadge(settings.filmId, badgePreset, badgeLabel, onOpenLooks,
-                Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop))
-            // Anchored to the film badge (T30): suggest only, tap to preview, × to dismiss.
-            lookAdviceCard?.let { card ->
-                LookAdviceCardView(card,
-                    onTry = model::trySuggestedLook,
-                    onKeep = model::keepSuggestedLook,
-                    onRevert = model::revertSuggestedLook,
-                    onDismiss = model::dismissLookAdvice,
-                    Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 54.dp))
+            // In framed portrait the film badge and look suggestion live in the nameplate
+            // row (outside the picture), so they float in-frame only on landscape paths and
+            // when the nameplate is hidden. There they must step below whichever OSD card
+            // is showing (OFF: beside HDF, HISTOGRAM: under it, PARAMS: lowest).
+            if (!framed || nameplateHidden) {
+                val badgeTop by animateDpAsState(
+                    when (osdMode) {
+                        ViewfinderOsd.HISTOGRAM -> 106.dp
+                        ViewfinderOsd.PARAMS -> 180.dp
+                        else -> 52.dp
+                    }, label = "filmBadgeTop")
+                val badgePreset = settings.colorRecipe().preset
+                val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
+                    ?: badgePreset.displayName
+                FilmFrameBadge(settings.filmId, badgePreset, badgeLabel, onOpenLooks,
+                    Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop))
+                // Anchored to the film badge (T30): suggest only, tap to preview, × to dismiss.
+                lookAdviceCard?.let { card ->
+                    LookAdviceCardView(card,
+                        onTry = model::trySuggestedLook,
+                        onKeep = model::keepSuggestedLook,
+                        onRevert = model::revertSuggestedLook,
+                        onDismiss = model::dismissLookAdvice,
+                        Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 56.dp))
+                }
             }
             // DSLR-style readout under the histogram. Every value is reported by the
             // camera: automatic slots read AUTO rather than a guessed number, aperture is
@@ -713,9 +747,12 @@ private fun Viewfinder(
                 }
             }
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
+            // Compact by design: capped width, tight padding, single-line supporting rows so
+            // it never covers more than a corner of the frame (user feedback, 2026-10-19).
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
-                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)
+                    .widthIn(max = 208.dp)
+                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp)
                     // T35: long-press the card to preview the suggested framing; releasing restores.
                     // Consuming the down also stops the canvas underneath from tapping focus / AF-L.
                     .pointerInput(compositionOverlay) {
@@ -741,20 +778,24 @@ private fun Viewfinder(
                         // stays as the supporting line. Styles whose copy is already a move
                         // carry actionText = null and keep their single-line rendering.
                         if (s.actionText != null) {
-                            Text(s.actionText, color = Color.White, fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            Text(s.modelText, Modifier.padding(top = 2.dp),
-                                color = Color.White.copy(alpha = .78f), fontSize = 11.sp,
+                            Text(s.actionText, color = Color.White, fontSize = 11.sp,
+                                lineHeight = 14.sp, fontWeight = FontWeight.Medium,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.modelText, Modifier.padding(top = 1.dp),
+                                color = Color.White.copy(alpha = .72f), fontSize = 9.5.sp,
                                 maxLines = 1, overflow = TextOverflow.Ellipsis)
                         } else {
-                            Text(s.modelText, color = Color.White, fontSize = 12.sp,
-                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.modelText, color = Color.White, fontSize = 11.sp,
+                                lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
                     compositionOverlay?.easterEgg?.let {
-                        Text(it, color = Color(0xFFE2FF79), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(it, Modifier.padding(top = 1.dp), color = Color(0xFFE2FF79),
+                            fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Text(compositionTimingLabel(compositionState), color = Color.White.copy(alpha = .78f), fontSize = 10.sp, maxLines = 2)
+                    Text(compositionTimingLabel(compositionState), Modifier.padding(top = 1.dp),
+                        color = Color.White.copy(alpha = .72f), fontSize = 9.sp, maxLines = 1,
+                        overflow = TextOverflow.Ellipsis)
                 }
             }
             val focusHint = when {
@@ -860,9 +901,77 @@ private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
 }
 
 /**
+ * Compact nameplate form of the realtime look suggestion (T30 card redesigned 2026-10-19):
+ * a single small capsule sharing the top nameplate row with the film badge, instead of a
+ * card floating over the picture. Suggesting state: the whole label area previews the look
+ * and a separate × dismisses. Trying state: only Revert/Keep remain. The reason text stays
+ * available through semantics so the visual form can be one quiet line.
+ */
+@Composable
+private fun NameplateLookChip(
+    card: LookAdviceCard,
+    onTry: () -> Unit,
+    onKeep: () -> Unit,
+    onRevert: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier
+            .height(32.dp)
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.Black.copy(alpha = .62f))
+            .then(if (card.trying) Modifier else
+                Modifier.clickable(role = Role.Button, onClick = onTry)
+                    .semantics { contentDescription = "影调建议：${card.label}，${card.reason}，点按试用" })
+            .padding(start = 9.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(7.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFFE2FF79)))
+        Spacer(Modifier.width(6.dp))
+        // The row only has room for the Chinese name; built-in labels carry a code prefix
+        // ("NC · 经典负片") that the chip drops. The trying state shares the row with two
+        // text actions, so it falls back to the short code ("NC") to keep both on screen.
+        // Semantics keep the full label.
+        val shortLabel = card.label.substringAfter(" · ")
+        val chipLabel = if (card.trying && " · " in card.label)
+            "已试用 · " + card.label.substringBefore(" · ")
+        else (if (card.trying) "已试用 · " else "适合 · ") + shortLabel
+        Text(
+            chipLabel,
+            Modifier.widthIn(max = if (card.trying) 104.dp else 150.dp),
+            color = Color.White.copy(alpha = .92f), fontSize = 12.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        if (card.trying) {
+            NameplateChipAction("还原", onRevert)
+            NameplateChipAction("保留", onKeep, emphasized = true)
+        } else {
+            NameplateChipAction("×", onDismiss, description = "忽略此建议")
+            NameplateChipAction("试用", onTry, emphasized = true, description = "试用 ${card.label}")
+        }
+    }
+}
+
+@Composable
+private fun NameplateChipAction(
+    label: String,
+    onClick: () -> Unit,
+    emphasized: Boolean = false,
+    description: String? = null,
+) {
+    TextButton(onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+        modifier = Modifier.height(32.dp)
+            .semantics { if (description != null) contentDescription = description }) {
+        Text(label, fontSize = 12.sp,
+            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+    }
+}
+
+/**
  * Realtime look-suggestion card, anchored under the film badge. Suggesting state: the
  * whole card is a tap-to-preview target with a separate × dismiss. Trying state: the look
  * is already applied as a preview, so the only exits are Keep or Revert (T30).
+ * Used on landscape paths and when the portrait nameplate row is hidden.
  */
 @Composable
 private fun LookAdviceCardView(
@@ -916,7 +1025,7 @@ private fun LookAdviceAction(
 }
 
 /**
- * Exposure hint card under the HDR button. Suggest-only: no button changes exposure,
+ * Exposure hint card under the HDF button. Suggest-only: no button changes exposure,
  * the × dismisses for the rest of the session (T31).
  */
 @Composable
@@ -934,7 +1043,7 @@ private fun ExposureAdviceCardView(card: ExposureAdviceCard, onDismiss: () -> Un
     }
 }
 
-/** Always-on HDR toggle under the OSD corner button; quiet when off, primary-tinted while on. */
+/** Always-on HDF toggle (Ricoh-style highlight diffusion) under the OSD corner button; quiet when off, primary-tinted while on. */
 @Composable
 private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
     val tint = if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
@@ -942,12 +1051,12 @@ private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifie
         .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
         .clickable(role = Role.Button, onClick = onToggle)
         .semantics {
-            contentDescription = "HDR 效果开关"
+            contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
             stateDescription = if (on) "已开启" else "已关闭"
             this.selected = on
         },
         contentAlignment = Alignment.Center) {
-        Text("HDR", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+        Text("HDF", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
@@ -977,13 +1086,19 @@ private fun ViewfinderNameplate(
     subtitle: String,
     onPick: () -> Unit,
     modifier: Modifier = Modifier,
+    // Film badge (and, when present, the compact look-suggestion chip) own the wasted
+    // right side of the nameplate instead of floating over the viewfinder (T38).
+    // The content is RowScope so callers can use a weight spacer to push it right.
+    trailing: @Composable RowScope.() -> Unit = {},
 ) {
     Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
         // Same mid-grey card as the body-picker tiles (#2D3335): the dark vector bodies
-        // only separate from a lighter field, not from black chrome.
-        Box(Modifier.size(92.dp, 52.dp).clip(RoundedCornerShape(11.dp))
+        // only separate from a lighter field, not from black chrome. Sized to the artwork's
+        // native 180:112 study ratio (~1.6): the old 92x52 (1.77) card left the body reading
+        // as squashed, and the 80dp row had unused vertical headroom (2026-10-19).
+        Box(Modifier.size(98.dp, 62.dp).clip(RoundedCornerShape(12.dp))
             .background(Color(0xFF2D3335))
-            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(11.dp))
+            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(12.dp))
             .clickable(role = Role.Button, onClick = onPick)
             .semantics {
                 contentDescription = if (camera != null) "相机铭牌：${camera.brand} ${camera.model}，点按更换"
@@ -991,8 +1106,8 @@ private fun ViewfinderNameplate(
             },
             contentAlignment = Alignment.Center) {
             // Canvas has no intrinsic size; an explicit size is mandatory in the wrapped row.
-            if (camera != null) CameraArtwork(camera, Modifier.size(82.dp, 50.dp))
-            else NeutralLookArtwork(Modifier.size(32.dp))
+            if (camera != null) CameraArtwork(camera, Modifier.size(90.dp, 56.dp))
+            else NeutralLookArtwork(Modifier.size(38.dp))
         }
         Spacer(Modifier.width(12.dp))
         Column {
@@ -1001,6 +1116,7 @@ private fun ViewfinderNameplate(
             Text(subtitle, color = Color.White.copy(alpha = .5f), fontSize = 10.sp,
                 maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
+        trailing()
     }
 }
 
@@ -1045,7 +1161,7 @@ private fun ViewfinderOverlayBar(
             })
         }
         if (settings.hdfEnabled) add(ActiveOverride("柔光", AdjustmentTab.LOOK, "关闭柔光") { model.toggleHdf() })
-        if (settings.hdrEnabled) add(ActiveOverride("HDR", AdjustmentTab.LOOK, "关闭 HDR") { model.toggleHdr() })
+        if (settings.hdrEnabled) add(ActiveOverride("HDF", AdjustmentTab.LOOK, "关闭 HDF") { model.toggleHdr() })
         if (state.settings.focusDistanceDiopters != null)
             add(ActiveOverride("MF", AdjustmentTab.SHOOTING, "恢复自动对焦") { model.autoFocus() })
         if (exposureMode != ExposureMode.PROGRAM) add(ActiveOverride(
@@ -1241,10 +1357,10 @@ private fun ShootingControls(
                 .background(if (settings.hdrEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
                 .toggleable(value = settings.hdrEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdr() }
                 .semantics {
-                    contentDescription = "HDR 效果开关"
+                    contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
                     stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
                 }, contentAlignment = Alignment.Center) {
-                Text("HDR", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                Text("HDF", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
                     color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -1463,10 +1579,10 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             TextButton(onClick = model::toggleHdr, enabled = true,
                 modifier = Modifier.heightIn(min = 48.dp).semantics {
-                    contentDescription = "HDR 效果开关"
+                    contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
                     stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
                 }) {
-                Text(if (settings.hdrEnabled) "HDR · 关" else "HDR", fontSize = 12.sp,
+                Text(if (settings.hdrEnabled) "HDF · 关" else "HDF", fontSize = 12.sp,
                     color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
             TextButton(onClick = model::toggleHdf, modifier = Modifier.heightIn(min = 48.dp)
@@ -1705,7 +1821,7 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     Text("根据取景画面的光线与色彩，偶尔推荐合适的胶片或影调；只建议，不会自动更改。点取景器卡片可试用，也能一键还原。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     ToggleRow("曝光提示", settings.exposureAdviceEnabled) { model.setExposureAdviceEnabled(it) }
-    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示 HDR；只建议，不会自动改曝光。",
+    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示开启 HDF；只建议，不会自动改曝光。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)

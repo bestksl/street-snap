@@ -4,7 +4,7 @@ import dev.streetsnap.camera.ExposureStats
 
 /** What the exposure hint card should say; [evDirection] is -1/0/+1 exposure-compensation stops. */
 internal enum class ExposureIssue(val evDirection: Int) {
-    /** Both ends clip at once: EV cannot save both, so the hint points at HDR/composition. */
+    /** Both ends clip at once: EV cannot save both, so the hint points at HDF/composition. */
     WIDE_DYNAMIC_RANGE(0),
     HIGHLIGHTS_CLIPPED(-1),
     SHADOWS_CLIPPED(+1),
@@ -20,7 +20,7 @@ internal data class ExposureAdvice(val issue: ExposureIssue)
  * scene-change contract.
  *
  * One issue is shown at most once per foreground session, within the shared
- * [AdviceSessionBudget] (≤3 total nudges, exposure is not a "look"). Pure logic.
+ * [AdviceSessionBudget] (≤5 total nudges, exposure is not a "look"). Pure logic.
  */
 internal class ExposureAdviser(
     private val confirmFrames: Int = DEFAULT_CONFIRM_FRAMES,
@@ -40,7 +40,7 @@ internal class ExposureAdviser(
 
     /**
      * @param evAdjustable false in manual ISO/shutter mode, where EV compensation does
-     * not apply; wide-range HDR advice is still allowed.
+     * not apply; wide-range HDF advice is still allowed.
      * @param canLowerEv / canRaiseEv false at the compensation range ends — a nudge with
      * no available action is withheld rather than shown.
      * Returns an advice exactly on the frame it becomes visible, otherwise null.

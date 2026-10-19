@@ -97,8 +97,12 @@ internal class LookAdviser(
     }
 
     companion object {
-        /** Analysis frames arrive on a ~250 ms clock, so 8 frames ≈ 2 s of stable scene. */
-        const val DEFAULT_STABLE_FRAMES = 8
+        /**
+         * Analysis frames arrive on a ~250 ms clock; 5 frames ≈ 1.25 s of stable scene.
+         * Lowered from 8 on 2026-10-19: the suggestion UI is now a quiet nameplate chip,
+         * so a shorter dwell is enough anti-flicker without making the chip rare.
+         */
+        const val DEFAULT_STABLE_FRAMES = 5
         const val SUPPRESS_MILLIS = 7L * 24 * 60 * 60 * 1000
     }
 }

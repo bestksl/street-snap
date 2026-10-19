@@ -61,9 +61,23 @@ class LookRecommendationsTest {
         assertTrue(cool.reason.contains("蓝"))
     }
 
-    @Test fun skyBelowThresholdDoesNotFirePositive() {
+    @Test fun warmVividDayWithoutLargeSkyStillMapsToPositive() {
+        // Sky just under the strong-sky threshold, but warm and vivid: the warm-vivid rule
+        // catches what the sky rule no longer does.
+        val target = LookRecommendations.from(reading(
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.WARM,
+            saturation = LookRecommendations.WARM_VIVID_SATURATION,
+            sky = LookRecommendations.SKY_STRONG - 0.01))
+        assertEquals(ColorPreset.POSITIVE, target!!.preset)
+        assertTrue(target.reason.contains("暖晴"))
+    }
+
+    @Test fun paleWarmDayWithoutSkyAbstains() {
+        // Warm light without enough colour and without sky: no evidence for positive film.
         assertNull(LookRecommendations.from(reading(
-            dayPhase = DayPhase.DAY, warmth = ColorWarmth.WARM, sky = LookRecommendations.SKY_STRONG - 0.01)))
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.WARM,
+            saturation = LookRecommendations.WARM_VIVID_SATURATION - 0.01,
+            contrast = 0.20, sky = LookRecommendations.SKY_STRONG - 0.01)))
     }
 
     @Test fun coolFoliageMapsToClassicChrome() {
@@ -73,13 +87,59 @@ class LookRecommendationsTest {
         assertEquals(ColorPreset.CLASSIC_CHROME, target!!.preset)
     }
 
-    @Test fun warmFoliageAndTwilightFoliageAbstainFromChrome() {
-        // Warm light wins over the green reading: no Classic Chrome suggestion.
-        assertNull(LookRecommendations.from(reading(
-            dayPhase = DayPhase.DAY, warmth = ColorWarmth.WARM, foliage = 0.9)))
+    @Test fun warmFoliageDoesNotMapToChromeButDuskFoliageKeepsDuskMapping() {
+        // Warm light wins over the green reading: no Classic Chrome; vivid warmth maps to positive film.
+        assertEquals(ColorPreset.POSITIVE, LookRecommendations.from(reading(
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.WARM, foliage = 0.9))!!.preset)
         // DUSK has its own higher-priority mapping, so foliage never overrides it.
         assertEquals(ColorPreset.CLASSIC_NEGATIVE, LookRecommendations.from(reading(
             dayPhase = DayPhase.DUSK, warmth = ColorWarmth.WARM, foliage = 0.9))!!.preset)
+    }
+
+    @Test fun warmUnknownPhaseMapsToClassicNegative() {
+        // Warm indoor light with no reliable day phase used to abstain; it now earns Classic Negative.
+        val target = LookRecommendations.from(reading(dayPhase = DayPhase.UNKNOWN, warmth = ColorWarmth.WARM))
+        assertEquals(ColorPreset.CLASSIC_NEGATIVE, target!!.preset)
+        // Neutral unknown light still abstains (and low-contrast grey does not sneak into powder blue
+        // while colours are still strong).
+        assertNull(LookRecommendations.from(reading(dayPhase = DayPhase.UNKNOWN)))
+    }
+
+    @Test fun coolStreetWithoutFoliageMapsToClassicChrome() {
+        val target = LookRecommendations.from(reading(
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.COOL,
+            saturation = LookRecommendations.COOL_SCENE_SATURATION, contrast = 0.22))
+        assertEquals(ColorPreset.CLASSIC_CHROME, target!!.preset)
+        // Almost colourless cool light is not a Classic Chrome scene.
+        assertNull(LookRecommendations.from(reading(
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.COOL,
+            saturation = LookRecommendations.COOL_SCENE_SATURATION - 0.01, contrast = 0.20)))
+        // Night is excluded even with a cool cast; strong night contrast goes to black-and-white.
+        assertEquals("FILM:MONO_01", LookRecommendations.from(reading(
+            dayPhase = DayPhase.NIGHT, warmth = ColorWarmth.COOL,
+            saturation = 0.30, contrast = 0.30, meanLuma = 0.12))!!.key)
+    }
+
+    @Test fun flatBoundaryPrefersPowderBlueOverCoolChrome() {
+        // At saturation == LOW_SATURATION both rules could match; flat low-contrast light
+        // is the stronger evidence, so powder blue must win.
+        val flat = LookRecommendations.from(reading(
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.COOL,
+            saturation = LookRecommendations.LOW_SATURATION,
+            contrast = LookRecommendations.FLAT_CONTRAST - 0.01))
+        assertEquals(ColorPreset.POWDER_BLUE, flat!!.preset)
+        // Same saturation with real contrast falls through to the cool-street mapping.
+        val contrasty = LookRecommendations.from(reading(
+            dayPhase = DayPhase.DAY, warmth = ColorWarmth.COOL,
+            saturation = LookRecommendations.LOW_SATURATION, contrast = 0.22))
+        assertEquals(ColorPreset.CLASSIC_CHROME, contrasty!!.preset)
+    }
+
+    @Test fun unknownPhaseFlatLightMapsToPowderBlue() {
+        val target = LookRecommendations.from(reading(
+            dayPhase = DayPhase.UNKNOWN, saturation = LookRecommendations.LOW_SATURATION,
+            contrast = LookRecommendations.FLAT_CONTRAST - 0.01))
+        assertEquals(ColorPreset.POWDER_BLUE, target!!.preset)
     }
 
     @Test fun overcastFlatDayMapsToPowderBlue() {
