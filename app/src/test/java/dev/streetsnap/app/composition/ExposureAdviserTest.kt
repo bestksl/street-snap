@@ -105,20 +105,26 @@ class ExposureAdviserTest {
         assertNull(adviser.feed(ExposureStats.EMPTY, 10))
     }
 
-    @Test fun sharedBudgetCapsThreeTotalNudgesAcrossKinds() {
+    @Test fun sharedBudgetCapsFiveTotalNudgesAcrossKinds() {
         val budget = AdviceSessionBudget()
         val looks = LookAdviser(stableFrames = 1, budget = budget)
         val exposure = ExposureAdviser(confirmFrames = 1, budget = budget)
-        // Two looks spend the look cap and 2 of 3 total nudges.
+        // Three looks spend the look cap and 3 of 5 total nudges.
         val sky = SceneReading(40, 30, 0.5, 0.0, ColorWarmth.COOL, 0.3, 0.22, 0.0, 0.0, 0.6, 0.0, DayPhase.DAY)
         val dusk = SceneReading(40, 30, 0.4, 0.12, ColorWarmth.WARM, 0.3, 0.22, 0.0, 0.0, 0.0, 0.0, DayPhase.DUSK)
+        val night = SceneReading(40, 30, 0.12, 0.0, ColorWarmth.NEUTRAL, 0.30, 0.30, 0.0, 0.0, 0.0, 0.0, DayPhase.NIGHT)
         assertEquals("POSITIVE", looks.onFrame(sky, "ORIGINAL", emptyMap())!!.key)
         assertEquals("CLASSIC_NEGATIVE", looks.onFrame(dusk, "ORIGINAL", emptyMap())!!.key)
-        // One exposure hint still fits the total of 3...
+        assertEquals("FILM:MONO_01", looks.onFrame(night, "ORIGINAL", emptyMap())!!.key)
+        // The look cap is spent: a fourth look stays silent even though total has room.
+        val chrome = SceneReading(40, 30, 0.5, 0.0, ColorWarmth.NEUTRAL, 0.3, 0.22, 0.0, 0.0, 0.0, 0.4, DayPhase.DAY)
+        assertNull(looks.onFrame(chrome, "ORIGINAL", emptyMap()))
+        // Two exposure hints still fit the total of 5...
         assertEquals(ExposureIssue.HIGHLIGHTS_CLIPPED, exposure.feed(blown, 1)!!.issue)
-        // ...the next one is blocked even though exposure alone has no cap.
-        assertNull(exposure.feed(crushed, 10))
-        exposure.resetSession() // also resets the shared budget
         assertEquals(ExposureIssue.SHADOWS_CLIPPED, exposure.feed(crushed, 1)!!.issue)
+        // ...the next one is blocked even though this issue was never shown yet.
+        assertNull(exposure.feed(both, 10))
+        exposure.resetSession() // also resets the shared budget
+        assertEquals(ExposureIssue.WIDE_DYNAMIC_RANGE, exposure.feed(both, 1)!!.issue)
     }
 }

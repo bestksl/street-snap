@@ -23,6 +23,7 @@ class LookAdviserTest {
 
     private val daySky = reading(DayPhase.DAY, sky = 0.60, warmth = ColorWarmth.COOL) // POSITIVE
     private val dusk = reading(DayPhase.DUSK, warmth = ColorWarmth.WARM) // CLASSIC_NEGATIVE
+    private val foliage = reading(DayPhase.DAY, foliage = 0.40) // CLASSIC_CHROME
     private val night = reading(DayPhase.NIGHT, contrast = 0.30) // FILM:MONO_01
     private val ambiguous = reading(DayPhase.UNKNOWN) // no mapping
 
@@ -74,10 +75,11 @@ class LookAdviserTest {
         assertNull(adviser.feed(daySky, 10))
     }
 
-    @Test fun sessionBudgetCapsAtTwoDistinctSuggestions() {
+    @Test fun sessionBudgetCapsAtThreeDistinctSuggestions() {
         val (adviser) = adviser()
         assertEquals("POSITIVE", adviser.feed(daySky, 3)!!.key)
         assertEquals("CLASSIC_NEGATIVE", adviser.feed(dusk, 3)!!.key)
+        assertEquals("CLASSIC_CHROME", adviser.feed(foliage, 3)!!.key)
         // Budget exhausted: even a fresh, never-shown, stable scene stays silent.
         assertNull(adviser.feed(night, 10))
     }
@@ -86,6 +88,7 @@ class LookAdviserTest {
         val (adviser) = adviser()
         assertEquals("POSITIVE", adviser.feed(daySky, 3)!!.key)
         assertEquals("CLASSIC_NEGATIVE", adviser.feed(dusk, 3)!!.key)
+        assertEquals("CLASSIC_CHROME", adviser.feed(foliage, 3)!!.key)
         assertNull(adviser.feed(night, 10))
         adviser.resetSession()
         assertEquals("FILM:MONO_01", adviser.feed(night, 3)!!.key)
@@ -130,9 +133,9 @@ class LookAdviserTest {
         assertNull(adviser.feed(ambiguous, 10))
     }
 
-    @Test fun defaultStreakIsEightFrames() {
+    @Test fun defaultStreakIsFiveFrames() {
         val adviser = LookAdviser()
-        assertNull(adviser.feed(daySky, 7))
+        assertNull(adviser.feed(daySky, 4))
         assertEquals("POSITIVE", adviser.feed(daySky, 1)!!.key)
     }
 }

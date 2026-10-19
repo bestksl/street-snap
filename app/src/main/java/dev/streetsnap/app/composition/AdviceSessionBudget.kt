@@ -26,7 +26,9 @@ internal class AdviceSessionBudget(
     }
 
     companion object {
-        const val MAX_LOOK = 2
-        const val MAX_TOTAL = 3
+        // Raised 2->3 / 3->5 on 2026-10-19 when look suggestions moved from an in-viewfinder
+        // card to a quiet nameplate chip and users reported the old cap made them too rare.
+        const val MAX_LOOK = 3
+        const val MAX_TOTAL = 5
     }
 }

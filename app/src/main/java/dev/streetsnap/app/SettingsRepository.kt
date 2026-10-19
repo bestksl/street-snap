@@ -65,7 +65,8 @@ data class AppSettings(
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
     val hdfStrength: Float = .4f,
-    // Independent HDR look (filmic highlight shoulder + wide halo), off by default.
+    // Ricoh-style HDF (Highlight Diffusion Filter): filmic highlight shoulder + wide halo,
+    // off by default. JSON keys keep their legacy "hdr*" names for settings compatibility.
     val hdrEnabled: Boolean = false,
     val hdrStrength: Float = .6f,
     val whiteBalance: String = "AUTO",
