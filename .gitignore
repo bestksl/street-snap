@@ -36,3 +36,5 @@ dist/
 *.hprof
 .codex/
 .agents/
+queue.md
+queue_shturl.md
