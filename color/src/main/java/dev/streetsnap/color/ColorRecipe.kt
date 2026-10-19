@@ -28,6 +28,10 @@ data class ColorRecipe(
     val clarity: Float = 0f,
     val hdfEnabled: Boolean = false,
     val hdfStrength: Float = .4f,
+    // Independent HDR look: filmic highlight shoulder plus a wide outer halo.
+    // Decoupled from HDF diffusion; see docs/hdr-film-research.md for the parameter model.
+    val hdrEnabled: Boolean = false,
+    val hdrStrength: Float = .6f,
     val whiteBalanceAmber: Int = 0,
     val whiteBalanceGreen: Int = 0,
 ) {
@@ -36,6 +40,7 @@ data class ColorRecipe(
         require(grain.isFinite() && grain in 0f..1f) { "颗粒强度须在 0–1 之间" }
         require(vignette.isFinite() && vignette in 0f..1f) { "暗角强度须在 0–1 之间" }
         require(hdfStrength.isFinite() && hdfStrength in 0f..1f) { "柔光强度须在 0–1 之间" }
+        require(hdrStrength.isFinite() && hdrStrength in 0f..1f) { "HDR 强度须在 0–1 之间" }
         for ((name, amount) in listOf(
             "饱和度" to saturation, "色相" to hue, "对比度" to contrast, "亮度" to brightness,
             "高光" to highlights, "阴影" to shadows, "锐度" to sharpness, "清晰度" to clarity,
@@ -50,7 +55,8 @@ data class ColorRecipe(
         (preset == ColorPreset.ORIGINAL || intensity == 0f) && grain == 0f && vignette == 0f &&
             saturation == 0f && hue == 0f && contrast == 0f && brightness == 0f &&
             highlights == 0f && shadows == 0f && sharpness == 0f && clarity == 0f &&
-            (!hdfEnabled || hdfStrength == 0f) && whiteBalanceAmber == 0 && whiteBalanceGreen == 0
+            (!hdfEnabled || hdfStrength == 0f) &&
+            (!hdrEnabled || hdrStrength == 0f) && whiteBalanceAmber == 0 && whiteBalanceGreen == 0
 }
 
 class ColorProcessingException(message: String, cause: Throwable? = null) :

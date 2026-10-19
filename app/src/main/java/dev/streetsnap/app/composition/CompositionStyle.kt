@@ -16,12 +16,20 @@ internal enum class CompositionStyle(val title: String) {
     CONVERGENCE("汇聚线构图"),
     VERTICAL("竖线构图"),
     HORIZON("水平分割"),
+    /** A horizon stranded in the middle band: the classic bisected-frame mistake. */
+    HORIZON_SPLIT("水平腰斩"),
     FRAME("框式构图"),
     FOREGROUND_DEPTH("前景层次"),
     REPETITION("节奏构图"),
     CONTRAST("明暗对比"),
     NEGATIVE_SPACE("留白构图"),
     WIDE_CONTEXT("环境构图"),
+    /** Content presses against three or more frame edges while the middle is not empty. */
+    TOO_TIGHT("取景太满"),
+    /** One edge alone is crossed by content (a cropped subject), with an action direction. */
+    EDGE_CUT("主体贴边"),
+    /** Most of the frame is quiet and a single small mass carries the content. */
+    MINIMAL("极简留白"),
     CONSERVATIVE("稳妥取景"),
     GENERIC("画面分析"),
 }

@@ -13,11 +13,14 @@ import android.os.Build
 import android.os.CancellationSignal
 import android.os.Handler
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.view.Surface
 import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.activity.result.contract.ActivityResultContracts
@@ -26,6 +29,9 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -34,6 +40,7 @@ import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -83,11 +90,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -114,9 +125,11 @@ import androidx.lifecycle.Observer
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.streetsnap.app.composition.CropTrial
 import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.ExposureMode
+import dev.streetsnap.camera.NormalizedBoundingBox
 import dev.streetsnap.camera.FocalLength
 import dev.streetsnap.camera.WhiteBalanceMode
 import dev.streetsnap.color.ColorPreset
@@ -216,7 +229,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         val sideWidth = minOf(356.dp, maxWidth * .48f)
                         Row(Modifier.fillMaxSize()) {
                             Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay, compositionState,
-                                Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ })
+                                Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ },
+                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
                             ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                 Modifier.width(sideWidth).fillMaxHeight(),
                                 adjustmentTab, { adjustmentTab = it }, sidePanel = true,
@@ -226,11 +240,71 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                                 compositionState = compositionState,
                                 latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
                         }
+                    } else if (maxHeight > maxWidth) {
+                        // Phone portrait: a camera-back layout. Nameplate, the exact 3:4
+                        // viewfinder screen and an opaque control cluster stack edge to
+                        // edge, so there is no letterbox void between picture and controls.
+                        // Nameplate: follow-look by default (the body tracks the active
+                        // look/film family), a pinned body, or hidden entirely.
+                        val hideNameplate = settings.mascotCamera == CameraPreferences.HIDDEN
+                        // Tall enough for the body card to read as a camera plate rather than
+                        // a flattened strip (T22: 48dp crowded the 74x40 artwork).
+                        val nameplateHeight = if (hideNameplate) 0.dp else 80.dp
+                        // Worst case the cluster can show: divider + paddings + one override
+                        // chip row + focal row + fixed focal/shutter gap + 92dp shutter row.
+                        // Reserve it up front; on short screens the 3:4 picture shrinks a
+                        // touch instead of clipping.
+                        val clusterMinHeight = 218.dp
+                        val framedWidth = minOf(maxWidth, (maxHeight - nameplateHeight - clusterMinHeight) * 3f / 4f)
+                        Column(Modifier.fillMaxSize().background(Color.Black)) {
+                            if (!hideNameplate) {
+                                val following = settings.mascotCamera == null
+                                val activePreset = settings.colorRecipe().preset
+                                val lookName = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
+                                    ?: activePreset.displayName
+                                val familyCamera = if (following) cameraForLook(activePreset.name) else null
+                                val pinnedCamera = if (following) null else CameraModel.fromId(settings.mascotCamera)
+                                val nameplateCamera = familyCamera ?: pinnedCamera
+                                ViewfinderNameplate(
+                                    camera = nameplateCamera,
+                                    title = when {
+                                        following && nameplateCamera == null -> lookName
+                                        following -> nameplateCamera!!.model
+                                        else -> pinnedCamera?.model ?: lookName
+                                    },
+                                    subtitle = when {
+                                        following && nameplateCamera == null -> "通用影调"
+                                        following -> lookName
+                                        else -> pinnedCamera?.brand.orEmpty()
+                                    },
+                                    onPick = {
+                                        if (following) adjustmentTab = AdjustmentTab.LOOK
+                                        else showMascotPicker = true
+                                    },
+                                    modifier = Modifier.fillMaxWidth().height(nameplateHeight))
+                            }
+                            Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
+                                Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ },
+                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
+                            ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
+                                Modifier.fillMaxWidth().weight(1f), framed = true,
+                                onTab = { adjustmentTab = it },
+                                latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
+                        }
+                        if (adjustmentTab != null) {
+                            ControlBottomSheet(adjustmentTab!!, onDismiss = { adjustmentTab = null },
+                                onTab = { adjustmentTab = it },
+                                state = state, settings = settings, importing = lutLoading, model = model,
+                                importLut = { lutPicker.launch(arrayOf("*/*")) },
+                                openMascotPicker = { showMascotPicker = true },
+                                compositionState = compositionState)
+                        }
                     } else {
-                        // Phone (and small split-screen): the viewfinder owns the whole screen;
-                        // shutter/focal controls float over it and pro controls live in a sheet.
+                        // Small landscape / split-screen: the viewfinder owns the space and
+                        // shutter/focal controls float over its lower edge.
                         Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
-                            Modifier.fillMaxSize(), onRetry = { retry++ })
+                            Modifier.fillMaxSize(), onRetry = { retry++ },
+                            onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
                         ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
                             onTab = { adjustmentTab = it },
@@ -280,6 +354,10 @@ private fun Viewfinder(
     compositionState: CompositionUiState,
     modifier: Modifier,
     onRetry: () -> Unit,
+    // Portrait camera-back layout: the caller already sizes this composable to the exact
+    // 3:4 screen, so overlays only need a small lift off its bottom edge.
+    framed: Boolean = false,
+    onOpenLooks: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -318,6 +396,27 @@ private fun Viewfinder(
     val previewError by model.previewError.collectAsStateWithLifecycle()
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
     val streaming by model.previewStreaming.collectAsStateWithLifecycle()
+    val histogram by model.histogram.collectAsStateWithLifecycle()
+    val lookAdviceCard by model.lookAdviceCard.collectAsStateWithLifecycle()
+    val exposureAdviceCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
+    // T34: one-shot "framing achieved" pulse. The green stroke/check is always shown;
+    // the buzz is opt-in and there is deliberately no sound path.
+    val alignmentPulse by model.composition.alignmentPulse.collectAsStateWithLifecycle()
+    var alignedVisible by remember { mutableStateOf(false) }
+    val vibrator = remember(context) { context.getSystemService(Vibrator::class.java) }
+    LaunchedEffect(alignmentPulse) {
+        if (alignmentPulse > 0L) {
+            alignedVisible = true
+            if (settings.alignmentHapticEnabled) {
+                @Suppress("MissingPermission") // VIBRATE is a normal permission, granted at install.
+                vibrator?.vibrate(VibrationEffect.createOneShot(20L, 60))
+            }
+            delay(1_300L)
+            alignedVisible = false
+        }
+    }
+    val osdMode = settings.viewfinderOsd
+    val meteringWanted = osdMode != ViewfinderOsd.OFF || settings.exposureAdviceEnabled
     val hasSize = width > 0 && height > 0
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     val manualFocus = state.settings.focusDistanceDiopters != null
@@ -331,7 +430,7 @@ private fun Viewfinder(
     }
     // The adjustment panel only changes the preview's size, not its 4:3 framing.
     // PreviewView handles those resizes without tearing down the camera session.
-    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource) {
+    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource, meteringWanted) {
         if (!hasSize) return@LaunchedEffect
         model.onBindingStarted()
         bindingError = null
@@ -345,7 +444,8 @@ private fun Viewfinder(
             val viewPort = ViewPort.Builder(ratio, rotation)
                 .setScaleType(ViewPort.FILL_CENTER).build()
             model.camera.bind(lifecycle, preview.surfaceProvider, model.colors.previewEffect(model::onPreviewError), viewPort, rotation,
-                compositionFrames = compositionSource)
+                compositionFrames = compositionSource,
+                lumaMeter = if (meteringWanted) model.lumaMeter else null)
             model.onCameraBound()
         } catch (error: Exception) {
             if (error is CancellationException) throw error
@@ -356,17 +456,40 @@ private fun Viewfinder(
         val ratio = if (landscape) 4f / 3f else 3f / 4f
         val previewWidth = min(maxWidth.value, maxHeight.value * ratio).dp
         val previewHeight = previewWidth / ratio
-        // Phones float the shutter/focal bar over this lower edge; lift overlays just above
-        // the single manual-override chip row that can intrude into the preview.
-        val floatingClearance = if (maxHeight > maxWidth) 92.dp else 10.dp
-        // Portrait: pin the 3:4 preview to the top so the dead letterbox space becomes
-        // the bottom control area (camera convention), instead of leaving a large empty
-        // band above the viewfinder. Landscape keeps it centred beside the side rail.
-        val previewAlignment = if (maxHeight > maxWidth) Alignment.TopCenter else Alignment.Center
-        Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment)) {
+        // Framed portrait: the box already is the exact 3:4 screen between nameplate and
+        // control cluster, so cards hug the screen edge. Floating portrait lifts cards
+        // above the shutter/focal bar; landscape barely lifts them at all.
+        val floatingClearance = when {
+            framed -> 16.dp
+            maxHeight > maxWidth -> 92.dp
+            else -> 10.dp
+        }
+        // Framed fills its box. The floating portrait path pins to TopCenter; landscape
+        // keeps the 3:4 picture centred beside/below its chrome.
+        val previewAlignment = if (framed || maxWidth > maxHeight) Alignment.Center else Alignment.TopCenter
+        // clipToBounds keeps the T35 long-press trial zoom from painting outside the 3:4 picture.
+        Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment).clipToBounds()) {
+            // T35: while the advice card is long-pressed, the preview zooms to the suggested
+            // crop. Display-only: ImageCapture is a separate use case, photos stay full frame.
+            var trialCrop by remember { mutableStateOf<NormalizedBoundingBox?>(null) }
+            val suggestedBox = compositionOverlay?.suggestion?.let {
+                NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
+            }
+            // A scene change publishes a different suggestion (or null); the held trial then
+            // ends visually even before the finger lifts.
+            val activeTrial = trialCrop?.takeIf { it == suggestedBox }?.let(CropTrial::from)
             AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize().onSizeChanged {
                 width = it.width
                 height = it.height
+            }.graphicsLayer {
+                val trial = activeTrial
+                if (trial != null) {
+                    scaleX = trial.scale
+                    scaleY = trial.scale
+                    transformOrigin = TransformOrigin(trial.centerU, trial.centerV)
+                    translationX = (0.5f - trial.centerU) * size.width
+                    translationY = (0.5f - trial.centerV) * size.height
+                }
             })
             val roll = rememberLevelAngle(settings.level, preview)
             // Rule advice refreshes several times per second; ease the rectangle so the
@@ -396,13 +519,45 @@ private fun Viewfinder(
                     }
                 }
                 if (settings.level && roll != null) {
+                    // Horizon level near the top edge (DSLR convention), never over the
+                    // centre of the picture: a faint fixed reference plus a rolling line;
+                    // the two coincide and turn lime when the phone is level.
+                    val pivot = Offset(size.width / 2f, size.height * .085f)
+                    val halfLength = min(size.width * .075f, 28.dp.toPx())
+                    val tick = 4.dp.toPx()
+                    val reference = Color.White.copy(alpha = .32f)
+                    drawLine(reference, Offset(pivot.x - halfLength, pivot.y), Offset(pivot.x + halfLength, pivot.y), 1.5.dp.toPx())
+                    drawLine(reference, Offset(pivot.x - halfLength, pivot.y - tick), Offset(pivot.x - halfLength, pivot.y + tick), 1.dp.toPx())
+                    drawLine(reference, Offset(pivot.x + halfLength, pivot.y - tick), Offset(pivot.x + halfLength, pivot.y + tick), 1.dp.toPx())
                     val radians = Math.toRadians(roll.toDouble())
-                    val length = min(size.width * .2f, 66.dp.toPx())
-                    val delta = Offset((kotlin.math.cos(radians) * length).toFloat(), (kotlin.math.sin(radians) * length).toFloat())
-                    val midpoint = center
-                    val color = if (abs(roll) < 1.5f) Color(0xFFE2FF79) else Color.White.copy(alpha = .7f)
-                    drawLine(color, midpoint - delta, midpoint + delta, 2.dp.toPx())
-                    drawCircle(color, 3.dp.toPx(), midpoint)
+                    val delta = Offset((kotlin.math.cos(radians) * halfLength).toFloat(), (kotlin.math.sin(radians) * halfLength).toFloat())
+                    val levelColor = if (abs(roll) < 1.5f) Color(0xFFE2FF79) else Color.White.copy(alpha = .78f)
+                    drawLine(levelColor, pivot - delta, pivot + delta, 2.dp.toPx())
+                }
+                if (meteringWanted) histogram?.let { counts ->
+                    val panelWidth = 118.dp.toPx()
+                    val panelHeight = 48.dp.toPx()
+                    val margin = 10.dp.toPx()
+                    // Below the top-right composition/realtime/AF pills.
+                    val panelLeft = size.width - panelWidth - margin
+                    val panelTop = 52.dp.toPx()
+                    val corner = 6.dp.toPx()
+                    drawRoundRect(Color.Black.copy(alpha = .42f),
+                        topLeft = Offset(panelLeft, panelTop),
+                        size = androidx.compose.ui.geometry.Size(panelWidth, panelHeight),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner, corner))
+                    val tallest = counts.maxOrNull()?.toFloat() ?: 0f
+                    if (tallest > 0f) {
+                        val innerPad = 3.dp.toPx()
+                        val plotHeight = panelHeight - innerPad * 2
+                        val barWidth = panelWidth / counts.size
+                        counts.forEachIndexed { index, count ->
+                            val barHeight = (count / tallest * plotHeight).coerceAtLeast(1f)
+                            drawRect(Color.White.copy(alpha = .72f),
+                                topLeft = Offset(panelLeft + index * barWidth, panelTop + panelHeight - innerPad - barHeight),
+                                size = androidx.compose.ui.geometry.Size(barWidth * .82f, barHeight))
+                        }
+                    }
                 }
                 focusPoint?.let { point ->
                     val radius = minOf(22.dp.toPx(), size.minDimension / 4f)
@@ -417,7 +572,9 @@ private fun Viewfinder(
                     drawRect(color, Offset(x - radius, y - radius),
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
-                compositionOverlay?.let { overlay ->
+                // While the T35 trial zoom fills the screen the guide rectangle and shade
+                // are the whole viewfinder, so hide them instead of masking the preview.
+                if (activeTrial == null) compositionOverlay?.let { overlay ->
                     // Reading the animated values here (inside the draw scope) means
                     // animation ticks only redraw this canvas, not recompose the screen.
                     val crop = smoothCrop.crop
@@ -427,25 +584,55 @@ private fun Viewfinder(
                     val right = (crop.right.coerceIn(0f, 1f) * size.width)
                     val bottom = (crop.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
-                        val tint = if (overlay.origin == AdviceOrigin.MODEL_SELECTION) Color(0xFFE2FF79) else Color(0xFFB7E3F6)
+                        val tint = when {
+                            alignedVisible -> Color(0xFF54C97E)
+                            overlay.origin == AdviceOrigin.MODEL_SELECTION -> Color(0xFFE2FF79)
+                            else -> Color(0xFFB7E3F6)
+                        }
                         val shade = Color.Black.copy(alpha = .26f)
                         drawRect(shade, size = androidx.compose.ui.geometry.Size(size.width, top))
                         drawRect(shade, Offset(0f, bottom), androidx.compose.ui.geometry.Size(size.width, size.height - bottom))
                         drawRect(shade, Offset(0f, top), androidx.compose.ui.geometry.Size(left, bottom - top))
                         drawRect(shade, Offset(right, top), androidx.compose.ui.geometry.Size(size.width - right, bottom - top))
                         drawRect(tint.copy(alpha = .95f), Offset(left, top),
-                            androidx.compose.ui.geometry.Size(right - left, bottom - top), style = Stroke(2.dp.toPx()))
+                            androidx.compose.ui.geometry.Size(right - left, bottom - top),
+                            style = Stroke(if (alignedVisible) 3.dp.toPx() else 2.dp.toPx()))
                         for (i in 1..2) {
                             val x = left + (right - left) * i / 3f
                             val y = top + (bottom - top) * i / 3f
                             drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
                             drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
                         }
+                        if (alignedVisible) {
+                            // Brief confirmation mark inside the guide's top-right corner (T34).
+                            val mark = minOf(26.dp.toPx(), (right - left) / 5f, (bottom - top) / 5f)
+                            // Inside the bottom-right corner: the advice card lives bottom-left
+                            // and the top-right can be covered by the optional histogram card.
+                            val center = Offset(right - mark * 1.35f, bottom - mark * 1.35f)
+                            drawCircle(Color.Black.copy(alpha = .40f), mark * .95f, center)
+                            val checkStroke = 2.5.dp.toPx()
+                            val p0 = Offset(center.x - mark * .45f, center.y + mark * .05f)
+                            val p1 = Offset(center.x - mark * .12f, center.y + mark * .38f)
+                            val p2 = Offset(center.x + mark * .48f, center.y - mark * .35f)
+                            drawLine(tint, p0, p1, checkStroke, cap = StrokeCap.Round)
+                            drawLine(tint, p1, p2, checkStroke, cap = StrokeCap.Round)
+                        }
                     }
                     }
                 }
             }
-            Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (activeTrial != null) {
+                Text("试取景 · 松开还原",
+                    Modifier.align(Alignment.TopCenter).padding(top = 14.dp)
+                        .background(Color.Black.copy(alpha = .62f), RoundedCornerShape(20.dp))
+                        .padding(horizontal = 14.dp, vertical = 7.dp),
+                    color = Color.White, fontSize = 12.sp)
+            }
+            // The top pill row would collide with the "试取景 · 松开还原" label; it is
+            // transient anyway (finger still down), so hide the whole row during the trial.
+            if (activeTrial == null) Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                // Single quiet corner entry: off -> histogram -> histogram + exposure readout -> off.
+                OsdCycleButton(osdMode, model::cycleViewfinderOsd)
                 Spacer(Modifier.weight(1f))
                 OverlayPill(
                     label = if (!compositionState.isRequestRunning) "构图" else "分析中",
@@ -476,12 +663,93 @@ private fun Viewfinder(
                         else -> "当前对焦模式"
                     })
             }
+            // Persistent HDR toggle, stacked under the OSD corner button; the right column
+            // hosts the histogram/readout card, so the film badge steps below whichever
+            // OSD card is showing (OFF: beside HDR, HISTOGRAM: under it, PARAMS: lowest).
+            HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
+                Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
+            // Clipped-highlight/shadow hint under the HDR button it may point at; text-only.
+            exposureAdviceCard?.let { card ->
+                ExposureAdviceCardView(card, model::dismissExposureAdvice,
+                    Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 100.dp))
+            }
+            val badgeTop by animateDpAsState(
+                when (osdMode) {
+                    ViewfinderOsd.HISTOGRAM -> 106.dp
+                    ViewfinderOsd.PARAMS -> 180.dp
+                    else -> 52.dp
+                }, label = "filmBadgeTop")
+            val badgePreset = settings.colorRecipe().preset
+            val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
+                ?: badgePreset.displayName
+            FilmFrameBadge(settings.filmId, badgePreset, badgeLabel, onOpenLooks,
+                Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop))
+            // Anchored to the film badge (T30): suggest only, tap to preview, × to dismiss.
+            lookAdviceCard?.let { card ->
+                LookAdviceCardView(card,
+                    onTry = model::trySuggestedLook,
+                    onKeep = model::keepSuggestedLook,
+                    onRevert = model::revertSuggestedLook,
+                    onDismiss = model::dismissLookAdvice,
+                    Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 54.dp))
+            }
+            // DSLR-style readout under the histogram. Every value is reported by the
+            // camera: automatic slots read AUTO rather than a guessed number, aperture is
+            // shown only when the device actually reports a fixed one (most phones do not).
+            if (osdMode == ViewfinderOsd.PARAMS) {
+                val caps = state.capabilities
+                val capture = state.settings
+                val ev = capture.exposureCompensationIndex * (caps?.exposureCompensationStepEv ?: 0.0)
+                Column(Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = 106.dp).width(118.dp)
+                    .background(Color.Black.copy(alpha = .42f), RoundedCornerShape(6.dp))
+                    .padding(horizontal = 8.dp, vertical = 5.dp)) {
+                    OsdReadoutRow(capture.exposureMode.label,
+                        if (capture.exposureMode == ExposureMode.MANUAL) "EV —" else "EV %+.1f".format(ev))
+                    OsdReadoutRow("快门", capture.exposureTimeNs?.let(::shutterLabel) ?: "AUTO")
+                    OsdReadoutRow("ISO", capture.iso?.toString() ?: "AUTO")
+                    caps?.fixedAperture?.let { aperture ->
+                        OsdReadoutRow("光圈", "f/%.1f".format(aperture))
+                    }
+                }
+            }
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
-                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)) {
-                    compositionOverlay?.suggestion?.modelText?.let {
-                        Text(it, color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(8.dp)
+                    // T35: long-press the card to preview the suggested framing; releasing restores.
+                    // Consuming the down also stops the canvas underneath from tapping focus / AF-L.
+                    .pointerInput(compositionOverlay) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            val held = awaitLongPressOrCancellation(down.id) ?: return@awaitEachGesture
+                            val box = compositionOverlay?.suggestion?.let {
+                                NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
+                            }
+                            if (box != null && CropTrial.from(box) != null) {
+                                trialCrop = box
+                                while (true) {
+                                    val event = awaitPointerEvent()
+                                    if (event.changes.none { it.pressed }) break
+                                }
+                                trialCrop = null
+                            }
+                        }
+                    }) {
+                    compositionOverlay?.suggestion?.let { s ->
+                        // T33: the executable move is the headline; terminology ("三分构图 · …")
+                        // stays as the supporting line. Styles whose copy is already a move
+                        // carry actionText = null and keep their single-line rendering.
+                        if (s.actionText != null) {
+                            Text(s.actionText, color = Color.White, fontSize = 13.sp,
+                                fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(s.modelText, Modifier.padding(top = 2.dp),
+                                color = Color.White.copy(alpha = .78f), fontSize = 11.sp,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        } else {
+                            Text(s.modelText, color = Color.White, fontSize = 12.sp,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                     compositionOverlay?.easterEgg?.let {
                         Text(it, color = Color(0xFFE2FF79), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -561,8 +829,186 @@ private fun OverlayPill(
     }
 }
 
+/** Top-left corner entry for the viewfinder OSD cycle; quiet when off, primary-tinted while showing. */
+@Composable
+private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
+    val active = mode != ViewfinderOsd.OFF
+    val description = when (mode) {
+        ViewfinderOsd.HISTOGRAM -> "正在显示直方图，点按追加拍摄参数"
+        ViewfinderOsd.PARAMS -> "正在显示直方图与拍摄参数，点按关闭取景信息"
+        else -> "显示曝光直方图"
+    }
+    val tint = if (active) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
+    Box(Modifier.size(38.dp).clip(CircleShape)
+        .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
+        .clickable(role = Role.Button, onClick = onCycle)
+        .semantics { contentDescription = description; this.selected = active },
+        contentAlignment = Alignment.Center) {
+        // Tiny histogram glyph: three bars of different height.
+        Canvas(Modifier.size(16.dp)) {
+            val fractions = listOf(.45f, .95f, .65f)
+            val gap = 1.5.dp.toPx()
+            val barWidth = (size.width - gap * (fractions.size - 1)) / fractions.size
+            fractions.forEachIndexed { index, fraction ->
+                val barHeight = size.height * fraction
+                drawRect(tint,
+                    topLeft = Offset(index * (barWidth + gap), size.height - barHeight),
+                    size = androidx.compose.ui.geometry.Size(barWidth, barHeight))
+            }
+        }
+    }
+}
+
 /**
- * Phone portrait capture surface: everything floats over the full-screen viewfinder.
+ * Realtime look-suggestion card, anchored under the film badge. Suggesting state: the
+ * whole card is a tap-to-preview target with a separate × dismiss. Trying state: the look
+ * is already applied as a preview, so the only exits are Keep or Revert (T30).
+ */
+@Composable
+private fun LookAdviceCardView(
+    card: LookAdviceCard,
+    onTry: () -> Unit,
+    onKeep: () -> Unit,
+    onRevert: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier
+            .widthIn(max = 224.dp)
+            .background(Color.Black.copy(alpha = .72f), RoundedCornerShape(8.dp))
+            .then(if (card.trying) Modifier else Modifier.clickable(role = Role.Button, onClick = onTry))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    ) {
+        Text(
+            (if (card.trying) "已试用 · " else "现在适合 · ") + card.label,
+            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(card.reason, Modifier.padding(top = 3.dp),
+            color = Color.White.copy(alpha = .82f), fontSize = 11.sp,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp),
+            horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            if (card.trying) {
+                LookAdviceAction("还原", onRevert)
+                LookAdviceAction("保留", onKeep, emphasized = true)
+            } else {
+                LookAdviceAction("×", onDismiss, description = "忽略此建议")
+                LookAdviceAction("试用", onTry, emphasized = true, description = "试用 ${card.label}")
+            }
+        }
+    }
+}
+
+@Composable
+private fun LookAdviceAction(
+    label: String,
+    onClick: () -> Unit,
+    emphasized: Boolean = false,
+    description: String? = null,
+) {
+    TextButton(onClick = onClick,
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+        modifier = Modifier.heightIn(min = 36.dp).semantics { if (description != null) contentDescription = description }) {
+        Text(label, fontSize = 12.sp,
+            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+    }
+}
+
+/**
+ * Exposure hint card under the HDR button. Suggest-only: no button changes exposure,
+ * the × dismisses for the rest of the session (T31).
+ */
+@Composable
+private fun ExposureAdviceCardView(card: ExposureAdviceCard, onDismiss: () -> Unit, modifier: Modifier = Modifier) {
+    Row(
+        modifier
+            .widthIn(max = 210.dp)
+            .background(Color.Black.copy(alpha = .72f), RoundedCornerShape(8.dp))
+            .padding(start = 10.dp, end = 2.dp, top = 7.dp, bottom = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(card.message, Modifier.weight(1f).padding(end = 4.dp),
+            color = Color.White, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        LookAdviceAction("×", onDismiss, description = "忽略曝光提示")
+    }
+}
+
+/** Always-on HDR toggle under the OSD corner button; quiet when off, primary-tinted while on. */
+@Composable
+private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    val tint = if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
+    Box(modifier.size(38.dp).clip(CircleShape)
+        .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
+        .clickable(role = Role.Button, onClick = onToggle)
+        .semantics {
+            contentDescription = "HDR 效果开关"
+            stateDescription = if (on) "已开启" else "已关闭"
+            this.selected = on
+        },
+        contentAlignment = Alignment.Center) {
+        Text("HDR", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold, maxLines = 1)
+    }
+}
+
+/** One labelled, reported-by-camera value in the OSD readout; never a fabricated number. */
+@Composable
+private fun OsdReadoutRow(label: String, value: String) {
+    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp),
+        horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = Color.White.copy(alpha = .55f), fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(value, color = Color.White.copy(alpha = .92f), fontSize = 10.sp,
+            fontFamily = FontFamily.Monospace, maxLines = 1)
+    }
+}
+
+/**
+ * Phone portrait top chrome. In follow-look mode the body tracks the active look/film
+ * family (the general family shows the neutral lens mark) and the subtitle names the
+ * look; a pinned body shows its brand. Tap: follow-look opens the look sheet, a pinned
+ * body opens the picker. Sits above the 3:4 screen like the plate on a camera back.
+ */
+@Composable
+private fun ViewfinderNameplate(
+    camera: CameraModel?,
+    title: String,
+    subtitle: String,
+    onPick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(modifier.padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+        // Same mid-grey card as the body-picker tiles (#2D3335): the dark vector bodies
+        // only separate from a lighter field, not from black chrome.
+        Box(Modifier.size(92.dp, 52.dp).clip(RoundedCornerShape(11.dp))
+            .background(Color(0xFF2D3335))
+            .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(11.dp))
+            .clickable(role = Role.Button, onClick = onPick)
+            .semantics {
+                contentDescription = if (camera != null) "相机铭牌：${camera.brand} ${camera.model}，点按更换"
+                    else "相机铭牌：$title，点按更换影调"
+            },
+            contentAlignment = Alignment.Center) {
+            // Canvas has no intrinsic size; an explicit size is mandatory in the wrapped row.
+            if (camera != null) CameraArtwork(camera, Modifier.size(82.dp, 50.dp))
+            else NeutralLookArtwork(Modifier.size(32.dp))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column {
+            Text(title, color = Color.White.copy(alpha = .92f), fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(subtitle, color = Color.White.copy(alpha = .5f), fontSize = 10.sp,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+    }
+}
+
+/**
+ * Phone portrait capture surface. Framed mode is an opaque camera-back control cluster
+ * beneath the 3:4 screen (a hairline marks the edge, then chips/focal/shutter sit as one
+ * vertically centred group); the small-landscape fallback keeps controls floating over
+ * the viewfinder on a gradient.
  * Only the high-frequency focal choice and the shutter stay; looks, white balance and
  * other pro controls are surfaced here *only* while a manual override is active (a
  * tappable chip that jumps straight to the right sheet section), otherwise they live
@@ -579,6 +1025,7 @@ private fun ViewfinderOverlayBar(
     onTab: (AdjustmentTab?) -> Unit,
     latestPhoto: Uri?,
     openPhoto: (Uri) -> Unit,
+    framed: Boolean = false,
 ) {
     val focalLengths = listOf(FocalLength.MM28, FocalLength.MM35, FocalLength.MM50)
     val supportedFocalLengths = state.capabilities?.focalLengthOptions.orEmpty()
@@ -598,6 +1045,7 @@ private fun ViewfinderOverlayBar(
             })
         }
         if (settings.hdfEnabled) add(ActiveOverride("柔光", AdjustmentTab.LOOK, "关闭柔光") { model.toggleHdf() })
+        if (settings.hdrEnabled) add(ActiveOverride("HDR", AdjustmentTab.LOOK, "关闭 HDR") { model.toggleHdr() })
         if (state.settings.focusDistanceDiopters != null)
             add(ActiveOverride("MF", AdjustmentTab.SHOOTING, "恢复自动对焦") { model.autoFocus() })
         if (exposureMode != ExposureMode.PROGRAM) add(ActiveOverride(
@@ -607,13 +1055,20 @@ private fun ViewfinderOverlayBar(
             add(ActiveOverride("EV %+.1f".format(ev), AdjustmentTab.SHOOTING, "曝光归零") { model.setExposure(0) })
     }
 
-    Column(modifier.background(
-            Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
-        .padding(top = 46.dp, bottom = 10.dp),
+    val chrome = if (framed) Modifier.background(Color.Black)
+        else Modifier.background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
+    Column(modifier.then(chrome)
+        .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 8.dp else 10.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
+        // Hairline that separates the 3:4 screen from the camera-back control cluster.
+        if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
+        // Framed mode: the control group (chips, focal, shutter) is vertically centred as
+        // one block, so on tall 20:9 screens the slack splits above/below it instead of
+        // opening a void between the focal row and the shutter (T22).
+        if (framed) Spacer(Modifier.weight(1f))
         // Active manual overrides: visible tappable reminders that jump to the section.
         if (overrides.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = if (framed) 3.dp else 4.dp)
                 .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
                 overrides.forEach { override ->
@@ -624,7 +1079,8 @@ private fun ViewfinderOverlayBar(
             }
         }
         // Focal lengths: the one pro control worth keeping on the capture screen.
-        Row(Modifier.padding(bottom = 6.dp).clip(RoundedCornerShape(22.dp))
+        // In framed mode it belongs to the shutter group with a fixed, deliberate gap.
+        Row(Modifier.padding(bottom = if (framed) 14.dp else 6.dp).clip(RoundedCornerShape(22.dp))
             .background(Color.Black.copy(alpha = .42f)).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
             focalLengths.forEach { focal ->
@@ -676,6 +1132,8 @@ private fun ViewfinderOverlayBar(
                     color = Color.White.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+        // Counterweight to the leading spacer: keeps the whole control group centred.
+        if (framed) Spacer(Modifier.weight(1f))
     }
 }
 
@@ -778,6 +1236,16 @@ private fun ShootingControls(
                 }, contentAlignment = Alignment.Center) {
                 Text("HDF", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
                     color = if (settings.hdfEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Box(Modifier.width(56.dp).height(48.dp).clip(RoundedCornerShape(10.dp))
+                .background(if (settings.hdrEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
+                .toggleable(value = settings.hdrEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdr() }
+                .semantics {
+                    contentDescription = "HDR 效果开关"
+                    stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
+                }, contentAlignment = Alignment.Center) {
+                Text("HDR", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                    color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         if (focalHint != null) Text(focalHint, Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 4.dp),
@@ -990,11 +1458,20 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
     }
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
         if (parameter == LookParameter.DIFFUSION) {
-            Text(if (settings.hdfEnabled) "全局柔光已开启" else "点 HDF 开启柔光",
+            Text(if (settings.hdfEnabled) "全局柔光已开启" else "高光柔化 · 外层光晕",
                 Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(onClick = model::toggleHdf, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text(if (settings.hdfEnabled) "关闭" else "开启")
+            TextButton(onClick = model::toggleHdr, enabled = true,
+                modifier = Modifier.heightIn(min = 48.dp).semantics {
+                    contentDescription = "HDR 效果开关"
+                    stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
+                }) {
+                Text(if (settings.hdrEnabled) "HDR · 关" else "HDR", fontSize = 12.sp,
+                    color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            TextButton(onClick = model::toggleHdf, modifier = Modifier.heightIn(min = 48.dp)
+                .semantics { contentDescription = "柔光开关" }) {
+                Text(if (settings.hdfEnabled) "柔光 · 关" else "柔光", fontSize = 12.sp)
             }
         } else {
             TextButton(onClick = importLut, enabled = !importing, modifier = Modifier.heightIn(min = 48.dp)) {
@@ -1224,6 +1701,12 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     }
     ToggleRow("三分网格", settings.grid) { model.toggleGrid() }
     ToggleRow("水平仪", settings.level) { model.toggleLevel() }
+    ToggleRow("影调建议", settings.lookAdviceEnabled) { model.setLookAdviceEnabled(it) }
+    Text("根据取景画面的光线与色彩，偶尔推荐合适的胶片或影调；只建议，不会自动更改。点取景器卡片可试用，也能一键还原。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    ToggleRow("曝光提示", settings.exposureAdviceEnabled) { model.setExposureAdviceEnabled(it) }
+    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示 HDR；只建议，不会自动改曝光。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)
     }
@@ -1253,6 +1736,9 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
             modifier = Modifier.semantics { contentDescription = "构图辅助开关" })
     }
     ToggleRow("实时构图 · 自动更新建议", settings.compositionRealtime, model::setCompositionRealtime)
+    ToggleRow("到位轻震反馈", settings.alignmentHapticEnabled) { model.setAlignmentHapticEnabled(it) }
+    Text("按建议移动、推荐框与当前取景重合时，框线短暂变绿并出现小勾；开启此项再附带一次极轻震动，全程无声。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     Text(compositionTimingLabel(state), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
     if (state.status == AssistStatus.READY && settings.compositionRealtime) Text(

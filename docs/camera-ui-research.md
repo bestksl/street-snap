@@ -141,3 +141,63 @@
 2. 该 AVD 相机 HAL 不报告数字变焦选项，焦段条三档呈禁用灰态（沿用既有 `enabled = 焦段受支持 && isReady && loaded` 逻辑，非本次回归）；默认态刻意不显示旧侧栏的"焦段信息不可用"文字行，以遵守"默认态零常驻说明文字"，能力诊断仍可在拍摄分区"相机设置→诊断"查看。
 3. 无能力机型禁用态、权限页、模型安装/删除流程沿用原代码路径，本轮未改其逻辑，靠单测与代码走查覆盖，真机首次安装仍应手工过一遍。
 4. 阶段 C 的取景器内 EV 滑条/上下滑、手动参数大字瞬时提示评估后缓做（理由见阶段 C）。
+
+## 五、T18 修正：从"全屏悬浮"回到相机背式三段（2026-10-18）
+
+**问题（用户反馈）**：T08 全屏悬浮 + T09 预览贴顶两次改动叠加后，竖屏出现三个问题——3:4 预览"跑到最上面"；T08 删除的顶部 48dp 相机摆件在取景器上彻底消失；预览下沿到吸附屏幕底的悬浮菜单之间空出一大块死黑（1080×2340 上预览宽受限占约 1440px 高，悬浮层 wrap-content 约 194dp，中间还有 70–90dp 纯黑断层）。
+
+**设计取舍**：第二节"全屏取景器是主角"的行业共识在手机 3:4 传感器 + 20:9 屏幕上有两种落地——A. 预览放大裁切铺满（iOS/GCam），B. 精确 3:4 屏 + 相机背式 chrome（无反后背/理光 GR 机背/Nikon Z 背屏）。本 App 不能选 A：蓝/黄构图框、三分网格、对焦点、ImageAnalysis 全部绑定 CameraX 共享 ViewPort 的 3:4 坐标（见 CompositionFrameGeometry），铺满裁切需要 overlay 二次换算且破坏"照片=所见"。故选 B，并把 T08 悬浮层"飘在黑底上"的实现改成**边到边的三段式 Column**：
+
+1. 顶部 48dp 铭牌：相机摆件中灰卡片（#2D3335，与 MascotPicker 卡片同色——暗色矢量机身在纯黑底上不可见，必须中灰托底；Canvas 无内在尺寸，摆件必须给显式 64×40dp）+ 型号/品牌小字，点按复用 MascotPicker；铭牌无 App 字样（用户要求纯粹）。
+2. 中部精确 3:4 取景屏：宽受限机器占满宽，屏顶即铭牌底；高受限机器按预算微缩，边到边不留黑。overlay 全部仍在 3:4 盒内，坐标零改动；建议卡 clearance 由悬浮态 92dp 改为 16dp。
+3. 底部实体控制簇：纯黑底（不再是 wrap-content 渐变悬浮），顶部分隔线（0.8dp 7% 白）界定屏/chrome 边界；焦段条紧贴分隔线，快门行用 weight 弹性留白沉到簇底——多余空间成为拇指停靠区而非"空洞"，并为后续取景器 OSD（直方图/参数）预留位。
+
+**约束预算防溢出**：簇高按最差情况预留 210dp（分隔线+padding+一行手动覆盖药丸+焦段行+92dp 快门行），`framedWidth = min(maxWidth, (maxHeight - 48dp - 210dp) * 3/4)`，任何屏高都不裁切。
+
+**未动**：宽横屏 ≥600dp 全控件侧栏、小横屏/分屏的全屏悬浮浮层路径（framed 仅竖屏 Column 路径使用）；控制面板 ModalBottomSheet；相机/坐标/ViewPort 绑定。
+
+**AVD 验证（emulator-5580，1080×2340）**：默认态三段无黑带；GR（暗机身）与 X100VI（银顶）铭牌均可辨；点铭牌出 MascotPicker、切换五款正常；EV +1.5 覆盖药丸在簇内完整不溢出；长按药丸一键复位无回归；`./gradlew test` 与 `:app:assemblePreview` 通过。横屏仍受 AVD 软件渲染不翻转 framebuffer 所限（同第四节 b13/b14），只做代码走查，留真机。
+
+## 六、T19：铭牌从"独立摆件"变为影调族的可视化（2026-10-18）
+
+**问题（用户反馈）**：T18 恢复的顶部 48dp 相机摆件是一个与影调无关的独立吉祥物；用户期望"你选什么滤镜，上面就会变成那个相机"——铭牌应当反映当前影调/胶片，而不是另一个需要单独维护的装饰选择。
+
+**三态模型**（`CameraPreferences.nameplate`）：`mascotCamera: String?`
+- `null`（新默认）= **跟随影调**：`CameraLookGroup.forPreset(preset)` 把 11 个影调预设归族——理光（正片/负片/高反差黑白）→GR、富士（Classic Chrome/Classic Negative/Nostalgic Negative/ACROS）→X100VI、适马（Powder Blue）→fp、松下（L.Natural/L.Mono）→LX100、通用（原色/晴街/自定义 LUT）→中性镜头标 `NeutralLookArtwork` + 影调名；插胶片时按 `FilmProfile.basePreset` 归同一套族（500T/Portra→理光、Ektar→理光、C200→适马、250D/50D→通用、TRI-X→理光）。
+- `"HIDDEN"` = 铭牌整行消失，`nameplateHeight=0`，3:4 屏获得这 48dp；
+- 已知机身 id = 手动固定，不随影调变化。
+
+**点按语义随态变化**：跟随态点铭牌直达影调面板（少一次跳转）；固定态点铭牌打开六卡 picker。picker 首卡即"跟随影调"（镜头标），与五机身同样 2 列卡片；原"隐藏"checkable 语义改为左下角"不显示"文本钮（选中显示 ✓）。通用族镜头标用 onSurfaceVariant 双圆圈，无品牌归属。
+
+**JSON 语义迁移（已在注释与测试中明示）**：pre-T19 的 JSON null 表示"隐藏摆件"，T19 起 null 表示"跟随影调"，隐藏改由专用字符串 `HIDDEN` 表达——一次有意的、记录在案的迁移；无字段的 legacy 文档与未知机身 id 一律回退到 null（跟随），不再硬编码默认机身。
+
+**AVD 验证（emulator-5580，1080×2340）**：fresh install 原色=镜头标+「原色/通用影调」；正片→GR、Classic Chrome→X100VI、Powder Blue→fp、L.Natural→LX100 semantics 与机身绘制均正确；C200→适马 fp、250D→镜头标+胶片名（胶片经 basePreset 归族）；固定 F3 后切正片铭牌仍 F3、点按开 picker；HIDDEN 后铭牌节点为 0、预览顶到状态栏下沿；picker 六卡 + 取景方向 + 不显示 ✓ 态齐全。SettingsJsonTest 覆盖 legacy 缺字段/null/HIDDEN 字符串往返/未知 id 回退/五机身+HIDDEN+null 全组合方向矩阵；`testDebugUnitTest` 全过、`:app:assemblePreview` 通过装机。
+
+## 七、T20：水平仪归位与可选的专业 OSD（2026-10-18）
+
+**问题（用户反馈）**：水平仪横在取景器正中央，挡画面；希望把水平仪放到"专业机惯例的位置"；曝光直方图要能点击显示/不显示；取景器里最好能像 DSLR 一样显示光圈、ISO、快门速度等参数，且能整组关闭——默认状态要"纯粹一点"。
+
+**三态循环，默认关闭**：`ViewfinderOsd`（`OFF / HISTOGRAM / PARAMS`）持久化于 `AppSettings.viewfinderOsd`，左上角一枚 38dp 圆形角钮循环；contentDescription 随态变化（"显示曝光直方图"/"正在显示直方图，点按追加拍摄参数"/"正在显示直方图与拍摄参数，点按关闭取景信息"），激活时角钮染 primary 色。OFF 时取景器零常驻读数，只有既有的三枚操作药丸。
+
+**真实直方图，不造假数据**：直方图不能依赖构图开关，故在 camera 模块新增 `LumaMeter`，作为 `ImageAnalysis` analyzer 的第二个消费者接入 `CameraController.bind(..., lumaMeter =)`：与构图帧源共用同一条 640×480 YUV 分析流（构图存在时复用其 executor，meter-only 时自建 `street-snap-metering` 单线程、detach 时关闭）；`LumaMeter` 同步执行、自节流（200ms）、绝不关闭 ImageProxy（由帧源或 analyzer lambda 负责 close）。采样走既有 `YuvFrameSampler`（64px 边），BT.601 亮度 48 bins。OSD 开关增减 ImageAnalysis use case，通过 `meteringWanted` 作为 LaunchedEffect key 触发重绑；`syncMeter()` 只翻 `active` 并在关闭时清空直方图，OFF 态不产生任何分析开销。
+
+**只显示相机报告的参数**：PARAMS 卡为半透明只读卡（档/快门/ISO，EV），值全部来自 `CaptureSettings` + `CameraCapabilities`：P 档 iso/time 为 null 时显示 **AUTO**（Camera2 不回传自动值，禁止编造）；EV 按 `exposureCompensationIndex * stepEv` 格式化，M 档显 `EV —`；`fixedAperture` 非空才出现光圈行（AVD 与绝大多数手机不报告，故无此行；拍摄面板 A 档本就禁用并注明"当前镜头不支持光圈控制"）。
+
+**水平仪新位置**：从正中移到取景屏顶部 8.5% 高度处——一根暗白固定参考线（两端竖刻度）+ 一根随 roll 旋转的白线，水平（|roll|<1.5°）时两线重合变荧光绿；最大半长 28dp，不再遮挡主体。
+
+**验证（emulator-5580，1080×2340）**：OFF 默认纯净；HISTOGRAM 角钮高亮、直方图随暗场景真实集中暗部（与画面一致）；PARAMS 显 `P / EV +0.0 / 快门 AUTO / ISO AUTO`、无光圈行；第三击回 OFF；**force-stop 冷启动后 HISTOGRAM 态与直方图数据均保留**；构图建议卡（左下）与右上 OSD 不重叠。SettingsJsonTest 新增默认 OFF/三态往返/未知值回退 OFF/循环顺序用例，全量 `testDebugUnitTest` + `:app:assemblePreview` 通过。
+
+**未能在模拟器验证（代码走查，留真机）**：① 水平仪倾斜转动——emulator console 只能注入 acceleration（TYPE_ACCELEROMETER），而 app 优先消费不可注入的 TYPE_GRAVITY；水平态荧光绿已实测，旋转几何为同一 cos/sin 数学。② S/M 手动档真实快门/ISO 读数——该 AVD 模拟镜头 S/M/A 均灰禁不支持；数值通路与拍摄面板、"调整"钮副标题共用同一 `CaptureSettings` 字段与 `shutterLabel()` 格式化。③ 横屏 framebuffer 不翻转旧疾（第四节 b13/b14），位置参数按顶部/右上对齐做了走查。
+
+## 八、T22：三段比例再分配——铭牌加高、控件成组（2026-10-18）
+
+**问题（用户反馈）**：T18 三段式在 20:9 长屏上（1080×2340 / 420dpi，可用 411×891dp）比例失衡——3:4 屏宽占满即 411×548dp，垂直富余约 140dp 全部落进控制簇；而 T18 的簇实现是"焦段贴分隔线、快门沉底、中间 `Spacer(weight 1f)`"，于是焦段与快门之间撑出约 140dp 的巨大中空；与此同时顶部铭牌只有 48dp、74×40 摆件卡几乎占满条高，被压得很扁。
+
+**再分配**（只改竖屏 Column 路径，宽横屏侧栏与小横屏浮层不动）：
+1. 铭牌 48dp → **80dp**：摆件卡 74×40 → 92×52dp、机身 Canvas 64×40 → 82×50dp、中性镜头标 26 → 32dp，标题 13 → 14sp / 副标题 9 → 10sp；点按热区随之变大。
+2. 控制簇改为**整组垂直居中**：分隔线仍贴簇顶不动；其下新增一个 leading `Spacer(weight 1f)`，删除焦段与快门之间那个撑空的 weight Spacer，快门行后加等重的 trailing Spacer——chip 行/焦段/快门因此成为一个紧凑整体（焦段↔快门固定 14dp），长屏富余高度在组的**上下对称分配**，而不是在两个相关控件之间开天窗；chip 行出现时上下 Spacer 同步收缩。
+3. 短屏预算 `clusterMinHeight` 210 → 218dp（覆盖新的 14dp 组内间距），`framedWidth = min(maxWidth, (maxHeight - 80dp - 218dp) * 3/4)`，短屏仍然只缩屏、不裁控件。
+
+**AVD 验证（emulator-5580）**：默认态铭牌 GR 卡比例舒展、标题垂直居中；焦段与快门间距 14dp 视觉紧凑、上下留白对称；EV +2.0 覆盖药丸出现时整组增高不溢出；HIDDEN 铭牌时预览顶到状态栏、获得全部 80dp；跟随/正片 GR 铭牌语义节点保持「相机铭牌：理光 GR，点按更换」。`testDebugUnitTest` 全过、`:app:assemblePreview` 通过；重截 viewfinder.png。
+
+**未变**：3:4 屏宽度占满后高度物理锁定（WYSIWYG 共享 ViewPort 坐标不允许铺满裁切，见第五节），长屏富余空间只能分配给上下 chrome——80dp 铭牌 + 居中控件组即此约束下的均衡解；荣耀 Vs3 真机比例（内外屏）仍待实机确认。

@@ -26,6 +26,9 @@ data class EdgeModelEntry(
 }
 
 object EdgeModelCatalog {
+    /** The ranker a fresh install selects and unknown/legacy ids fall back to. */
+    const val DEFAULT_MODEL_ID = "d1-omni-600m"
+
     val models = listOf(
         EdgeModelEntry(
             "smolvlm-256m", "SmolVLM 256M", "HuggingFaceTB/SmolVLM-256M-Instruct",
@@ -72,6 +75,11 @@ data class CompositionSuggestion(
     val right: Float,
     val bottom: Float,
     val modelText: String,
+    /**
+     * Rule-layer executable move (T33), shown above the terminology line. Always null for
+     * model-produced suggestions: [parse] never sets it, so untrusted model text cannot.
+     */
+    val actionText: String? = null,
 ) {
     companion object {
         // Model text is untrusted data. Accept one bounded numeric rectangle, never instructions.

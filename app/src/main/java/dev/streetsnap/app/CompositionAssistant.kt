@@ -4,10 +4,15 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import dev.streetsnap.app.composition.AlignmentEvent
+import dev.streetsnap.app.composition.AlignmentFeedback
+import dev.streetsnap.app.composition.AlignmentTracker
 import dev.streetsnap.app.composition.CandidateContactSheet
 import dev.streetsnap.app.composition.CandidateSelectionGate
 import dev.streetsnap.app.composition.CompositionCandidate
 import dev.streetsnap.app.composition.FastCompositionAdvisor
+import dev.streetsnap.app.composition.SceneReading
+import dev.streetsnap.app.composition.SceneReadings
 import dev.streetsnap.app.edge.CompositionSuggestion
 import dev.streetsnap.app.edge.CropRanking
 import dev.streetsnap.app.edge.CandidateRanker
@@ -45,7 +50,7 @@ internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAI
 internal enum class CompositionOutcome { RETURNED, NO_RESULT, UNSTABLE_SELECTION, TIMED_OUT, SCENE_CHANGED, FAILED }
 internal enum class AdviceOrigin { IMAGE_ANALYSIS, MODEL_SELECTION }
 internal data class CompositionUiState(
-    val modelId: String = "smolvlm-256m",
+    val modelId: String = EdgeModelCatalog.DEFAULT_MODEL_ID,
     val install: ModelInstallStatus = ModelInstallStatus.CHECKING,
     val bytes: Long? = null,
     val downloadedBytes: Long = 0,
@@ -82,13 +87,21 @@ internal fun CompositionOverlay.carriesSameGuidance(
     newEasterEgg: String?,
 ): Boolean = newEasterEgg == null && easterEgg == null && this.origin == origin &&
     suggestion.modelText == candidate.reason &&
+    suggestion.actionText == candidate.action &&
     suggestion.left == candidate.crop.left && suggestion.top == candidate.crop.top &&
     suggestion.right == candidate.crop.right && suggestion.bottom == candidate.crop.bottom
 private data class CompletedRanking(val first: CropRanking?, val validation: CropRanking?)
 
 /** Optional inference has its own lifetime and never takes the camera's controls or shutter locks. */
 internal class CompositionAssistant(context: Context, private val scope: CoroutineScope) : AutoCloseable {
-    private data class Configuration(val id: String, val enabled: Boolean, val foreground: Boolean, val realtime: Boolean)
+    private data class Configuration(
+        val id: String, val enabled: Boolean, val foreground: Boolean, val realtime: Boolean,
+        /** Look advice needs the cheap rule-analysis frames even while composition itself is off. */
+        val lookAdvice: Boolean,
+    )
+
+    /** Fired on Main when the frame source's scene signature changes; look advice uses it to drop pending cards. */
+    @Volatile var sceneChangeListener: (() -> Unit)? = null
 
     /** Focal length changes must not restart the camera session; the egg reads it live. */
     @Volatile private var focalLengthMm: Int = 28
@@ -102,6 +115,17 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     val source = _source.asStateFlow()
     private val _overlay = MutableStateFlow<CompositionOverlay?>(null)
     val overlay = _overlay.asStateFlow()
+    /**
+     * Elapsed-realtime timestamp of a one-shot "framing achieved" confirmation (T34),
+     * or 0 before the first one. The tracker is fed every analysed frame, including
+     * frames that reuse the existing overlay via carriesSameGuidance.
+     */
+    private val _alignmentPulse = MutableStateFlow(0L)
+    val alignmentPulse = _alignmentPulse.asStateFlow()
+    private val alignmentTracker = AlignmentTracker()
+    /** Coarse colour/light statistics from the latest rule-analysis frame; consumed later by look/exposure advice. */
+    private val _sceneReading = MutableStateFlow<SceneReading?>(null)
+    val sceneReading = _sceneReading.asStateFlow()
     private val resultGate = CompositionResultGate(maximumAgeMs = 65_000L)
     private val sessionMutex = Mutex()
     private val inferenceMutex = Mutex()
@@ -125,10 +149,16 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         }
     }
 
-    fun configure(id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false, focalLengthMm: Int = 28) {
+    fun configure(
+        id: String, enabled: Boolean, foreground: Boolean, realtime: Boolean = false,
+        focalLengthMm: Int = 28, lookAdvice: Boolean = false,
+    ) {
         if (closed) return
         this.focalLengthMm = focalLengthMm.takeIf { it > 0 } ?: 28
-        val next = Configuration(EdgeModelCatalog.find(id)?.id ?: "smolvlm-256m", enabled, foreground, realtime)
+        val next = Configuration(
+            EdgeModelCatalog.find(id)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID,
+            enabled, foreground, realtime, lookAdvice,
+        )
         if (configuration == next) return
         val changedModel = configuration?.id != next.id
         configuration = next
@@ -148,7 +178,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     fun invalidateView() {
         resultGate.invalidate(SystemClock.elapsedRealtime())
         _source.value?.invalidateFrames()
+        alignmentTracker.reset()
         _overlay.value = null
+        _sceneReading.value = null
         expiryJob?.cancel()
         _state.update { it.copy(adviceOrigin = null) }
     }
@@ -179,6 +211,13 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         val crop = candidate.crop
         val now = SystemClock.elapsedRealtime()
         val draw = adviceCount++
+        // Feed the alignment state machine before the same-guidance early return:
+        // a static near-final scene keeps republishing the same overlay every frame,
+        // and those frames are exactly the confirmation streak we count.
+        val framed = AlignmentFeedback.isFramed(crop, candidate.style)
+        if (alignmentTracker.observe(framed, candidate.action != null) == AlignmentEvent.ALIGNED) {
+            _alignmentPulse.value = now
+        }
         val egg = easterEgg(subjectLooksDistant, origin, draw, now)
         if (egg != null) lastEasterEggAtMs = now
         // Rule analysis now runs several times per second. On a static scene the same
@@ -192,7 +231,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
             return
         }
         val answer = CompositionOverlay(
-            CompositionSuggestion(crop.left, crop.top, crop.right, crop.bottom, candidate.reason),
+            CompositionSuggestion(crop.left, crop.top, crop.right, crop.bottom,
+                candidate.reason, candidate.action),
             now + 30_000L,
             origin,
             egg,
@@ -348,7 +388,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     visibleScene = null
                     selectedScene = null
                     selectedCandidate = null
+                    alignmentTracker.reset()
                     _overlay.value = null
+                    _sceneReading.value = null
                     expiryJob?.cancel()
                     _state.update { it.copy(adviceOrigin = null, lastOutcome = null,
                         lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
@@ -456,17 +498,24 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
 
                 try {
                     val model = requireNotNull(EdgeModelCatalog.find(config.id))
-                    if (config.enabled && config.foreground) {
+                    val analysisWanted = config.foreground && (config.enabled || config.lookAdvice)
+                    if (analysisWanted) {
                         // Rule advice runs in single-digit milliseconds, so the cadence is
                         // set by the frame clocks, not by compute: ~4 advice refreshes/s.
                         // Model ranking stays on its own 3-15 s cadence gate below and is
-                        // unaffected by this interval.
+                        // unaffected by this interval. Look advice keeps the same cheap
+                        // frames flowing while composition itself is switched off.
                         frames = CompositionFrameSource(minimumIntervalMs = 250L, maximumEdge = 384,
                             sceneIntervalMs = 250L,
-                            shouldCaptureFrame = { isCurrentSession() && (manualRequestPending || config.realtime) },
+                            shouldCaptureFrame = {
+                                isCurrentSession() && (manualRequestPending || config.realtime || config.lookAdvice)
+                            },
                             onSceneChanged = {
                                 scope.launch(Dispatchers.Main.immediate) {
-                                    if (isCurrentSession()) clearVisibleAdvice()
+                                    if (isCurrentSession()) {
+                                        clearVisibleAdvice()
+                                        sceneChangeListener?.invoke()
+                                    }
                                 }
                             }, onError = { error ->
                                 scope.launch(Dispatchers.Main.immediate) {
@@ -478,23 +527,35 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                 }
                             }, onFrame = frameCallback@{ frame ->
                                 val ticket = resultGate.ticket(frame.receivedAtElapsedRealtimeMs) ?: return@frameCallback
-                                val manual = withContext(Dispatchers.Main.immediate) {
+                                // First member = manual composition request; second = look-only
+                                // frame (readings only: no composition overlay, no model ranking).
+                                val frameMode = withContext(Dispatchers.Main.immediate) {
                                     if (!isCurrentSession() || !frame.isCurrent ||
                                         !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
                                     if (visibleScene?.invoke() == false) clearVisibleAdvice()
                                     val requested = manualRequestPending
-                                    if (!requested && !config.realtime) return@withContext null
+                                    if (!requested && !config.realtime && !config.lookAdvice) return@withContext null
                                     if (requested) {
                                         manualRequestPending = false
                                         requestFrameTimeout?.cancel()
                                     }
-                                    requested
+                                    requested to (!requested && !config.realtime)
                                 } ?: return@frameCallback
+                                val manual = frameMode.first
+                                val lookOnly = frameMode.second
                                 try {
                                     val started = SystemClock.elapsedRealtime()
                                     val bitmap = frame.bitmap
                                     val pixels = IntArray(bitmap.width * bitmap.height)
                                     bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                                    // Same frame, same pixels: a single <=96px statistics pass.
+                                    val reading = SceneReadings.read(bitmap.width, bitmap.height, pixels)
+                                    if (lookOnly) {
+                                        withContext(Dispatchers.Main.immediate) {
+                                            if (isCurrentSession()) _sceneReading.value = reading
+                                        }
+                                        return@frameCallback
+                                    }
                                     val advice = FastCompositionAdvisor.suggest(bitmap.width, bitmap.height, pixels)
                                     val candidates = advice.candidates
                                     val first = candidates.firstOrNull() ?: error("当前画面无法生成构图建议")
@@ -519,6 +580,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                             visibleScene = sceneCurrent
                                             showAdvice(first, AdviceOrigin.IMAGE_ANALYSIS, advice.subjectLooksDistant)
                                         }
+                                        _sceneReading.value = reading
                                         _state.update { it.copy(status = AssistStatus.READY, fastAdviceMs = fastMs) }
                                         Log.i("StreetSnapComposition", "fast_ms=$fastMs manual=$manual candidates=" +
                                             candidates.joinToString(";") { "${it.crop.left},${it.crop.top},${it.crop.right},${it.crop.bottom}" })
@@ -571,10 +633,19 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             })
                         // Publish input before copying assets or creating native sessions.
                         _source.value = frames
-                        _state.update { it.copy(status = AssistStatus.READY, statusText = "点击构图获取画面建议") }
-                        // Show the first photographic suggestion automatically, so enabling the
-                        // feature always produces a visible frame without hunting for the button.
-                        requestAdvice()
+                        if (config.enabled) {
+                            _state.update { it.copy(status = AssistStatus.READY, statusText = "点击构图获取画面建议") }
+                            // Show the first photographic suggestion automatically, so enabling the
+                            // feature always produces a visible frame without hunting for the button.
+                            requestAdvice()
+                        }
+                    }
+                    if (config.foreground && !config.enabled) {
+                        // Look-only session: no model install or composition overlay; park here
+                        // so the frame source stays bound and scene readings keep flowing.
+                        rankingDisabled = true
+                        runtimeReady.complete(null)
+                        awaitCancellation()
                     }
                     try {
                         val installed = withContext(Dispatchers.IO) {

@@ -36,6 +36,8 @@ import androidx.lifecycle.Observer
 import com.google.common.util.concurrent.ListenableFuture
 import java.io.File
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
@@ -76,6 +78,7 @@ class CameraController(context: Context) {
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var compositionSource: CompositionFrameSource? = null
+    private var meteringExecutor: ExecutorService? = null
     private var sessionGeneration = 0L
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateObserver: Observer<CameraXState>? = null
@@ -100,7 +103,9 @@ class CameraController(context: Context) {
         viewPort: ViewPort? = null,
         targetRotation: Int = Surface.ROTATION_0,
         compositionFrames: CompositionFrameSource? = null,
-    ): CameraCapabilities = bindSession(lifecycleOwner, surfaceProvider, effect, viewPort, targetRotation, compositionFrames)
+        lumaMeter: LumaMeter? = null,
+    ): CameraCapabilities = bindSession(lifecycleOwner, surfaceProvider, effect, viewPort, targetRotation,
+        compositionFrames, lumaMeter = lumaMeter)
 
     @RequiresPermission(android.Manifest.permission.CAMERA)
     private suspend fun bindSession(
@@ -110,6 +115,7 @@ class CameraController(context: Context) {
         viewPort: ViewPort?,
         targetRotation: Int,
         compositionFrames: CompositionFrameSource?,
+        lumaMeter: LumaMeter? = null,
         expectedGeneration: Long? = null,
         fallbackReason: String? = null,
     ): CameraCapabilities = withContext(Dispatchers.Main.immediate) {
@@ -154,29 +160,44 @@ class CameraController(context: Context) {
                     } else Rational(4, 3)
                     val sharedViewPort = viewPort ?: ViewPort.Builder(defaultViewAspect, targetRotation)
                         .setScaleType(ViewPort.FILL_CENTER).build()
-                    val newAnalysis = compositionFrames?.let { source ->
+                    val newAnalysis = if (compositionFrames != null || lumaMeter != null) {
                         try {
-                            val sourceSession = source.activate()
-                            compositionSource = source
+                            var sourceSession: Long? = null
+                            compositionFrames?.let { source ->
+                                sourceSession = source.activate()
+                                compositionSource = source
+                            }
                             val builder = ImageAnalysis.Builder().setTargetRotation(targetRotation)
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                                 .setResolutionSelector(resolutionSelector(Size(640, 480), 640L * 480L))
                             sensor.physicalCameraId?.let { Camera2Interop.Extender(builder).setPhysicalCameraId(it) }
+                            // Share the source's executor while both run; a meter-only session
+                            // gets its own single thread, torn down in detachSession().
+                            val analyzerExecutor = compositionFrames?.executor ?: obtainMeteringExecutor()
                             builder.build().also { analysis ->
                                 imageAnalysis = analysis
-                                analysis.setAnalyzer(source.executor) { source.analyze(it, sourceSession) }
+                                analysis.setAnalyzer(analyzerExecutor) { proxy ->
+                                    // The meter is synchronous and self-throttling; the frame
+                                    // source (if any) owns ImageProxy.close() afterwards.
+                                    try { lumaMeter?.analyze(proxy) } catch (_: Exception) { }
+                                    val session = sourceSession
+                                    if (compositionFrames != null && session != null)
+                                        compositionFrames.analyze(proxy, session)
+                                    else proxy.close()
+                                }
                             }
                         } catch (_: Exception) {
                             imageAnalysis?.clearAnalyzer()
                             imageAnalysis = null
-                            source.deactivate()
-                            source.shutdownExecutor()
+                            compositionFrames?.deactivate()
+                            compositionFrames?.shutdownExecutor()
+                            shutdownMeteringExecutor()
                             compositionSource = null
-                            mutableState.update { it.copy(compositionAnalysisError = "构图分析暂不可用，拍摄仍可继续。") }
+                            mutableState.update { it.copy(compositionAnalysisError = "取景分析暂不可用，拍摄仍可继续。") }
                             null
                         }
-                    }
+                    } else null
                     fun group(analysis: ImageAnalysis?) = UseCaseGroup.Builder()
                         .setViewPort(sharedViewPort)
                         .addUseCase(newPreview)
@@ -192,9 +213,10 @@ class CameraController(context: Context) {
                         compositionFrames?.deactivate()
                         cameraProvider.unbind(newPreview, newCapture, newAnalysis)
                         compositionFrames?.shutdownExecutor()
+                        shutdownMeteringExecutor()
                         imageAnalysis = null
                         compositionSource = null
-                        mutableState.update { it.copy(compositionAnalysisError = "设备不支持并行构图分析，已保留取景与拍摄。") }
+                        mutableState.update { it.copy(compositionAnalysisError = "设备不支持并行取景分析，已保留取景与拍摄。") }
                         cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, group(null))
                     }
                     camera = boundCamera
@@ -536,6 +558,16 @@ class CameraController(context: Context) {
         return camera ?: error("相机尚未绑定。")
     }
 
+    /** Single-thread analyzer executor for meter-only sessions (composition owns one otherwise). */
+    private fun obtainMeteringExecutor(): Executor = meteringExecutor ?: Executors.newSingleThreadExecutor { task ->
+        Thread(task, "street-snap-metering").apply { priority = Thread.MIN_PRIORITY }
+    }.also { meteringExecutor = it }
+
+    private fun shutdownMeteringExecutor() {
+        meteringExecutor?.shutdown()
+        meteringExecutor = null
+    }
+
     private fun detachSession() {
         sessionGeneration++
         focusSession.invalidate()
@@ -547,6 +579,7 @@ class CameraController(context: Context) {
         val useCases = listOfNotNull(preview, imageCapture, imageAnalysis)
         if (useCases.isNotEmpty()) provider?.unbind(*useCases.toTypedArray())
         oldCompositionSource?.shutdownExecutor()
+        shutdownMeteringExecutor()
         preview?.setSurfaceProvider(null)
         camera = null
         preview = null

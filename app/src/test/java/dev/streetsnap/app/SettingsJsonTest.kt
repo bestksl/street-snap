@@ -1,5 +1,7 @@
 package dev.streetsnap.app
 
+import dev.streetsnap.app.edge.EdgeModelCatalog
+import dev.streetsnap.app.edge.EdgeModelKind
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
 import org.json.JSONObject
@@ -82,6 +84,23 @@ class SettingsJsonTest {
         assertEquals(-9, settings.whiteBalanceGreen)
         assertEquals(setOf("POWDER_BLUE"), settings.looks.keys)
         settings.colorRecipe() // Validation must succeed for repaired settings.
+    }
+
+    @Test fun hdrDefaultsOffSurvivesRoundTripAndRecoversFromLegacyOrBadJson() {
+        assertFalse(AppSettings().hdrEnabled)
+        assertEquals(.6f, AppSettings().hdrStrength, 0f)
+        val enabled = AppSettings(hdrEnabled = true, hdrStrength = .85f)
+        assertEquals(enabled, SettingsJson.decode(SettingsJson.encode(enabled)))
+        // Legacy document without HDR fields: look stays off.
+        val legacy = SettingsJson.decode("""{"version":2,"preset":"POSITIVE"}""")
+        assertFalse(legacy.hdrEnabled)
+        assertEquals(.6f, legacy.hdrStrength, 0f)
+        // Out-of-range strength is clamped; malformed documents recover to defaults.
+        val repaired = SettingsJson.decode("""{"hdrEnabled":true,"hdrStrength":5}""")
+        assertTrue(repaired.hdrEnabled)
+        assertEquals(1f, repaired.hdrStrength, 0f)
+        assertEquals(AppSettings(), SettingsJson.decode("{broken"))
+        assertTrue(enabled.colorRecipe().hdrEnabled)
     }
 
     @Test fun malformedDocumentsRecoverAndUnrelatedValidFieldsSurviveBadLookEntries() {
@@ -172,7 +191,8 @@ class SettingsJsonTest {
         assertEquals(16_000_000L, loaded.exposureTimeNs)
         assertEquals(50, loaded.focalLength)
         assertEquals("DAYLIGHT", loaded.whiteBalance)
-        assertEquals("RICOH_GR", loaded.mascotCamera)
+        // Pre-T19 documents have no nameplate field; null now means "follow the active look".
+        assertNull(loaded.mascotCamera)
         assertEquals("AUTO", loaded.captureOrientation)
 
         val saved = JSONObject(SettingsJson.encode(loaded))
@@ -182,8 +202,10 @@ class SettingsJsonTest {
         assertEquals(loaded, SettingsJson.decode(saved.toString()))
     }
 
-    @Test fun everyCameraMascotAndCaptureDirectionSurviveRestart() {
-        val mascots = listOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3", null)
+    @Test fun everyNameplateChoiceAndCaptureDirectionSurviveRestart() {
+        // null = follow the active look, HIDDEN = no nameplate, camera ids = pinned body.
+        val mascots = listOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3",
+            CameraPreferences.HIDDEN, null)
         for (mascot in mascots) for (orientation in listOf("AUTO", "LANDSCAPE", "PORTRAIT")) {
             val settings = AppSettings(mascotCamera = mascot, captureOrientation = orientation,
                 preset = "POWDER_BLUE", whiteBalanceAmber = 3)
@@ -191,24 +213,94 @@ class SettingsJsonTest {
         }
     }
 
-    @Test fun missingCameraPreferencesUseDefaultsButExplicitlyDisabledMascotStaysDisabled() {
+    @Test fun missingOrNullNameplateMeansFollowLookWhileHiddenIsAString() {
+        // A legacy document without the field follows the active look (T19 migration)...
         val legacy = SettingsJson.decode("""{"version":2,"preset":"SUNNY"}""")
-        assertEquals("RICOH_GR", legacy.mascotCamera)
+        assertNull(legacy.mascotCamera)
         assertEquals("AUTO", legacy.captureOrientation)
-        val disabled = SettingsJson.decode("""{"version":4,"mascotCamera":null,"captureOrientation":"PORTRAIT"}""")
-        assertNull(disabled.mascotCamera)
-        assertEquals("PORTRAIT", disabled.captureOrientation)
-        assertEquals(disabled, SettingsJson.decode(SettingsJson.encode(disabled)))
+        // ...and so does an explicit JSON null, which used to mean "hidden" before T19.
+        val follow = SettingsJson.decode("""{"version":4,"mascotCamera":null,"captureOrientation":"PORTRAIT"}""")
+        assertNull(follow.mascotCamera)
+        assertEquals("PORTRAIT", follow.captureOrientation)
+        assertEquals(follow, SettingsJson.decode(SettingsJson.encode(follow)))
+        // The hidden state is the dedicated HIDDEN string, encoded verbatim rather than as null.
+        val hiddenJson = JSONObject(SettingsJson.encode(AppSettings(mascotCamera = CameraPreferences.HIDDEN)))
+        assertEquals(CameraPreferences.HIDDEN, hiddenJson.getString("mascotCamera"))
+        val hidden = SettingsJson.decode(hiddenJson.toString())
+        assertEquals(CameraPreferences.HIDDEN, hidden.mascotCamera)
     }
 
     @Test fun unknownCameraPreferencesRecoverWithoutDiscardingTheSelectedLook() {
         val settings = SettingsJson.decode("""{"version":4,"mascotCamera":"REMOVED_CAMERA","captureOrientation":"SIDEWAYS","preset":"POSITIVE","looks":{"POSITIVE":{"contrast":0.5}}}""")
-        assertEquals("RICOH_GR", settings.mascotCamera)
+        // An unknown body id recovers to follow-look (null), never to a hard-coded body.
+        assertNull(settings.mascotCamera)
         assertEquals("AUTO", settings.captureOrientation)
         assertEquals("POSITIVE", settings.preset)
         assertEquals(.5f, settings.activeLook.contrast, 0f)
         val encoded = SettingsJson.decode(SettingsJson.encode(AppSettings(mascotCamera = "UNKNOWN", captureOrientation = "UNKNOWN")))
-        assertEquals("RICOH_GR", encoded.mascotCamera)
+        assertNull(encoded.mascotCamera)
         assertEquals("AUTO", encoded.captureOrientation)
+    }
+
+    @Test fun viewfinderOsdDefaultsOffAndEveryModeSurvivesRestart() {
+        // Pure viewfinder by default; documents written before T20 simply lack the field.
+        assertEquals(ViewfinderOsd.OFF, AppSettings().viewfinderOsd)
+        assertEquals(ViewfinderOsd.OFF,
+            SettingsJson.decode("""{"version":4,"preset":"MONO"}""").viewfinderOsd)
+        for (mode in listOf(ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM, ViewfinderOsd.PARAMS)) {
+            val settings = AppSettings(viewfinderOsd = mode)
+            assertEquals(settings, SettingsJson.decode(SettingsJson.encode(settings)))
+        }
+        // Corrupt/unknown values never leave a phantom overlay on screen.
+        assertEquals(ViewfinderOsd.OFF,
+            SettingsJson.decode("""{"version":4,"viewfinderOsd":"LEVELS"}""").viewfinderOsd)
+        // The corner button walks the full cycle and returns to off.
+        var mode: String? = null
+        val sequence = List(4) { mode = ViewfinderOsd.next(mode); mode }
+        assertEquals(listOf(ViewfinderOsd.HISTOGRAM, ViewfinderOsd.PARAMS, ViewfinderOsd.OFF, ViewfinderOsd.HISTOGRAM), sequence)
+    }
+
+    @Test fun lookAdviceDefaultsOnAndDismissMemorySurvivesRoundTrip() {
+        // Fresh installs get suggestions; legacy documents without the field default to on.
+        assertTrue(AppSettings().lookAdviceEnabled)
+        assertTrue(AppSettings().exposureAdviceEnabled)
+        assertEquals(0, AppSettings().lookAdviceDismissStreak)
+        assertTrue(AppSettings().lookDismissedAt.isEmpty())
+        val legacy = SettingsJson.decode("""{"version":4,"preset":"MONO"}""")
+        assertTrue(legacy.lookAdviceEnabled)
+        assertTrue(legacy.exposureAdviceEnabled)
+        val at = 1_700_000_000_000L
+        val saved = AppSettings(
+            lookAdviceEnabled = false,
+            exposureAdviceEnabled = false,
+            lookAdviceDismissStreak = 2,
+            lookDismissedAt = mapOf("POSITIVE" to at, "FILM:MONO_01" to at + 1L),
+        )
+        val loaded = SettingsJson.decode(SettingsJson.encode(saved))
+        assertEquals(saved, loaded)
+        assertFalse(loaded.lookAdviceEnabled)
+        assertFalse(loaded.exposureAdviceEnabled)
+        assertEquals(2, loaded.lookAdviceDismissStreak)
+        assertEquals(at, loaded.lookDismissedAt["POSITIVE"])
+        // Bad streak values are clamped back into the valid 0..3 range.
+        val repaired = SettingsJson.decode(
+            """{"version":4,"lookAdviceEnabled":false,"lookAdviceDismissStreak":99,"lookDismissedAt":{"X":0,"VALID":123}}""")
+        assertEquals(3, repaired.lookAdviceDismissStreak)
+        assertEquals(setOf("VALID"), repaired.lookDismissedAt.keys)
+    }
+
+    @Test fun freshInstallSelectsTheRecommendedD1RankerAndUnknownIdsFallBack() {
+        assertEquals("d1-omni-600m", EdgeModelCatalog.DEFAULT_MODEL_ID)
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)
+        assertEquals(EdgeModelKind.D1_OMNI_CHOICE,
+            EdgeModelCatalog.find(AppSettings().compositionModel)!!.kind)
+        // A document without the field (upgrades) and one with a removed/unknown id both recover to the default.
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+            SettingsJson.decode("""{"version":4,"preset":"MONO"}""").compositionModel)
+        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+            SettingsJson.decode("""{"version":4,"compositionModel":"removed-model"}""").compositionModel)
+        // An explicit, still-shipped selection is preserved rather than silently migrated.
+        assertEquals("smolvlm-256m",
+            SettingsJson.decode("""{"version":4,"compositionModel":"smolvlm-256m"}""").compositionModel)
     }
 }

@@ -50,20 +50,38 @@ data class AppSettings(
     val exposureTimeNs: Long? = null,
     val grid: Boolean = true,
     val level: Boolean = true,
+    // Viewfinder OSD cycle: OFF (default, pure viewfinder) / HISTOGRAM / PARAMS (histogram + exposure readout).
+    val viewfinderOsd: String = ViewfinderOsd.OFF,
     val preset: String = "ORIGINAL",
     val filmId: String? = null,
-    val mascotCamera: String? = CameraPreferences.DEFAULT_MASCOT,
+    // null = the nameplate follows the active look family; "HIDDEN" = no nameplate; a
+    // camera id = a manually pinned body. See CameraPreferences.nameplate.
+    val mascotCamera: String? = null,
     val captureOrientation: String = CameraPreferences.DEFAULT_ORIENTATION,
     val compositionEnabled: Boolean = false,
     val compositionRealtime: Boolean = false,
-    val compositionModel: String = "smolvlm-256m",
+    val compositionModel: String = EdgeModelCatalog.DEFAULT_MODEL_ID,
     val looks: Map<String, LookSettings> = emptyMap(),
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
     val hdfStrength: Float = .4f,
+    // Independent HDR look (filmic highlight shoulder + wide halo), off by default.
+    val hdrEnabled: Boolean = false,
+    val hdrStrength: Float = .6f,
     val whiteBalance: String = "AUTO",
     val whiteBalanceAmber: Int = 0,
     val whiteBalanceGreen: Int = 0,
+    // Independent switch for the realtime look-suggestion card; on by default (T30).
+    val lookAdviceEnabled: Boolean = true,
+    // Independent switch for clipped-highlight/shadow exposure hints; on by default (T31).
+    val exposureAdviceEnabled: Boolean = true,
+    // T34: optional light haptic when framing reaches the suggested crop. Visual green
+    // confirmation always shows; haptics are opt-in, and there is deliberately no sound.
+    val alignmentHapticEnabled: Boolean = false,
+    // look key → dismiss timestamp (epoch ms); adviser suppresses keys within a 7-day window.
+    val lookDismissedAt: Map<String, Long> = emptyMap(),
+    // Three consecutive dismisses flip lookAdviceEnabled off; trying/keeping a look resets it.
+    val lookAdviceDismissStreak: Int = 0,
 ) {
     val activeLookKey: String get() = FilmRegistry.find(filmId)?.let { "FILM:${it.id}" } ?: preset
     val activeLook: LookSettings get() = looks[activeLookKey]
@@ -83,6 +101,7 @@ data class AppSettings(
             brightness = look.brightness, highlights = look.highlights, shadows = look.shadows,
             sharpness = look.sharpness, clarity = look.clarity,
             hdfEnabled = hdfEnabled, hdfStrength = hdfStrength,
+            hdrEnabled = hdrEnabled, hdrStrength = hdrStrength,
             whiteBalanceAmber = whiteBalanceAmber, whiteBalanceGreen = whiteBalanceGreen,
         )
     }
@@ -90,13 +109,39 @@ data class AppSettings(
 
 /** Stored IDs are independent of the Compose catalog so loading settings never needs UI code. */
 internal object CameraPreferences {
-    const val DEFAULT_MASCOT = "RICOH_GR"
     const val DEFAULT_ORIENTATION = "AUTO"
+
+    /** Explicitly hides the viewfinder nameplate. */
+    const val HIDDEN = "HIDDEN"
     private val mascots = setOf("RICOH_GR", "FUJIFILM_X100VI", "SIGMA_FP", "PANASONIC_LX100", "NIKON_F3")
     private val orientations = setOf("AUTO", "LANDSCAPE", "PORTRAIT")
 
-    fun mascot(id: String?): String? = if (id == null) null else id.takeIf { it in mascots } ?: DEFAULT_MASCOT
+    /**
+     * null = follow the active look/film family; [HIDDEN] = no nameplate; a known camera
+     * id = that pinned body. Legacy docs that pinned a body keep it; unknown ids recover
+     * to follow-look. (The pre-T19 explicit "hidden" value was JSON null, which now means
+     * follow-look — a deliberate, documented migration.)
+     */
+    fun nameplate(id: String?): String? = when {
+        id == null || id == HIDDEN -> id
+        id in mascots -> id
+        else -> null
+    }
     fun orientation(id: String?): String = id?.takeIf { it in orientations } ?: DEFAULT_ORIENTATION
+}
+
+/** Viewfinder overlay cycle. Nothing here is fabricated: the readout shows reported camera values only. */
+internal object ViewfinderOsd {
+    const val OFF = "OFF"
+    const val HISTOGRAM = "HISTOGRAM"
+    const val PARAMS = "PARAMS"
+    private val modes = setOf(OFF, HISTOGRAM, PARAMS)
+    fun mode(value: String?): String = value?.takeIf { it in modes } ?: OFF
+    fun next(value: String?): String = when (mode(value)) {
+        OFF -> HISTOGRAM
+        HISTOGRAM -> PARAMS
+        else -> OFF
+    }
 }
 
 /** Keep the old key so installing over v0.1 migrates settings without losing the selected look. */
@@ -125,13 +170,14 @@ internal object SettingsJson {
         put("exposureTimeNs", settings.exposureTimeNs ?: JSONObject.NULL)
         put("grid", settings.grid)
         put("level", settings.level)
+        put("viewfinderOsd", ViewfinderOsd.mode(settings.viewfinderOsd))
         put("preset", settings.preset)
         put("filmId", settings.filmId ?: JSONObject.NULL)
-        put("mascotCamera", CameraPreferences.mascot(settings.mascotCamera) ?: JSONObject.NULL)
+        put("mascotCamera", CameraPreferences.nameplate(settings.mascotCamera) ?: JSONObject.NULL)
         put("captureOrientation", CameraPreferences.orientation(settings.captureOrientation))
         put("compositionEnabled", settings.compositionEnabled)
         put("compositionRealtime", settings.compositionRealtime)
-        put("compositionModel", EdgeModelCatalog.find(settings.compositionModel)?.id ?: "smolvlm-256m")
+        put("compositionModel", EdgeModelCatalog.find(settings.compositionModel)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID)
         put("lutName", settings.lutName ?: JSONObject.NULL)
         put("looks", JSONObject().apply {
             settings.looks.forEach { (preset, look) ->
@@ -152,9 +198,18 @@ internal object SettingsJson {
         })
         put("hdfEnabled", settings.hdfEnabled)
         put("hdfStrength", settings.hdfStrength.toDouble())
+        put("hdrEnabled", settings.hdrEnabled)
+        put("hdrStrength", settings.hdrStrength.toDouble())
         put("whiteBalance", settings.whiteBalance)
         put("whiteBalanceAmber", settings.whiteBalanceAmber)
         put("whiteBalanceGreen", settings.whiteBalanceGreen)
+        put("lookAdviceEnabled", settings.lookAdviceEnabled)
+        put("exposureAdviceEnabled", settings.exposureAdviceEnabled)
+        put("alignmentHapticEnabled", settings.alignmentHapticEnabled)
+        put("lookDismissedAt", JSONObject().apply {
+            settings.lookDismissedAt.forEach { (lookKey, at) -> put(lookKey, at) }
+        })
+        put("lookAdviceDismissStreak", settings.lookAdviceDismissStreak)
     }.toString()
 
     fun decode(value: String?): AppSettings {
@@ -187,26 +242,38 @@ internal object SettingsJson {
                 exposureTimeNs = if (json.isNull("exposureTimeNs")) null else json.optLong("exposureTimeNs").takeIf { it > 0L },
                 grid = json.optBoolean("grid", true),
                 level = json.optBoolean("level", true),
+                viewfinderOsd = ViewfinderOsd.mode(json.optString("viewfinderOsd").takeIf { it.isNotEmpty() }),
                 preset = preset,
                 filmId = if (json.isNull("filmId")) null else json.optString("filmId")
                     .takeIf { FilmRegistry.find(it) != null },
-                mascotCamera = when {
-                    !json.has("mascotCamera") -> CameraPreferences.DEFAULT_MASCOT
-                    json.isNull("mascotCamera") -> null
-                    else -> CameraPreferences.mascot(json.optString("mascotCamera"))
-                },
+                mascotCamera = if (!json.has("mascotCamera") || json.isNull("mascotCamera")) null
+                    else CameraPreferences.nameplate(json.optString("mascotCamera")),
                 captureOrientation = CameraPreferences.orientation(json.optString("captureOrientation")),
                 compositionEnabled = json.optBoolean("compositionEnabled", false),
                 compositionRealtime = json.optBoolean("compositionRealtime", false),
-                compositionModel = EdgeModelCatalog.find(json.optString("compositionModel"))?.id ?: "smolvlm-256m",
+                compositionModel = EdgeModelCatalog.find(json.optString("compositionModel"))?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID,
                 looks = looks,
                 lutName = if (json.isNull("lutName")) null else json.optString("lutName").takeIf(String::isNotBlank)?.take(120),
                 hdfEnabled = json.optBoolean("hdfEnabled", false),
                 hdfStrength = json.amount("hdfStrength", .4f),
+                hdrEnabled = json.optBoolean("hdrEnabled", false),
+                hdrStrength = json.amount("hdrStrength", .6f),
                 whiteBalance = json.optString("whiteBalance", "AUTO")
                     .takeIf { name -> WhiteBalanceMode.entries.any { it.name == name } } ?: "AUTO",
                 whiteBalanceAmber = json.optInt("whiteBalanceAmber", 0).coerceIn(-9, 9),
                 whiteBalanceGreen = json.optInt("whiteBalanceGreen", 0).coerceIn(-9, 9),
+                lookAdviceEnabled = json.optBoolean("lookAdviceEnabled", true),
+                exposureAdviceEnabled = json.optBoolean("exposureAdviceEnabled", true),
+                alignmentHapticEnabled = json.optBoolean("alignmentHapticEnabled", false),
+                lookDismissedAt = json.optJSONObject("lookDismissedAt")?.let { dismissed ->
+                    dismissed.keys().asSequence()
+                        .mapNotNull { lookKey ->
+                            val at = dismissed.optLong(lookKey, 0L)
+                            lookKey.takeIf { it.length <= 64 }?.let { key -> if (at > 0L) key to at else null }
+                        }
+                        .toMap()
+                } ?: emptyMap(),
+                lookAdviceDismissStreak = json.optInt("lookAdviceDismissStreak", 0).coerceIn(0, 3),
             )
         }.getOrDefault(AppSettings())
     }

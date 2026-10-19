@@ -38,6 +38,12 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     private var bloomWidth = 0
     private var bloomHeight = 0
     private var bloomValid = false
+    // Smoothed HDR level for preview frames so AE jumps/toggles cannot pop the halo.
+    // Stills are fresh renderers and settle immediately on the first draw.
+    private var hdrLevel = 0f
+    // Preview swaps in an independent grain field each frame; stills pin frame 1 so every
+    // tiled strip shares one seamless field.
+    private var grainFrame = 0L
     val textureId get() = inputTexture
 
     init {
@@ -187,6 +193,9 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         GLES30.glUniform4f(uniform("uDetail"), state.recipe.highlights, state.recipe.shadows,
             state.recipe.sharpness, state.recipe.clarity)
         GLES30.glUniform1f(uniform("uHdf"), if (state.recipe.hdfEnabled) state.recipe.hdfStrength else 0f)
+        val hdrTarget = if (state.recipe.hdrEnabled) state.recipe.hdrStrength.coerceIn(0f, 1f) else 0f
+        hdrLevel = if (externalInput) hdrLevel + (hdrTarget - hdrLevel) * 0.2f else hdrTarget
+        GLES30.glUniform1f(uniform("uHdr"), hdrLevel)
         val amber = state.recipe.whiteBalanceAmber / 9f
         val green = state.recipe.whiteBalanceGreen / 9f
         GLES30.glUniform3f(uniform("uWhiteBalanceGain"),
@@ -195,11 +204,16 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         val angle = state.recipe.hue * .34906585f
         GLES30.glUniform2f(uniform("uHueRotation"), cos(angle), sin(angle))
         GLES30.glUniform2f(uniform("uImageSize"), fullWidth.toFloat(), fullHeight.toFloat())
+        val grainSeedFrame = if (externalInput) ++grainFrame else 1L
+        GLES30.glUniform2f(uniform("uGrainSeed"),
+            grainSeedHash(grainSeedFrame, 0x9E3779B9L), grainSeedHash(grainSeedFrame, 0x85EBCA6BL))
         GLES30.glUniformMatrix4fv(uniform("uInputTransform"), 1, false, transform, 0)
+        val diffusionOn = state.recipe.hdfEnabled && state.recipe.hdfStrength > 0f
+        val hdrOn = state.recipe.hdrEnabled && state.recipe.hdrStrength > 0f
         GLES30.glUniform1i(uniform("uBloom"), 2)
-        if (state.recipe.hdfEnabled && state.recipe.hdfStrength > 0f) {
+        if (diffusionOn || hdrOn) {
             // Photo strips share a single whole-image bloom texture. Preview updates every frame.
-            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight)
+            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight, hdrOn)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
         }
@@ -212,7 +226,7 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     }
 
     /** At most two 384px-long-edge RGBA textures, reused until output aspect/size changes. */
-    private fun prepareBloom(width: Int, height: Int) {
+    private fun prepareBloom(width: Int, height: Int, wideHalo: Boolean) {
         val scale = minOf(1f, 384f / maxOf(width, height))
         val targetWidth = maxOf(1, (width * scale).toInt())
         val targetHeight = maxOf(1, (height * scale).toInt())
@@ -252,8 +266,11 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         GLES30.glUniform1i(uniform("uPass"), 2)
         // Two successive scales widen the visible halo and soften sparse point highlights.
         // Both run only on the bounded bloom textures, reusing the same two buffers.
-        for (pass in 0..1) {
-            val fraction = if (pass == 0) .008f else .014f
+        // HDR adds two wider scales on the same FBO pair (zero new textures) to form the
+        // "soft core plus an outer halo"; see docs/hdr-film-research.md.
+        val fractions = if (wideHalo) floatArrayOf(.008f, .014f, .026f, .042f)
+        else floatArrayOf(.008f, .014f)
+        for (fraction in fractions) {
             val radius = minOf(bloomWidth, bloomHeight) * fraction
             GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, bloomBuffers[1])
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
@@ -312,6 +329,16 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     }
 
     companion object {
+        // Deterministic per-frame grain seed in [0,1): splitmix-style mixing keeps successive
+        // frames (and the two salted channels) decorrelated without GPU sin precision issues.
+        private fun grainSeedHash(frame: Long, salt: Long): Float {
+            var h = (frame xor salt) * 1274126177L
+            h = h xor (h ushr 29)
+            h *= 2654435761L
+            h = h xor (h ushr 33)
+            return (h ushr 40).toFloat() / 16777216f // 24 bits
+        }
+
         fun checkGl(operation: String) {
             val error = GLES30.glGetError()
             check(error == GLES30.GL_NO_ERROR) { "$operation 失败 (GL 0x${error.toString(16)})" }

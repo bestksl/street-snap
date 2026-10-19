@@ -108,8 +108,11 @@ internal fun CameraLookPicker(settings: AppSettings, onPreset: (ColorPreset) -> 
     }
 }
 
+/** The camera family that visually represents the currently active look/film preset. */
+internal fun cameraForLook(presetName: String): CameraModel? = CameraLookGroup.forPreset(presetName).camera
+
 @Composable
-private fun NeutralLookArtwork(modifier: Modifier) {
+internal fun NeutralLookArtwork(modifier: Modifier) {
     val color = MaterialTheme.colorScheme.onSurfaceVariant
     Canvas(modifier) {
         val radius = size.minDimension * .29f
@@ -129,30 +132,42 @@ internal fun MascotPicker(
     onDismiss: () -> Unit,
 ) {
     AlertDialog(onDismissRequest = onDismiss,
-        title = { Text("相机") },
+        title = { Text("取景器相机") },
         text = {
-            Column(Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState()),
+            Column(Modifier.fillMaxWidth().heightIn(max = 440.dp).verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                CameraModel.entries.chunked(2).forEach { row ->
+                // First tile: the camera follows the active look/film family (default).
+                val choices: List<Pair<String?, @Composable (Modifier) -> Unit>> = buildList {
+                    add(null to { modifier -> NeutralLookArtwork(modifier) })
+                    CameraModel.entries.forEach { camera ->
+                        add(camera.name to { modifier -> CameraArtwork(camera, modifier) })
+                    }
+                }
+                val labels: Map<String?, String> = buildMap {
+                    put(null, "跟随影调")
+                    CameraModel.entries.forEach { put(it.name, "${it.brand} · ${it.model}") }
+                }
+                choices.chunked(2).forEach { row ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        row.forEach { camera ->
-                            val chosen = selectedId == camera.name
+                        row.forEach { (id, artwork) ->
+                            val chosen = selectedId == id
                             Column(Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
                                 .background(MaterialTheme.colorScheme.surfaceContainer)
                                 .border(1.dp, if (chosen) MaterialTheme.colorScheme.primary else Color.Transparent,
                                     RoundedCornerShape(12.dp))
-                                .clickable(role = Role.Button) { onSelect(camera.name); onDismiss() }
-                                .semantics { selected = chosen; contentDescription = "摆件：${camera.brand} ${camera.model}" }
+                                .clickable(role = Role.Button) { onSelect(id); onDismiss() }
+                                .semantics { selected = chosen; contentDescription = "取景器相机：${labels[id]}" }
                                 .padding(8.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                                CameraArtwork(camera, Modifier.fillMaxWidth().height(62.dp))
-                                Text("${camera.brand} · ${camera.model}", fontSize = 12.sp,
+                                artwork(Modifier.fillMaxWidth().height(62.dp))
+                                Text(labels[id]!!, fontSize = 12.sp,
                                     maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
                         if (row.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
-                Text("摆件只改变外观，影调单独选择。", Modifier.padding(top = 4.dp),
+                Text("跟随影调时，顶部相机会随你选的影调或胶片变化；固定一款则始终显示它。",
+                    Modifier.padding(top = 4.dp),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("取景方向", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.titleSmall)
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
@@ -170,5 +185,11 @@ internal fun MascotPicker(
             }
         },
         confirmButton = { TextButton(onClick = onDismiss) { Text("完成") } },
-        dismissButton = { TextButton(onClick = { onSelect(null); onDismiss() }) { Text("不显示") } })
+        dismissButton = {
+            val hidden = selectedId == CameraPreferences.HIDDEN
+            TextButton(onClick = { onSelect(CameraPreferences.HIDDEN); onDismiss() }) {
+                Text(if (hidden) "✓ 不显示" else "不显示",
+                    color = if (hidden) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        })
 }
