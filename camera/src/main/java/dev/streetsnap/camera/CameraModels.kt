@@ -40,6 +40,17 @@ data class LiveExposureReading(
     val frameTimestampNs: Long = 0L,
 )
 
+/**
+ * T77: the HAL's face-statistics observation for the latest frame (sensor statistics, not
+ * app-side detection): how many faces the 3A library reported and the largest face in
+ * portrait-preview normalized coordinates. [count] 0 with null [primary] means "no face".
+ */
+data class FaceObservation(
+    val count: Int,
+    val primary: NormalizedBoundingBox?,
+    val frameTimestampNs: Long,
+)
+
 data class CameraState(
     val isBound: Boolean = false,
     val isReady: Boolean = false,
@@ -50,6 +61,7 @@ data class CameraState(
     val capabilities: CameraCapabilities? = null,
     val settings: CaptureSettings = CaptureSettings(),
     val liveExposure: LiveExposureReading? = null,
+    val liveFaces: FaceObservation? = null,
     val zoomRatio: Float = 1f,
     val error: String? = null,
     val compositionAnalysisActive: Boolean = false,
@@ -83,7 +95,16 @@ data class CameraCapabilities(
     val whiteBalanceModes: List<WhiteBalanceMode> = listOf(WhiteBalanceMode.AUTO),
     val supportsShutterPriority: Boolean = false,
     val fixedAperture: Float? = null,
+    /**
+     * T77: strongest Camera2 face statistics mode the HAL offers (2 = FULL with eye/mouth
+     * landmarks, 1 = SIMPLE rectangles, null = none) and its maximum reportable face count.
+     * When non-null the controller enables the mode and the HAL's own 3A drives face AF/AE;
+     * the app only displays the rectangles the HAL reports.
+     */
+    val faceDetectMode: Int? = null,
+    val maxFaceCount: Int = 0,
 ) {
+    val supportsFaceDetection: Boolean get() = faceDetectMode != null && maxFaceCount > 0
     val exposureModes: List<ExposureMode> get() = buildList {
         add(ExposureMode.PROGRAM)
         if (supportsShutterPriority) add(ExposureMode.SHUTTER_PRIORITY)

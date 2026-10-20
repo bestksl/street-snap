@@ -11,6 +11,7 @@ import dev.streetsnap.app.composition.CandidateContactSheet
 import dev.streetsnap.app.composition.CandidateSelectionGate
 import dev.streetsnap.app.composition.CompositionCandidate
 import dev.streetsnap.app.composition.FastCompositionAdvisor
+import dev.streetsnap.app.composition.FocusDisturbanceGate
 import dev.streetsnap.app.composition.SceneReading
 import dev.streetsnap.app.composition.SceneReadings
 import dev.streetsnap.app.edge.CompositionSuggestion
@@ -147,6 +148,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
      * resets immediately, so no praise can be earned across a genuine scene break.
      */
     private var overlayClearGrace: Job? = null
+    /** T76: tap-to-focus briefly suppresses scene-change clears (AF hunt is not a new scene). */
+    private val focusGate = FocusDisturbanceGate(now = { SystemClock.elapsedRealtime() })
     /** Coarse colour/light statistics from the latest rule-analysis frame; consumed later by look/exposure advice. */
     private val _sceneReading = MutableStateFlow<SceneReading?>(null)
     val sceneReading = _sceneReading.asStateFlow()
@@ -197,6 +200,15 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     /** Live focal-length updates for the rare wide-angle egg; sessions are not restarted for this. */
     fun updateFocalLength(equivalentMm: Int) {
         if (equivalentMm > 0) focalLengthMm = equivalentMm
+    }
+
+    /**
+     * The user explicitly asked for AF (tap / long-press lock). The motor hunt and AE
+     * re-convergence briefly perturb the scene signature, so scene-change clears are held
+     * back for one focus grace window (T76); a real pan afterwards clears advice as usual.
+     */
+    fun notifyFocusEngaged() {
+        focusGate.engage()
     }
 
     fun invalidateView() {
@@ -635,7 +647,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             },
                             onSceneChanged = {
                                 scope.launch(Dispatchers.Main.immediate) {
-                                    if (isCurrentSession()) {
+                                    // T76: the AF/AE hunt right after a focus tap is not a real
+                                    // scene change — keep the rectangle, arrow and look card.
+                                    if (isCurrentSession() && !focusGate.isDisturbing()) {
                                         requestGracefulClear()
                                         sceneChangeListener?.invoke()
                                     }
@@ -655,7 +669,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                 val frameMode = withContext(Dispatchers.Main.immediate) {
                                     if (!isCurrentSession() || !frame.isCurrent ||
                                         !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
-                                    if (visibleScene?.invoke() == false) requestGracefulClear()
+                                    if (visibleScene?.invoke() == false && !focusGate.isDisturbing())
+                                        requestGracefulClear()
                                     val requested = manualRequestPending
                                     if (!requested && !config.realtime && !config.lookAdvice) return@withContext null
                                     if (requested) {

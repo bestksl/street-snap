@@ -139,6 +139,10 @@ import dev.streetsnap.app.composition.MoveGuide
 import dev.streetsnap.app.composition.MoveGuides
 import dev.streetsnap.app.composition.arrowAngleDeg
 import dev.streetsnap.app.composition.arrowLabel
+import dev.streetsnap.app.edge.PoseModelCatalog
+import dev.streetsnap.app.pose.PoseModelStatus
+import dev.streetsnap.app.pose.PoseOverlayLayer
+import dev.streetsnap.app.pose.PoseUiState
 import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.ExposureMode
@@ -445,6 +449,9 @@ private fun Viewfinder(
     // clears as soon as it drifts away — the goal no longer flashes for 1.3 s and vanishes.
     val alignmentPulse by model.composition.alignmentPulse.collectAsStateWithLifecycle()
     val alignmentConfirmed by model.composition.alignmentConfirmed.collectAsStateWithLifecycle()
+    // T72 pose assistant: the frame source is non-null only while live recognition is bound.
+    val poseState by model.pose.state.collectAsStateWithLifecycle()
+    val poseSource by model.pose.source.collectAsStateWithLifecycle()
     // T40: the success sentence announces the achieved phase once, then the card fades out and
     // only the persistent green frame + check remain (iPhone level/Mola restraint: a quiet
     // steady-state, no permanent banner). Drifting out dismisses the timer and fades the card
@@ -485,7 +492,7 @@ private fun Viewfinder(
     }
     // The adjustment panel only changes the preview's size, not its 4:3 framing.
     // PreviewView handles those resizes without tearing down the camera session.
-    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource, meteringWanted) {
+    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource, poseSource, meteringWanted) {
         if (!hasSize) return@LaunchedEffect
         model.onBindingStarted()
         bindingError = null
@@ -500,6 +507,7 @@ private fun Viewfinder(
                 .setScaleType(ViewPort.FILL_CENTER).build()
             model.camera.bind(lifecycle, preview.surfaceProvider, model.colors.previewEffect(model::onPreviewError), viewPort, rotation,
                 compositionFrames = compositionSource,
+                poseFrames = poseSource,
                 lumaMeter = if (meteringWanted) model.lumaMeter else null)
             model.onCameraBound()
         } catch (error: Exception) {
@@ -631,6 +639,23 @@ private fun Viewfinder(
                     drawRect(color, Offset(x - radius, y - radius),
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
+                // T77: the HAL's own face-tracking rectangle (largest face, portrait-normalized
+                // sensor coordinates). The 3A library drives face/eye AF by itself; this thin
+                // box only shows which face it follows and it disappears under manual focus.
+                // FILL_CENTER viewport crop is not compensated yet — treat placement as
+                // loaded-only until verified on real devices.
+                state.liveFaces?.primary?.let { face ->
+                    val left = face.left.coerceIn(0f, 1f) * size.width
+                    val top = face.top.coerceIn(0f, 1f) * size.height
+                    val boxWidth = (face.right - face.left).coerceAtLeast(0f) * size.width
+                    val boxHeight = (face.bottom - face.top).coerceAtLeast(0f) * size.height
+                    drawRect(
+                        Color.White.copy(alpha = .5f),
+                        Offset(left, top),
+                        androidx.compose.ui.geometry.Size(boxWidth, boxHeight),
+                        style = Stroke(1.dp.toPx()),
+                    )
+                }
                 // While the T35 trial zoom fills the screen the guide rectangle and shade
                 // are the whole viewfinder, so hide them instead of masking the preview.
                 if (activeTrial == null) {
@@ -700,6 +725,11 @@ private fun Viewfinder(
                 OsdCycleButton(osdMode, model::cycleViewfinderOsd)
                 Spacer(Modifier.weight(1f))
                 OverlayPill(
+                    label = "姿势",
+                    enabled = true, description = "姿势助手开关",
+                    selected = settings.poseAssistantEnabled,
+                    onClick = { model.setPoseAssistantEnabled(!settings.poseAssistantEnabled) })
+                OverlayPill(
                     label = if (!compositionState.isRequestRunning) "构图" else "分析中",
                     enabled = state.isReady && !compositionState.isRequestRunning,
                     description = "分析一次构图",
@@ -732,8 +762,10 @@ private fun Viewfinder(
             // hosts only the optional small histogram window.
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
-            // Clipped-highlight/shadow hint under the HDF button it may point at; text-only.
-            exposureAdviceCard?.let { card ->
+            // Clipped-highlight/shadow hint. In framed portrait it lives in the black control
+            // band just above the shoulder strip (see ViewfinderOverlayBar) so it never covers
+            // the viewfinder; only the floating landscape path keeps the in-frame anchor.
+            if (!framed) exposureAdviceCard?.let { card ->
                 ExposureAdviceCardView(card, model::dismissExposureAdvice,
                     Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 100.dp))
             }
@@ -840,6 +872,11 @@ private fun Viewfinder(
             if (arrowAlpha > 0.01f) {
                 MoveGuideIndicator(moveGuide, arrowAlpha,
                     Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = floatingClearance))
+            }
+            // T72 pose assistant. Hidden during the long-press trial zoom like the pill row.
+            if (settings.poseAssistantEnabled && activeTrial == null) {
+                PoseOverlayLayer(poseState, settings.alignmentHapticEnabled, model::nextPose,
+                    Modifier.fillMaxSize())
             }
         }
         val error = bindingError ?: previewError ?: state.error
@@ -1141,30 +1178,35 @@ private fun MoveGuideIndicator(guide: MoveGuide?, alpha: Float, modifier: Modifi
             tween(760, easing = FastOutSlowInEasing), RepeatMode.Reverse),
         label = "moveArrowDrift")
     val direction = guide?.direction
-    Box(modifier.size(38.dp).clip(CircleShape)
-        .background(Color.Black.copy(alpha = .32f * alpha))
+    // T76: larger disc, darker backing, brighter/thicker chevrons and a longer slide so the
+    // nudge reads at a glance over busy pictures.
+    Box(modifier.size(46.dp).clip(CircleShape)
+        .background(Color.Black.copy(alpha = .50f * alpha))
         .semantics {
             if (direction != null) contentDescription = "移动方向提示：${direction.arrowLabel}"
         }) {
-        val arrowColor = Color.White.copy(alpha = (.62f + .38f * progress) * alpha)
+        val arrowColor = Color.White.copy(alpha = (.75f + .25f * progress) * alpha)
         when {
             direction == null -> Unit // fade-out tail only
             direction == GuideDirection.FORWARD -> {
                 // Two small chevrons converging: step closer.
                 Canvas(Modifier.fillMaxSize().graphicsLayer {
                     rotationZ = 90f
-                    translationY = density * (-4.2.dp.value + 2.6.dp.value * progress)
-                }) { drawGuideChevron(arrowColor, halfWidth = 2.3.dp.toPx(), halfHeight = 3.3.dp.toPx()) }
+                    translationY = density * (-5.2.dp.value + 3.4.dp.value * progress)
+                }) { drawGuideChevron(arrowColor, halfWidth = 3.0.dp.toPx(), halfHeight = 4.4.dp.toPx(),
+                    strokeWidth = 2.8.dp.toPx()) }
                 Canvas(Modifier.fillMaxSize().graphicsLayer {
                     rotationZ = -90f
-                    translationY = density * (4.2.dp.value - 2.6.dp.value * progress)
-                }) { drawGuideChevron(arrowColor, halfWidth = 2.3.dp.toPx(), halfHeight = 3.3.dp.toPx()) }
+                    translationY = density * (5.2.dp.value - 3.4.dp.value * progress)
+                }) { drawGuideChevron(arrowColor, halfWidth = 3.0.dp.toPx(), halfHeight = 4.4.dp.toPx(),
+                    strokeWidth = 2.8.dp.toPx()) }
             }
             else -> Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = direction.arrowAngleDeg }) {
                 Canvas(Modifier.fillMaxSize().graphicsLayer {
-                    translationX = density * (-2.dp.value + 4.4.dp.value * progress)
+                    translationX = density * (-3.dp.value + 6.dp.value * progress)
                 }) {
-                    drawGuideChevron(arrowColor, halfWidth = 3.4.dp.toPx(), halfHeight = 5.2.dp.toPx())
+                    drawGuideChevron(arrowColor, halfWidth = 4.6.dp.toPx(), halfHeight = 7.2.dp.toPx(),
+                        strokeWidth = 3.2.dp.toPx())
                 }
             }
         }
@@ -1172,12 +1214,11 @@ private fun MoveGuideIndicator(guide: MoveGuide?, alpha: Float, modifier: Modifi
 }
 
 /** A round-capped ">" centred in the canvas, [halfWidth] back from the tip. */
-private fun DrawScope.drawGuideChevron(color: Color, halfWidth: Float, halfHeight: Float) {
+private fun DrawScope.drawGuideChevron(color: Color, halfWidth: Float, halfHeight: Float, strokeWidth: Float) {
     val cx = size.width / 2f
     val cy = size.height / 2f
-    val stroke = 2.5.dp.toPx()
-    drawLine(color, Offset(cx - halfWidth, cy - halfHeight), Offset(cx, cy), stroke, cap = StrokeCap.Round)
-    drawLine(color, Offset(cx, cy), Offset(cx - halfWidth, cy + halfHeight), stroke, cap = StrokeCap.Round)
+    drawLine(color, Offset(cx - halfWidth, cy - halfHeight), Offset(cx, cy), strokeWidth, cap = StrokeCap.Round)
+    drawLine(color, Offset(cx, cy), Offset(cx - halfWidth, cy + halfHeight), strokeWidth, cap = StrokeCap.Round)
 }
 
 /**
@@ -1255,6 +1296,9 @@ private fun ViewfinderOverlayBar(
     val exposureMode = state.settings.exposureMode
     val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
     val wbName = state.settings.whiteBalance.takeIf { it != WhiteBalanceMode.AUTO }?.displayName
+    // T74: in framed portrait the exposure hint shares the black band with the shoulder strip
+    // (second collector of the same StateFlow); the landscape floating path renders it in-frame.
+    val exposureCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
 
     // Only *manual overrides that can ruin a shot* get a persistent chip (Halide Mark III
     // pattern): non-auto WB, diffusion, MF, S/M exposure, EV. Tap jumps to the section,
@@ -1289,6 +1333,12 @@ private fun ViewfinderOverlayBar(
         // one block, so on tall 20:9 screens the slack splits above/below it instead of
         // opening a void between the focal row and the shutter (T22).
         if (framed) Spacer(Modifier.weight(1f))
+        // T74: the clipped-highlight/shadow hint belongs to the meter strip, so it sits
+        // directly above it in the black band — never over the 3:4 picture.
+        if (framed) exposureCard?.let { card ->
+            ExposureAdviceCardView(card, model::dismissExposureAdvice,
+                Modifier.padding(bottom = 4.dp))
+        }
         // Always-on DSLR shoulder strip: live P/S meter values, mode and EV popups.
         ExposureShoulderStrip(state, model,
             Modifier.padding(bottom = if (framed) 5.dp else 4.dp))
@@ -1998,6 +2048,7 @@ private fun StepButton(text: String, description: String, enabled: Boolean, onCl
 private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model: CameraViewModel,
     openMascotPicker: () -> Unit, compositionState: CompositionUiState) {
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
+    val poseState by model.pose.state.collectAsStateWithLifecycle()
     val capabilities = state.capabilities
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text("拍摄参数", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
@@ -2092,8 +2143,73 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
         Text("相机设置", fontSize = 12.sp)
     }
     CompositionAssistantControls(compositionState, settings, model, state)
+    PoseAssistantControls(poseState, settings, model)
     Text("参数自动记忆。音量键可直接拍照。", Modifier.padding(vertical = 10.dp),
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun PoseAssistantControls(
+    state: PoseUiState,
+    settings: AppSettings,
+    model: CameraViewModel,
+) {
+    HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+    Text("姿势助手 · 实验性", style = MaterialTheme.typography.titleSmall)
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("火柴人姿势引导", style = MaterialTheme.typography.bodyMedium)
+            Text(when (state.modelStatus) {
+                PoseModelStatus.INSTALLED -> "实时识别已就绪 · 白骨架贴合人体，琥珀色小人示范目标姿势"
+                PoseModelStatus.DOWNLOADING -> "正在下载实时识别模型…"
+                PoseModelStatus.FAILED -> "实时识别模型不可用 · 当前为演示模式"
+                PoseModelStatus.CHECKING -> "正在检查模型…"
+                PoseModelStatus.ABSENT -> "未装模型时为演示模式：只浏览姿势，不读取画面"
+            }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Switch(settings.poseAssistantEnabled, { model.setPoseAssistantEnabled(it) },
+            modifier = Modifier.semantics { contentDescription = "姿势助手开关" })
+    }
+    Text("对准一个人，白骨架会贴合 ta 的身体；琥珀色小人指出手、腰、头该怎么摆，底部小字告诉你差在哪里。摆对保持两秒自动换下一个姿势。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    when (state.modelStatus) {
+        PoseModelStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
+        PoseModelStatus.ABSENT -> {
+            Text("实时识别模型：${formatBytes(PoseModelCatalog.lite.bytes)} · 仅下载到本机，不随 App 打包，可随时删除",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = model::installPoseModel,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("下载实时识别模型（${formatBytes(PoseModelCatalog.lite.bytes)}）")
+            }
+        }
+        PoseModelStatus.DOWNLOADING -> {
+            val total = state.totalBytes.coerceAtLeast(1L)
+            val progress = (state.downloadedBytes.toFloat() / total).coerceIn(0f, 1f)
+            androidx.compose.material3.LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("下载 ${formatBytes(state.downloadedBytes)} / ${formatBytes(total)}", Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall)
+                TextButton(onClick = model::cancelPoseInstall) { Text("取消") }
+            }
+        }
+        PoseModelStatus.INSTALLED -> {
+            Text("实时识别模型已安装 · ${formatBytes(PoseModelCatalog.lite.bytes)}",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = model::removePoseModel,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("删除本地模型")
+            }
+        }
+        PoseModelStatus.FAILED -> {
+            Text(state.installError ?: "模型下载失败", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            TextButton(onClick = model::installPoseModel, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+        }
+    }
+    Text("模型来自 Google MediaPipe（Apache-2.0），所有计算都在手机本地完成，画面不上传、不保存。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 8.dp))
 }
 
 @Composable
@@ -2261,7 +2377,20 @@ private fun DeveloperDiagnostics(
             } else {
                 DiagLine("实时测光", "尚无相机读数")
             }
+            val faces = cameraState.liveFaces
+            if (faces != null) {
+                DiagLine("人脸统计", "HAL 报告 ${faces.count} 张脸" +
+                    if (cameraState.settings.focusDistanceDiopters != null) " · 手动对焦下已停用" else "")
+            } else {
+                DiagLine("人脸统计", "无读数（手动对焦或会话未就绪）")
+            }
             cameraState.capabilities?.let { caps ->
+                if (caps.supportsFaceDetection) {
+                    val eyeNote = if (caps.faceDetectMode == 2) " · 含眼部点位" else ""
+                    DiagLine("人脸检测", "HAL 模式 ${caps.faceDetectMode}$eyeNote · 最多 ${caps.maxFaceCount} 张")
+                } else {
+                    DiagLine("人脸检测", "该设备 HAL 未上报人脸统计能力")
+                }
                 DiagLine("曝光档", caps.exposureModes.joinToString(" / ") { it.label } +
                     if (caps.fixedAperture != null) " · 固定 f/%.1f".format(caps.fixedAperture) else " · 无光圈档")
                 DiagLine("ISO 范围", "${caps.isoMin ?: "—"}–${caps.isoMax ?: "—"}")

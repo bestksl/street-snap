@@ -65,8 +65,9 @@ data class AppSettings(
     val lutName: String? = null,
     val hdfEnabled: Boolean = false,
     val hdfStrength: Float = .4f,
-    // Ricoh-style HDF (Highlight Diffusion Filter): filmic highlight shoulder + wide halo,
-    // off by default. JSON keys keep their legacy "hdr*" names for settings compatibility.
+    // Ricoh-style HDF (Highlight Diffusion Filter): pure optical diffusion of near-clipping
+    // highlights (tight core + independent broad halo, no tone mapping), off by default.
+    // JSON keys keep their legacy "hdr*" names for settings compatibility.
     val hdrEnabled: Boolean = false,
     val hdrStrength: Float = .6f,
     val whiteBalance: String = "AUTO",
@@ -79,6 +80,10 @@ data class AppSettings(
     // T34: optional light haptic when framing reaches the suggested crop. Visual green
     // confirmation always shows; haptics are opt-in, and there is deliberately no sound.
     val alignmentHapticEnabled: Boolean = false,
+    // T72 pose assistant: stick-figure overlay + pose library. On by default in demo mode
+    // so the feature is visible immediately; demo binds no analysis stream and downloads
+    // nothing. The MediaPipe weights are fetched only after an explicit install tap.
+    val poseAssistantEnabled: Boolean = true,
     // look key → dismiss timestamp (epoch ms); adviser suppresses keys within a 7-day window.
     val lookDismissedAt: Map<String, Long> = emptyMap(),
     // Three consecutive dismisses flip lookAdviceEnabled off; trying/keeping a look resets it.
@@ -210,6 +215,7 @@ internal object SettingsJson {
         put("lookAdviceEnabled", settings.lookAdviceEnabled)
         put("exposureAdviceEnabled", settings.exposureAdviceEnabled)
         put("alignmentHapticEnabled", settings.alignmentHapticEnabled)
+        put("poseAssistantEnabled", settings.poseAssistantEnabled)
         put("lookDismissedAt", JSONObject().apply {
             settings.lookDismissedAt.forEach { (lookKey, at) -> put(lookKey, at) }
         })
@@ -269,6 +275,7 @@ internal object SettingsJson {
                 lookAdviceEnabled = json.optBoolean("lookAdviceEnabled", true),
                 exposureAdviceEnabled = json.optBoolean("exposureAdviceEnabled", true),
                 alignmentHapticEnabled = json.optBoolean("alignmentHapticEnabled", false),
+                poseAssistantEnabled = json.optBoolean("poseAssistantEnabled", true),
                 lookDismissedAt = json.optJSONObject("lookDismissedAt")?.let { dismissed ->
                     dismissed.keys().asSequence()
                         .mapNotNull { lookKey ->

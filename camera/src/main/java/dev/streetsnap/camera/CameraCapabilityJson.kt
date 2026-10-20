@@ -39,6 +39,12 @@ internal object CameraCapabilityJson {
             put("distanceCalibration", value.focusDistanceCalibration)
             put("meteringSupported", value.supportsFocusMetering)
         })
+        put("faceDetection", JSONObject().apply {
+            put("supported", value.supportsFaceDetection)
+            put("mode", value.faceDetectMode ?: JSONObject.NULL)
+            put("modeLabel", FaceDetectPolicy.modeLabel(value.faceDetectMode))
+            put("maxCount", value.maxFaceCount)
+        })
         put("autoExposureLockSupported", value.supportsAutoExposureLock)
         put("whiteBalanceModes", JSONArray(value.whiteBalanceModes.map { it.name }))
         put("notes", JSONArray(value.notes))

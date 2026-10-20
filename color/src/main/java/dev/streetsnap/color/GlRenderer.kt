@@ -43,10 +43,17 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     private val wideBloomBuffers = IntArray(2)
     private var wideBloomWidth = 0
     private var wideBloomHeight = 0
+    // Experimental scale-aware point-light pair (even smaller); keyed from the tight
+    // extracted sheet so only local contrast peaks (small lamps) survive.
+    private val pointBloomTextures = IntArray(2)
+    private val pointBloomBuffers = IntArray(2)
+    private var pointBloomWidth = 0
+    private var pointBloomHeight = 0
     private var bloomValid = false
-    // Smoothed HDR level for preview frames so AE jumps/toggles cannot pop the halo.
+    // Smoothed diffusion levels for preview frames so AE jumps/toggles cannot pop the halo.
     // Stills are fresh renderers and settle immediately on the first draw.
     private var hdrLevel = 0f
+    private var hdfLevel = 0f
     // Preview swaps in an independent grain field each frame; stills pin frame 1 so every
     // tiled strip shares one seamless field.
     private var grainFrame = 0L
@@ -198,13 +205,18 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
             state.recipe.contrast, state.recipe.brightness)
         GLES30.glUniform4f(uniform("uDetail"), state.recipe.highlights, state.recipe.shadows,
             state.recipe.sharpness, state.recipe.clarity)
-        GLES30.glUniform1f(uniform("uHdf"), if (state.recipe.hdfEnabled) state.recipe.hdfStrength else 0f)
+        val hdfTarget = if (state.recipe.hdfEnabled) state.recipe.hdfStrength.coerceIn(0f, 1f) else 0f
         val hdrTarget = if (state.recipe.hdrEnabled) state.recipe.hdrStrength.coerceIn(0f, 1f) else 0f
-        // Ease in while on (no halo pop on toggle), but snap to zero the moment it is
-        // switched off: a decaying uHdr kept sampling the previous frame's stale bloom
-        // texture, so the halo visibly lingered after the user disabled HDF.
-        hdrLevel = if (!externalInput || hdrTarget == 0f) hdrTarget
-        else hdrLevel + (hdrTarget - hdrLevel) * 0.2f
+        // Ease both looks in while on (no halo pop on toggle), but snap to zero the moment
+        // a look is switched off: a decaying level kept sampling the previous frame's
+        // stale bloom texture, so the halo visibly lingered after the user disabled it.
+        // Stills (fresh renderer) settle at full strength on the first frame.
+        fun eased(current: Float, target: Float) =
+            if (!externalInput || target == 0f) target
+            else current + (target - current) * BloomStyle.PREVIEW_EASE
+        hdfLevel = eased(hdfLevel, hdfTarget)
+        hdrLevel = eased(hdrLevel, hdrTarget)
+        GLES30.glUniform1f(uniform("uHdf"), hdfLevel)
         GLES30.glUniform1f(uniform("uHdr"), hdrLevel)
         val amber = state.recipe.whiteBalanceAmber / 9f
         val green = state.recipe.whiteBalanceGreen / 9f
@@ -222,23 +234,30 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         val hdrOn = state.recipe.hdrEnabled && state.recipe.hdrStrength > 0f
         GLES30.glUniform1i(uniform("uBloom"), 2)
         GLES30.glUniform1i(uniform("uBloomWide"), 3)
+        GLES30.glUniform1i(uniform("uBloomPoint"), 4)
         if (diffusionOn || hdrOn) {
             // Photo strips share a single whole-image bloom texture. Preview updates every
             // frame. Both the soft-diffusion look and the HDF button get the independent
-            // wide halo: HDF's whole point is a visible glow around lamps/highlights.
-            val wideWanted = diffusionOn || hdrOn
-            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight, wideWanted)
+            // wide halo and the experimental point-light layer: HDF's whole point is a
+            // visible glow around lamps/highlights.
+            val extraWanted = diffusionOn || hdrOn
+            if (externalInput || tileTop == 0 || !bloomValid) prepareBloom(fullWidth, fullHeight, extraWanted)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
             GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D,
-                if (wideWanted) wideBloomTextures[0] else 0)
+                if (extraWanted) wideBloomTextures[0] else 0)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE4)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D,
+                if (extraWanted) pointBloomTextures[0] else 0)
         } else {
-            // Unbind both bloom textures from a previously-enabled frame so a stale halo can
+            // Unbind the bloom textures from a previously-enabled frame so a stale halo can
             // never be sampled now that uHdf/uHdr are both zero.
             GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
             GLES30.glActiveTexture(GLES30.GL_TEXTURE3)
+            GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
+            GLES30.glActiveTexture(GLES30.GL_TEXTURE4)
             GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, 0)
         }
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, 0)
@@ -257,15 +276,19 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
      * All four are reused until the output size changes.
      */
     private fun prepareBloom(width: Int, height: Int, wideWanted: Boolean) {
-        val coreScale = minOf(1f, 384f / maxOf(width, height))
+        val coreScale = minOf(1f, BloomStyle.CORE_SHEET_EDGE.toFloat() / maxOf(width, height))
         val coreW = maxOf(1, (width * coreScale).toInt())
         val coreH = maxOf(1, (height * coreScale).toInt())
-        val wideScale = minOf(1f, 192f / maxOf(width, height))
+        val wideScale = minOf(1f, BloomStyle.WIDE_SHEET_EDGE.toFloat() / maxOf(width, height))
         val wideW = maxOf(1, (width * wideScale).toInt())
         val wideH = maxOf(1, (height * wideScale).toInt())
+        val pointScale = minOf(1f, BloomStyle.POINT_SHEET_EDGE.toFloat() / maxOf(width, height))
+        val pointW = maxOf(1, (width * pointScale).toInt())
+        val pointH = maxOf(1, (height * pointScale).toInt())
         GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
         if (coreW != bloomWidth || coreH != bloomHeight ||
-            (wideWanted && (wideW != wideBloomWidth || wideH != wideBloomHeight))) {
+            (wideWanted && (wideW != wideBloomWidth || wideH != wideBloomHeight ||
+                pointW != pointBloomWidth || pointH != pointBloomHeight))) {
             releaseBloom()
             createBloomPair(bloomTextures, bloomBuffers, coreW, coreH)
             bloomWidth = coreW
@@ -274,6 +297,9 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
                 createBloomPair(wideBloomTextures, wideBloomBuffers, wideW, wideH)
                 wideBloomWidth = wideW
                 wideBloomHeight = wideH
+                createBloomPair(pointBloomTextures, pointBloomBuffers, pointW, pointH)
+                pointBloomWidth = pointW
+                pointBloomHeight = pointH
             }
         }
         GLES30.glUniform4f(uniform("uTile"), 0f, 0f, 1f, 1f)
@@ -281,13 +307,20 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         // Extract the same graded near-clipping highlights into both sheets; bilinear
         // downsampling gives the wide sheet a free box-filter pre-blur.
         extractHighlights(bloomBuffers[0], bloomWidth, bloomHeight)
+        // Build the point-light mask from the tight keyed sheet BEFORE its blur ping-pong
+        // overwrites texture[0]: the unblurred keyed field is what separates a small local
+        // peak from the interior of a broad bright surface.
+        if (wideWanted) buildPointMask(pointBloomBuffers[0], pointBloomWidth, pointBloomHeight)
         if (wideWanted) extractHighlights(wideBloomBuffers[0], wideBloomWidth, wideBloomHeight)
         // Tight bright core: two short separable scales (ping-pong ends on texture [0]).
-        blurBloomPair(bloomTextures, bloomBuffers, bloomWidth, bloomHeight, floatArrayOf(.008f, .014f))
+        blurBloomPair(bloomTextures, bloomBuffers, bloomWidth, bloomHeight, BloomStyle.CORE_BLUR)
         // Broad faint halo: much larger radii on the separate small pair.
         if (wideWanted) {
             blurBloomPair(wideBloomTextures, wideBloomBuffers,
-                wideBloomWidth, wideBloomHeight, floatArrayOf(.026f, .042f))
+                wideBloomWidth, wideBloomHeight, BloomStyle.WIDE_BLUR)
+            // Spread the point peaks into their own soft spherical halo.
+            blurBloomPair(pointBloomTextures, pointBloomBuffers,
+                pointBloomWidth, pointBloomHeight, BloomStyle.POINT_BLUR)
         }
         checkGl("扩散高光")
         bloomValid = true
@@ -317,6 +350,20 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
     private fun extractHighlights(fbo: Int, targetWidth: Int, targetHeight: Int) {
         GLES30.glViewport(0, 0, targetWidth, targetHeight)
         GLES30.glUniform2f(uniform("uBloomSize"), targetWidth.toFloat(), targetHeight.toFloat())
+        GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
+        GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
+    }
+
+    /**
+     * Pass 3: derive the scale-aware point-light mask at the point sheet's resolution by
+     * sampling the just-extracted tight keyed highlight sheet ([bloomTextures][0]). Cheap
+     * (no re-grade); local-contrast peaks survive, broad bright surfaces collapse.
+     */
+    private fun buildPointMask(fbo: Int, targetWidth: Int, targetHeight: Int) {
+        GLES30.glViewport(0, 0, targetWidth, targetHeight)
+        GLES30.glUniform1i(uniform("uPass"), 3)
+        GLES30.glActiveTexture(GLES30.GL_TEXTURE2)
+        GLES30.glBindTexture(GLES30.GL_TEXTURE_2D, bloomTextures[0])
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fbo)
         GLES30.glDrawArrays(GLES30.GL_TRIANGLE_STRIP, 0, 4)
     }
@@ -355,6 +402,12 @@ internal class GlRenderer(private val externalInput: Boolean) : Closeable {
         wideBloomBuffers.fill(0)
         wideBloomWidth = 0
         wideBloomHeight = 0
+        GLES30.glDeleteTextures(2, pointBloomTextures, 0)
+        GLES30.glDeleteFramebuffers(2, pointBloomBuffers, 0)
+        pointBloomTextures.fill(0)
+        pointBloomBuffers.fill(0)
+        pointBloomWidth = 0
+        pointBloomHeight = 0
         bloomValid = false
     }
 

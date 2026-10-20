@@ -122,6 +122,9 @@ android {
         versionCode = 3
         versionName = "0.3.0-dev"
         resValue("string", "app_name", "途帧")
+        // T72: MediaPipe Tasks Vision ships native libraries for these ABIs; 32-bit ARM
+        // is dropped (minSdk 31 devices are arm64). x86_64 keeps emulator smoke runs alive.
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }
 
     if (hasDistributionSigning) {
@@ -185,6 +188,9 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.4.1")
     implementation("androidx.camera:camera-view:1.5.1")
     implementation("androidx.camera:camera-core:1.5.1")
+    // T72 on-device 33-point pose landmarker (Apache-2.0, Google Maven). Weights are not
+    // packaged: the lite .task bundle is downloaded only after explicit user action.
+    implementation("com.google.mediapipe:tasks-vision:1.1.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")

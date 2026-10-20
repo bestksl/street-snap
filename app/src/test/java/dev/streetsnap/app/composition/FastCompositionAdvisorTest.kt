@@ -324,6 +324,182 @@ class FastCompositionAdvisorTest {
             })
     }
 
+    // ---- T69 busy-backdrop invariance ----
+
+    @Test
+    fun sameSubjectOnFlatAndTexturedBackdropKeepsStyleAndCropCentre() {
+        val flat = subjectOnBackdrop(backdrop = "flat")
+        val texture = subjectOnBackdrop(backdrop = "texture")
+        val flatTop = FastCompositionAdvisor.suggest(96, 64, flat).candidates.first()
+        val texTop = FastCompositionAdvisor.suggest(96, 64, texture).candidates.first()
+        fun centre(c: CompositionCandidate) =
+            ((c.crop.left + c.crop.right) / 2f) to ((c.crop.top + c.crop.bottom) / 2f)
+        val (fx, fy) = centre(flatTop)
+        val (tx, ty) = centre(texTop)
+        val drift = kotlin.math.hypot(fx - tx, fy - ty)
+        assertEquals("style must not flip on a texture backdrop, got ${texTop.style}",
+            flatTop.style, texTop.style)
+        assertTrue("crop centre must track the subject across backdrops, drift=$drift", drift < 0.13f)
+        assertTrue("the textured-backdrop crop still tightens around the subject: " +
+            (texTop.crop.right - texTop.crop.left), (texTop.crop.right - texTop.crop.left) <= 0.84f)
+    }
+
+    @Test
+    fun isotropicTextureAndNoiseWithoutSubjectAbstainConservatively() {
+        listOf(textureOnly(), noiseOnly()).forEach { pixels ->
+            val result = FastCompositionAdvisor.suggest(96, 64, pixels)
+            val styles = result.candidates.map { it.style }
+            assertTrue("background-only field must abstain, got $styles",
+                styles.all { it == CompositionStyle.CONSERVATIVE })
+            assertTrue("background-only crops must skip model comparison",
+                result.candidates.none { it.supportsModelComparison })
+        }
+    }
+
+    @Test
+    fun verticalColumnsStayOrganisedWhenSaliencyIsLow() {
+        // Even dark columns spread edge energy evenly across coarse cells (no single peak);
+        // the organised-field branch must keep recognising them instead of abstaining.
+        val result = FastCompositionAdvisor.suggest(96, 64, tallBeams())
+        val top = result.candidates.first().style
+        assertTrue("columns must express a structural style, got $top",
+            top == CompositionStyle.VERTICAL || top == CompositionStyle.REPETITION)
+    }
+
+    // ---- T73: weak-peak subjects on busy backdrops + three depth layers ----
+
+    @Test
+    fun evenlyJitteredBusyFieldWithoutSubjectStillAbstains() {
+        // The coarse peak of this field lands around 0.59 — just under the strong 0.60 gate —
+        // while frame energy is high. The weak-peak subject path must not turn texture into a
+        // person: no coherent block passes the five-dimension gate, so advice stays conservative.
+        val result = FastCompositionAdvisor.suggest(96, 64, busyWeakPeakField())
+        val styles = result.candidates.map { it.style }
+        assertTrue("evenly busy field must abstain, got $styles",
+            styles.all { it == CompositionStyle.CONSERVATIVE })
+        assertTrue("background-only crops must skip model comparison",
+            result.candidates.none { it.supportsModelComparison })
+        assertTrue("no subject locus exists without a coherent block", result.subjectLocus == null)
+        assertTrue("conservative copy must not promise depth layers, got " +
+            result.candidates.first().reason, result.candidates.none { it.reason.contains("层") })
+    }
+
+    @Test
+    fun coherentMassOnTheSameBusyFieldIsLocatedAndTightened() {
+        val left = FastCompositionAdvisor.suggest(96, 64, busyFieldSubject(side = -1))
+        val right = FastCompositionAdvisor.suggest(96, 64, busyFieldSubject(side = 1))
+        // Each frame must commit to real advice rather than abstain behind the backdrop.
+        assertTrue("left mass must not be hidden by the busy field, got ${left.candidates.map { it.style }}",
+            left.candidates.any { it.style != CompositionStyle.CONSERVATIVE })
+        assertTrue("right mass must not be hidden by the busy field, got ${right.candidates.map { it.style }}",
+            right.candidates.any { it.style != CompositionStyle.CONSERVATIVE })
+        // The tightest non-full-frame crop on each side chases the actual mass.
+        fun tightest(result: FastCompositionResult) =
+            result.candidates.filter { (it.crop.right - it.crop.left) < 0.95f }
+                .minByOrNull { it.crop.right - it.crop.left }!!
+        val leftCrop = tightest(left)
+        val rightCrop = tightest(right)
+        val lx = (leftCrop.crop.left + leftCrop.crop.right) / 2f
+        val rx = (rightCrop.crop.left + rightCrop.crop.right) / 2f
+        assertTrue("crops must follow the mass across the busy field, lx=$lx rx=$rx", rx - lx > 0.20f)
+        assertTrue("left crop must tighten onto its mass, width=${leftCrop.crop.right - leftCrop.crop.left}",
+            leftCrop.crop.right - leftCrop.crop.left <= 0.76f)
+        assertTrue("right crop must tighten onto its mass, width=${rightCrop.crop.right - rightCrop.crop.left}",
+            rightCrop.crop.right - rightCrop.crop.left <= 0.76f)
+    }
+
+    @Test
+    fun threeVisibleDepthBandsReadAsDepthLayers() {
+        val result = FastCompositionAdvisor.suggest(96, 64, threeLayerScene())
+        val first = result.candidates.first()
+        assertEquals("three-band scene must lead with DEPTH_LAYERS, got ${result.candidates.map { it.style }}",
+            CompositionStyle.DEPTH_LAYERS, first.style)
+        assertTrue("copy must name all three layers: ${first.reason}",
+            first.reason.contains("前景") && first.reason.contains("中景") &&
+                first.reason.contains("远景"))
+        assertTrue("layer advice keeps all three bands in frame, width=${first.crop.right - first.crop.left}",
+            first.crop.right - first.crop.left >= 0.95f)
+    }
+
+    @Test
+    fun twoPlanesWithoutADistantBandDoNotReadAsDepthLayers() {
+        val styles = FastCompositionAdvisor.suggest(96, 64, twoLayerScene()).candidates.map { it.style }
+        assertTrue("foreground + subject with a flat top is two planes, not three: $styles",
+            styles.none { it == CompositionStyle.DEPTH_LAYERS })
+    }
+
+    @Test
+    fun weakPeakGateRejectsEveryFailedDimensionInIsolation() {
+        // gridCellCount for the 96x64 advisor frame is 9 columns x 6 rows = 54 cells.
+        val n = 54
+        val good = SubjectLocus(
+            left = 0.30f, top = 0.30f, right = 0.60f, bottom = 0.70f,
+            cellCount = 8, peakStrength = 0.55, weightShare = 0.50, colorShare = 0.70,
+        )
+        assertTrue(FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.20, good, n))
+        assertFalse("no block means no subject",
+            FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.20, null, n))
+        assertFalse("peak below 0.45 is texture jitter",
+            FastCompositionAdvisor.acceptsWeakPeak(0.44, 0.20, good, n))
+        assertFalse("effective energy ratio below 0.12",
+            FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.11, good, n))
+        assertFalse("block holding under 25% of fired weight is scattered",
+            FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.20, good.copy(weightShare = 0.24), n))
+        assertFalse("1-3 cell spikes are chance clusters",
+            FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.20, good.copy(cellCount = 3), n))
+        assertFalse("a block over 40% of the grid is not a localised subject",
+            FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.20, good.copy(cellCount = 22), n))
+        assertFalse("a block carried by internal edges, not tonal mass, is texture",
+            FastCompositionAdvisor.acceptsWeakPeak(0.55, 0.20, good.copy(colorShare = 0.39), n))
+    }
+
+    /** Deterministic mid-grey jittered backdrop (flat / 4px blocks / per-pixel noise) plus one bright mass. */
+    private fun subjectOnBackdrop(backdrop: String): IntArray {
+        fun hash(x: Int, y: Int): Int {
+            var h = (x * 73856093) xor (y * 19349663)
+            h = h xor (h ushr 13); h *= 1274126177; h = h xor (h ushr 16)
+            return (h ushr 1).mod(100)
+        }
+        return IntArray(96 * 64) { index ->
+            val x = index % 96; val y = index / 96
+            // Bright 21px mass around (32, 26): the SAME subject on every backdrop.
+            if (x in 21..42 && y in 15..36) {
+                0xFFE6E6E6.toInt()
+            } else {
+                val g = when (backdrop) {
+                    "texture" -> 0x70 + (hash(x / 4, y / 4) - 50) * 68 / 100
+                    "noise" -> 0x40 + (hash(x, y) - 50) * 40 / 100
+                    else -> 0x26
+                }.coerceIn(0, 255)
+                0xFF000000.toInt() or (g shl 16) or (g shl 8) or g
+            }
+        }
+    }
+
+    private fun textureOnly(): IntArray {
+        fun hash(x: Int, y: Int): Int {
+            var h = (x * 73856093) xor (y * 19349663)
+            h = h xor (h ushr 13); h *= 1274126177; h = h xor (h ushr 16)
+            return (h ushr 1).mod(100)
+        }
+        return IntArray(96 * 64) { index ->
+            val g = (0x70 + (hash((index % 96) / 4, index / 96 / 4) - 50) * 68 / 100).coerceIn(0, 255)
+            0xFF000000.toInt() or (g shl 16) or (g shl 8) or g
+        }
+    }
+
+    private fun noiseOnly(): IntArray {
+        fun hash(x: Int, y: Int): Int {
+            var h = (x * 73856093) xor (y * 19349663)
+            h = h xor (h ushr 13); h *= 1274126177; h = h xor (h ushr 16)
+            return (h ushr 1).mod(100)
+        }
+        return IntArray(96 * 64) { index ->
+            val g = (0x40 + (hash(index % 96, index / 96) - 50) * 40 / 100).coerceIn(0, 255)
+            0xFF000000.toInt() or (g shl 16) or (g shl 8) or g
+        }
+    }
+
     private fun centeredHorizonSplit(): IntArray = IntArray(96 * 64) { index ->
         if (index / 96 < 32) 0xFFD8D8D8.toInt() else 0xFF303030.toInt()
     }
@@ -433,6 +609,67 @@ class FastCompositionAdvisorTest {
         val y = (index / 96 + 0.5f) / 64
         val phase = (x + y * 1.5f) % 0.18f
         if (phase < 0.06f) 0xFFE8E8E8.toInt() else 0xFF2A2A2A.toInt()
+    }
+
+    private fun t73Hash(x: Int, y: Int): Int {
+        var h = (x * 73856093) xor (y * 19349663)
+        h = h xor (h ushr 13); h *= 1274126177; h = h xor (h ushr 16)
+        return (h ushr 1).mod(100)
+    }
+
+    private fun greyT73(g: Int): Int =
+        0xFF000000.toInt() or (g shl 16) or (g shl 8) or g
+
+    /**
+     * T73 busy field without a subject: equal numbers of jittered weak marks in every
+     * saliency cell (like downscaled foliage/crowd). The coarse peak lands around 0.59 —
+     * below the strong 0.60 gate — while frame signal is high, so this is exactly the
+     * weak-peak temptation the subject-block gates must reject.
+     */
+    private fun busyWeakPeakField(marks: Int = 12): IntArray {
+        val pixels = IntArray(96 * 64) { greyT73(0x7E) }
+        val cw = 96 / 9; val ch = 64 / 6
+        for (cgy in 0 until 6) for (cgx in 0 until 9) {
+            for (m in 0 until marks) {
+                val mx = cgx * cw + t73Hash(cgx * 31 + m * 7, cgy * 17 + 3).mod(cw)
+                val my = cgy * ch + t73Hash(cgx * 13 + 5, cgy * 29 + m * 11).mod(ch)
+                if (mx < 96 && my < 64) pixels[my * 96 + mx] = greyT73(0x68)
+            }
+        }
+        return pixels
+    }
+
+    /** The same busy field plus a coherent bright mass; [side] -1 left third, +1 right third. */
+    private fun busyFieldSubject(side: Int, tone: Int = 0xB0): IntArray {
+        val pixels = busyWeakPeakField()
+        val x0 = if (side < 0) 8 else 54
+        val x1 = if (side < 0) 25 else 71
+        for (y in 17..45) for (x in x0..x1) pixels[y * 96 + x] = greyT73(tone)
+        return pixels
+    }
+
+    /** Foreground band (railing) + mid subject + distant textured top band. */
+    private fun threeLayerScene(): IntArray {
+        val pixels = IntArray(96 * 64) { greyT73(0x4A) }
+        for (y in 0..18) for (x in 0 until 96) {
+            val g = 0x60 + (t73Hash(x / 3, y / 3) - 50) * 50 / 100
+            pixels[y * 96 + x] = greyT73(g)
+        }
+        for (y in 22..44) for (x in 36..58) pixels[y * 96 + x] = greyT73(0xC2)
+        for (y in 48..63) for (x in 0 until 96) {
+            pixels[y * 96 + x] = if ((x / 4) % 2 == 0) greyT73(0x28) else greyT73(0x98)
+        }
+        return pixels
+    }
+
+    /** Mid subject + foreground band, but a flat quiet top: two planes, not three. */
+    private fun twoLayerScene(): IntArray {
+        val pixels = IntArray(96 * 64) { greyT73(0x5E) }
+        for (y in 20..42) for (x in 40..58) pixels[y * 96 + x] = greyT73(0xBC)
+        for (y in 50..63) for (x in 0 until 96) {
+            pixels[y * 96 + x] = if ((x / 5) % 2 == 0) greyT73(0x34) else greyT73(0x8C)
+        }
+        return pixels
     }
 
     private fun scene(centerX: Float): IntArray = IntArray(96 * 64) { index ->

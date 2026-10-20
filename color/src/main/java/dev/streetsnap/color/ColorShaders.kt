@@ -24,6 +24,8 @@ internal object ColorShaders {
         // core stays in uBloom; keeping the wide layer separate means heavily blurring the
         // halo can never smear the core into the washed-out gray veil of the earlier design.
         uniform sampler2D uBloomWide;
+        // Experimental scale-aware layer: only small locally-bright point lights survive.
+        uniform sampler2D uBloomPoint;
         uniform mat4 uInputTransform;
         uniform vec3 uDomainMin;
         uniform vec3 uDomainMax;
@@ -50,6 +52,28 @@ internal object ColorShaders {
         in vec2 vUv;
         out vec4 fragColor;
         const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+        // Two-layer optical-diffusion tuning, injected from BloomStyle (single source
+        // of truth in Kotlin); compile-time constants, behaviour identical to literals.
+        const float B_KNEE_HDF_LO = ${BloomStyle.KNEE_HDF_LO};
+        const float B_KNEE_HDF_HI = ${BloomStyle.KNEE_HDF_HI};
+        const float B_KNEE_HDR_LO = ${BloomStyle.KNEE_HDR_LO};
+        const float B_KNEE_HDR_HI = ${BloomStyle.KNEE_HDR_HI};
+        const float B_HDF_CORE_CLIP_GAIN = ${BloomStyle.HDF_CORE_CLIP_GAIN};
+        const float B_HDF_CORE_GAIN = ${BloomStyle.HDF_CORE_GAIN};
+        const float B_HDF_WIDE_GAIN = ${BloomStyle.HDF_WIDE_GAIN};
+        const float B_HDF_WIDE_SAT = ${BloomStyle.HDF_WIDE_SAT};
+        const float B_HDR_AMOUNT_LO = ${BloomStyle.HDR_AMOUNT_LO};
+        const float B_HDR_AMOUNT_HI = ${BloomStyle.HDR_AMOUNT_HI};
+        const float B_HDR_CORE_SAT = ${BloomStyle.HDR_CORE_SAT};
+        const float B_HDR_CORE_GAIN = ${BloomStyle.HDR_CORE_GAIN};
+        const float B_HDR_WIDE_SAT = ${BloomStyle.HDR_WIDE_SAT};
+        const float B_HDR_WIDE_GAIN = ${BloomStyle.HDR_WIDE_GAIN};
+        const float B_POINT_NEIGHBOUR = ${BloomStyle.POINT_NEIGHBOUR};
+        const float B_POINT_CONTRAST_LO = ${BloomStyle.POINT_CONTRAST_LO};
+        const float B_POINT_CONTRAST_HI = ${BloomStyle.POINT_CONTRAST_HI};
+        const float B_POINT_SAT = ${BloomStyle.POINT_SAT};
+        const float B_HDF_POINT_GAIN = ${BloomStyle.HDF_POINT_GAIN};
+        const float B_HDR_POINT_GAIN = ${BloomStyle.HDR_POINT_GAIN};
 
         float luminance(vec3 color) { return dot(color, LUMA); }
 
@@ -94,8 +118,8 @@ internal object ColorShaders {
                 // and the shadows get zero lift downstream. HDF uses a slightly wider/knee than
                 // the HDR look so lamps read clearly at the default strength.
                 float key = max(color.r, max(color.g, color.b));
-                float lo = uHdf > 0.0 ? 0.72 : 0.74;
-                float hi = uHdf > 0.0 ? 0.90 : 0.92;
+                float lo = uHdf > 0.0 ? B_KNEE_HDF_LO : B_KNEE_HDR_LO;
+                float hi = uHdf > 0.0 ? B_KNEE_HDF_HI : B_KNEE_HDR_HI;
                 return color * smoothstep(lo, hi, key);
             }
             // Defensive only: prepareBloom runs with uHdf/uHdr > 0, so this path is unused.
@@ -135,6 +159,26 @@ internal object ColorShaders {
                 fragColor = vec4(glow, 1.0);
                 return;
             }
+            if (uPass == 3) {
+                // Point-light mask, sampled from the ALREADY keyed tight highlight sheet
+                // (no re-grade). A small lamp is locally much brighter than its box
+                // neighbourhood; inside a broad bright window/sky the two are equal, so
+                // the contrast term is zero and broad surfaces converge instead of
+                // blooming. The centre brightness multiplies in to reject dark noise.
+                vec3 c = texture(uBloom, vUv).rgb;
+                float r = B_POINT_NEIGHBOUR;
+                vec3 neighbour = 0.25 * (
+                    texture(uBloom, vUv + vec2( r, 0.0)).rgb +
+                    texture(uBloom, vUv + vec2(-r, 0.0)).rgb +
+                    texture(uBloom, vUv + vec2(0.0,  r)).rgb +
+                    texture(uBloom, vUv + vec2(0.0, -r)).rgb);
+                float centre = max(c.r, max(c.g, c.b));
+                float around = max(neighbour.r, max(neighbour.g, neighbour.b));
+                float contrast = (centre - around) / max(centre, 0.0001);
+                float pointness = centre * smoothstep(B_POINT_CONTRAST_LO, B_POINT_CONTRAST_HI, contrast);
+                fragColor = vec4(c * pointness, 1.0);
+                return;
+            }
 
             vec3 source = sourceAt(vUv);
             vec3 color = grade(source);
@@ -168,10 +212,14 @@ internal object ColorShaders {
                     //    without the gray fog a single widened blur produces.
                     // scatterGap (1 - color) is load-bearing for keeping shadows at zero lift.
                     vec3 core = texture(uBloom, vUv).rgb;
-                    core *= 1.0 + 0.25 * luminance(core);
+                    core *= 1.0 + B_HDF_CORE_CLIP_GAIN * luminance(core);
                     vec3 wideTex = texture(uBloomWide, vUv).rgb;
-                    vec3 wide = mix(vec3(luminance(wideTex)), wideTex, 0.85);
-                    color += scatterGap * (core * 1.50 + wide * 0.55) * uHdf;
+                    vec3 wide = mix(vec3(luminance(wideTex)), wideTex, B_HDF_WIDE_SAT);
+                    // Scale-aware spherical halo that only small point lights feed.
+                    vec3 pointTex = texture(uBloomPoint, vUv).rgb;
+                    vec3 point = mix(vec3(luminance(pointTex)), pointTex, B_POINT_SAT);
+                    color += scatterGap * (core * B_HDF_CORE_GAIN + wide * B_HDF_WIDE_GAIN +
+                        point * B_HDF_POINT_GAIN) * uHdf;
                 }
                 if (uHdr > 0.0) {
                     // The actual HDF button (legacy uniform name): same two-layer optical
@@ -180,11 +228,15 @@ internal object ColorShaders {
                     // street lights read with a visible glow at the default strength — the
                     // old tight-only, heavily desaturated single halo was the "HDF not
                     // obvious" report. scatterGap still guarantees zero shadow lift.
-                    float amount = mix(0.22, 0.68, uHdr);
-                    vec3 coreHalo = mix(vec3(luminance(glow)), glow, 0.60);
+                    float amount = mix(B_HDR_AMOUNT_LO, B_HDR_AMOUNT_HI, uHdr);
+                    vec3 coreHalo = mix(vec3(luminance(glow)), glow, B_HDR_CORE_SAT);
                     vec3 wideTex = texture(uBloomWide, vUv).rgb;
-                    vec3 wideHalo = mix(vec3(luminance(wideTex)), wideTex, 0.75);
-                    color += scatterGap * (coreHalo * 0.70 + wideHalo * 0.45) * amount;
+                    vec3 wideHalo = mix(vec3(luminance(wideTex)), wideTex, B_HDR_WIDE_SAT);
+                    // Extra spherical halo restricted to small point lights (experimental).
+                    vec3 pointTex = texture(uBloomPoint, vUv).rgb;
+                    vec3 pointHalo = mix(vec3(luminance(pointTex)), pointTex, B_POINT_SAT);
+                    color += scatterGap * (coreHalo * B_HDR_CORE_GAIN + wideHalo * B_HDR_WIDE_GAIN +
+                        pointHalo * B_HDR_POINT_GAIN) * amount;
                 }
             }
             vec2 centered = (vUv - 0.5) * 1.41421356;
