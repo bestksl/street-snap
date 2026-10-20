@@ -20,9 +20,13 @@ import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ViewPort
@@ -102,6 +106,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -129,6 +134,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.streetsnap.app.composition.CropTrial
+import dev.streetsnap.app.composition.GuideDirection
+import dev.streetsnap.app.composition.MoveGuide
+import dev.streetsnap.app.composition.MoveGuides
+import dev.streetsnap.app.composition.arrowAngleDeg
+import dev.streetsnap.app.composition.arrowLabel
 import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.ExposureMode
@@ -819,6 +829,18 @@ private fun Viewfinder(
             }
             focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter).padding(bottom = floatingClearance + 8.dp),
                 color = Color.White, fontSize = 12.sp) }
+            // Bottom-right movement arrow: a glanceable "which way do I nudge the camera"
+            // cue derived from the same geometry/dead zones as the advice card sentence.
+            // Hidden in the green aligned phase and during the long-press trial zoom.
+            val moveGuide = if (!alignmentConfirmed && activeTrial == null)
+                suggestedBox?.let(MoveGuides::fromCrop) else null
+            val arrowAlpha by animateFloatAsState(
+                if (moveGuide != null) 1f else 0f,
+                animationSpec = tween(180, easing = FastOutSlowInEasing), label = "moveArrowAlpha")
+            if (arrowAlpha > 0.01f) {
+                MoveGuideIndicator(moveGuide, arrowAlpha,
+                    Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = floatingClearance))
+            }
         }
         val error = bindingError ?: previewError ?: state.error
         if (error != null) {
@@ -1101,6 +1123,61 @@ private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifie
         Text("HDF", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold, maxLines = 1)
     }
+}
+
+/**
+ * Bottom-right animated nudge answering "which way do I move?". Purely informational
+ * (not clickable), driven by the same geometry as the advice-card sentence
+ * ([MoveGuides]). The chevron endlessly slides a few dp toward its own direction so
+ * the cue reads as motion even in a static room. [guide] may be null while [alpha]
+ * is still fading out; the last direction then keeps rendering through the fade.
+ */
+@Composable
+private fun MoveGuideIndicator(guide: MoveGuide?, alpha: Float, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "moveArrow")
+    val progress by transition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            tween(760, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "moveArrowDrift")
+    val direction = guide?.direction
+    Box(modifier.size(38.dp).clip(CircleShape)
+        .background(Color.Black.copy(alpha = .32f * alpha))
+        .semantics {
+            if (direction != null) contentDescription = "移动方向提示：${direction.arrowLabel}"
+        }) {
+        val arrowColor = Color.White.copy(alpha = (.62f + .38f * progress) * alpha)
+        when {
+            direction == null -> Unit // fade-out tail only
+            direction == GuideDirection.FORWARD -> {
+                // Two small chevrons converging: step closer.
+                Canvas(Modifier.fillMaxSize().graphicsLayer {
+                    rotationZ = 90f
+                    translationY = density * (-4.2.dp.value + 2.6.dp.value * progress)
+                }) { drawGuideChevron(arrowColor, halfWidth = 2.3.dp.toPx(), halfHeight = 3.3.dp.toPx()) }
+                Canvas(Modifier.fillMaxSize().graphicsLayer {
+                    rotationZ = -90f
+                    translationY = density * (4.2.dp.value - 2.6.dp.value * progress)
+                }) { drawGuideChevron(arrowColor, halfWidth = 2.3.dp.toPx(), halfHeight = 3.3.dp.toPx()) }
+            }
+            else -> Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = direction.arrowAngleDeg }) {
+                Canvas(Modifier.fillMaxSize().graphicsLayer {
+                    translationX = density * (-2.dp.value + 4.4.dp.value * progress)
+                }) {
+                    drawGuideChevron(arrowColor, halfWidth = 3.4.dp.toPx(), halfHeight = 5.2.dp.toPx())
+                }
+            }
+        }
+    }
+}
+
+/** A round-capped ">" centred in the canvas, [halfWidth] back from the tip. */
+private fun DrawScope.drawGuideChevron(color: Color, halfWidth: Float, halfHeight: Float) {
+    val cx = size.width / 2f
+    val cy = size.height / 2f
+    val stroke = 2.5.dp.toPx()
+    drawLine(color, Offset(cx - halfWidth, cy - halfHeight), Offset(cx, cy), stroke, cap = StrokeCap.Round)
+    drawLine(color, Offset(cx, cy), Offset(cx - halfWidth, cy + halfHeight), stroke, cap = StrokeCap.Round)
 }
 
 /**
@@ -2059,6 +2136,9 @@ private fun CompositionAssistantControls(
         ?: dev.streetsnap.app.edge.EdgeModelCatalog.find(dev.streetsnap.app.edge.EdgeModelCatalog.DEFAULT_MODEL_ID)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    // Inference performance stays visible without opening the developer section: users
+    // asked to see how slow/fast the on-device model actually is on their phone.
+    InferencePerformanceSummary(state, state.install == ModelInstallStatus.INSTALLED)
     DeveloperDiagnostics(state, cameraState, modelEntry)
     when (state.install) {
         ModelInstallStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
@@ -2102,9 +2182,43 @@ private fun CompositionAssistantControls(
 }
 
 /**
- * Collapsed by default: on-device inference performance (rolling recent/median/min/max),
- * the scheduler budget/cooldown, the camera's ACTUAL live AE values and the capability
- * ranges. Every number is observed state — nothing here is estimated or fabricated.
+ * Always-visible on-device model performance: rolling wall-clock of the last ten
+ * rankings (success/timeout/failure all count) plus the cheap rule analysis. The
+ * same numbers used to be buried inside the collapsed developer section.
+ */
+@Composable
+private fun InferencePerformanceSummary(state: CompositionUiState, installed: Boolean) {
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text("推理性能", fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
+        val history = state.inferenceHistoryMs
+        when {
+            history.isNotEmpty() -> {
+                val sorted = history.sorted()
+                Text("AI 推理：最近 ${history.last()} ms · 中位 ${sorted[sorted.size / 2]} ms · 最小 ${sorted.first()} / 最大 ${sorted.last()}（${history.size} 次）",
+                    fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f))
+            }
+            installed -> Text("AI 推理：等待首次推理完成…",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> Text("AI 推理：安装模型后显示实测耗时",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        state.fastAdviceMs?.let {
+            Text("画面分析：$it ms", fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f))
+        }
+    }
+}
+
+/**
+ * Collapsed by default: model id/revision, runtime status, scheduler budget/cooldown,
+ * the camera's ACTUAL live AE values and the capability ranges. Every number is
+ * observed state — nothing here is estimated or fabricated. Timing detail lives in the
+ * always-visible [InferencePerformanceSummary] above.
  */
 @Composable
 private fun DeveloperDiagnostics(
@@ -2126,13 +2240,6 @@ private fun DeveloperDiagnostics(
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
             DiagLine("模型", "${modelEntry?.id ?: "—"} · ${modelEntry?.revision?.take(7) ?: "—"}")
             DiagLine("运行态", state.status.name + (state.statusText?.let { " · $it" } ?: ""))
-            val history = state.inferenceHistoryMs
-            if (history.isNotEmpty()) {
-                val sorted = history.sorted()
-                DiagLine("AI 耗时",
-                    "最近 ${history.last()} ms · 中位 ${sorted[sorted.size / 2]} ms · 最小 ${sorted.first()} · 最大 ${sorted.last()}（${history.size} 次）")
-            }
-            state.fastAdviceMs?.let { DiagLine("画面分析", "$it ms") }
             DiagLine("调度", "预算 %.0f s · 冷却 %d ms".format(state.inferenceBudgetMs / 1000f, state.sampleIntervalMs))
             state.lastOutcome?.let { DiagLine("上次结果", when (it) {
                 CompositionOutcome.RETURNED -> "已选择构图"
