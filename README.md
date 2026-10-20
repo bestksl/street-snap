@@ -30,7 +30,7 @@
 
 | 竖屏取景与构图建议（铭牌跟随影调族） | 取景器相机：跟随影调 / 固定 / 隐藏 | 构图辅助与端侧模型管理 |
 | :---: | :---: | :---: |
-| <img src="docs/images/viewfinder.png" width="250" alt="途帧竖屏取景界面（TRI-X 黑白胶片）：顶部跟随影调的 GR 铭牌、3:4 取景屏内三分网格、右上角 35mm 片格胶片小画与左侧 HDR 常驻钮、底部实体控制簇内焦段条、居中快门与调整入口"> | <img src="docs/images/camera-picker.png" width="250" alt="取景器相机弹窗：跟随影调为首卡共六卡、五款固定机身、不显示切换与取景方向"> | <img src="docs/images/edge-models.png" width="250" alt="构图辅助设置：推荐框与实时开关、三个可选端侧模型、已安装 417.7MB 的 d1 决策 600M"> |
+| <img src="docs/images/viewfinder.png" width="250" alt="途帧竖屏取景界面（TRI-X 黑白胶片）：顶部跟随影调的 GR 铭牌、3:4 取景屏内三分网格、右上角 35mm 片格胶片小画与左侧 HDR 常驻钮、底部实体控制簇内焦段条、居中快门与调整入口"> | <img src="docs/images/camera-picker.png" width="250" alt="取景器相机弹窗：跟随影调为首卡共六卡、五款固定机身、不显示切换与取景方向"> | <img src="docs/images/edge-models.png" width="250" alt="构图辅助设置：推荐框与实时开关、d1-omni-600M、本地安装状态与耗时"> |
 
 <p align="center">
 <img src="docs/images/model-adoption.png" width="660" alt="横屏取景：端侧模型通过门闸后推荐框升级为黄色 AI 选择，附中文建议卡与来源、耗时"><br>
@@ -93,13 +93,12 @@
 
 ### 模型与下载
 
-模型权重 **不随 APK 分发**：在"调整 → 拍摄 → 构图辅助"里显式下载、校验 SHA-256、可随时删除。三个模型固定 Hugging Face revision：
+模型权重 **不随 APK 分发**：在"调整 → 拍摄 → 构图辅助"里显式下载、校验 SHA-256、可随时删除。当前可选目录只有 d1-omni-600M；历史 SmolVLM 记录保留在评测文档，不再出现在最新模型选择 UI：
 
 | 模型 | 大小 | 形态 | 许可 |
 | --- | --- | --- | --- |
 | d1-omni-600M（默认） | 417.7MB | 视觉决策模型，marker 选择题，零生成 token | LFM Open License v1.0 |
-| SmolVLM 256M | 251.2MB | 小型 VLM，decoder prefill 读选项分 | 模型方许可 |
-| SmolVLM 500M | 约 347MB | 同上，更大规格 | 模型方许可 |
+| ~~SmolVLM 256M / 500M~~ | 历史记录 | 已从当前 catalog 下架；仅用于早期加载与失败边界对照 | 各自模型许可 |
 
 ### 工程细节
 
@@ -118,13 +117,10 @@ CandidateContactSheet：同一帧三个裁片拼成 A/B/C 对照图
         │ （不夹带规则分数/高亮，防止把排序泄露给模型）
         ▼
 CandidateRanker —— 本地 ONNX Runtime（arm64 精简切片，约 6.7MB）
-  ├─ d1-omni-600M「d1 决策 600M」——当前推荐，417.7MB，q4 量化
-  │    vision_encoder（512² / 32×32 patch）→ embed_tokens（官方 prompt.py
-  │    选择序列）→ decision_q4 双向决策头：零生成 token，
-  │    直接对 A/B/C 三个 marker 的 logits softmax
-  └─ SmolVLM 256M / 500M —— 可选对照，cpu-int8 量化
-       vision + text embeddings + decoder prefill：读末位 A/B/C logits，
-       同样不生成坐标文本
+  └─ d1-omni-600M「d1 决策 600M」——当前唯一 ranker，417.7MB，q4 量化
+       vision_encoder（512² / 32×32 patch）→ embed_tokens（官方 prompt.py
+       选择序列）→ decision_q4 双向决策头：零生成 token，
+       直接对 A/B/C 三个 marker 的 logits softmax
         ▼
 CandidateSelectionGate（实验阈值 0.10，未经审美标注校准）
   top-1/top-2 概率差 · 首轮选择后换序再比一次须一致 ·
@@ -136,6 +132,16 @@ Compose 叠加层：框（黄=模型选择 / 蓝=画面分析）+ 中文建议 +
 ### 证据纪律
 
 模型目前的状态是 loaded-only——链路在 Android 模拟器真版权重上跑通（一轮 margin 0.21 采纳、一轮超时降级均符合契约），但合成探针评测显示小模型存在明显的位置偏好（见 [SOP](docs/composition-pipeline-sop.md)），一次加强题面的 prompt 改版经 20 张隔离 sheet 预注册评测被否决、已回退锁定。**"能返回 A/B/C"不构成审美证据**，下一步质量证据来自独立人工标注照片集；真机速度（荣耀 Vs3）同样待验。黄框采纳目前只在 Android 15 模拟器、SmolVLM 256M、横屏条件下观察到，属稀有事件，d1 与竖屏尚未复现，真机命中率仍以荣耀 Vs3 实测为准。详见 [端侧构图建议 SOP](docs/composition-pipeline-sop.md) 与 [端侧模型说明](docs/edge-model-plan.md)。
+
+## 三仓库协同
+
+途帧主应用与组织内两个研究仓库协同演进，各自保持清晰边界：
+
+- [edge-model-solutions](https://github.com/light-witness-lab/edge-model-solutions)：端侧模型组合、场景 SOP、模型 provenance、评测与失败记录。
+- [inference-engineering](https://github.com/light-witness-lab/inference-engineering)：运行时、量化、算子覆盖、调度、内存、温升与推理优化研究。
+- `street-snap`（本仓库）：相机 UI、取景生命周期、模型适配、APK 和设备实测。
+
+当前 d1 证据等级仍为 `loaded-only`；荣耀 Vs3 真机性能、温升与审美质量保持 `not-verified`。三仓库的交接字段和更新顺序见方案库的 [三仓库地图](https://github.com/light-witness-lab/edge-model-solutions/blob/main/docs/three-repository-map.md)。
 
 ## 安装与发布
 
