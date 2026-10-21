@@ -124,3 +124,24 @@ ImageAnalysis 帧 ──► PoseSource 接口
   **白骨架贴合人体未验证（not-verified）**。
 - not-verified 真机遗留不变：帧率发热（lite/full）、暗光逆光、骨架贴合与投影对齐、
   引导有效率、姿势库覆盖度。
+
+### 2026-10-21 补（T78）：混淆包 live 模式被 R8 打回演示的真坑
+
+首版 preview APK 在模拟器与真机上都表现为"模型已安装却永远演示模式"，debug 构建从不复现，
+根因是 **R8 fullMode 对 MediaPipe 传递依赖优化过度**，且两道坎串行暴露：
+
+1. `com.google.common.flogger.FluentLogger`（MediaPipe 内部日志库）的静态初始化靠遍历调用栈
+   推断 caller 类名；R8 内联/outline 后栈帧丢失，`com.google.mediapipe.framework.Graph.<clinit>`
+   抛 `IllegalStateException: no caller found on the stack for: hj0`（经 mapping.txt 反查
+   `hj0 = FluentLogger`）。
+2. 补 keep 后再炸 protobuf lite：`com.google.protobuf.Any.typeUrl_` 字段被改名，
+   `Graph.loadBinaryGraph` 反射序列化 calculator options 时抛
+   `Field typeUrl_ for la not found`（`la = com.google.protobuf.Any`）。
+
+修复在 `app/proguard-rules.pro`：除已有的 `-keep com.google.mediapipe.**` 外，再 keep
+`com.google.common.flogger.**` 与 `com.google.protobuf.**`（MediaPipe 的 consumer rules
+不覆盖这两类失败；APK 代价约 +0.5 MB）。验证方式：混淆包+已安装 .task 模型启动后
+logcat 无 `StreetSnapPose` 告警、UI 演示横幅消失进入 `LivePoseLayer`。新 APK
+56,673,752 B / SHA-256 `ab5ee2bd921e41e5ea768d102e2eb3ba15ad18ad97c46cfc4ebf75a36c89a32b`
+（2026-10-21，提交 20665ae）。全量基线 app 272 / camera 69 / color 32。
+排查方法可复用：`app/build/outputs/mapping/preview/mapping.txt` 反查短名→原类名。
