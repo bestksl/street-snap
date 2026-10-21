@@ -139,6 +139,7 @@ import dev.streetsnap.app.composition.MoveGuide
 import dev.streetsnap.app.composition.MoveGuides
 import dev.streetsnap.app.composition.arrowAngleDeg
 import dev.streetsnap.app.composition.arrowLabel
+import dev.streetsnap.app.edge.InferenceStats
 import dev.streetsnap.app.edge.PoseModelCatalog
 import dev.streetsnap.app.pose.PoseModelStatus
 import dev.streetsnap.app.pose.PoseOverlayLayer
@@ -2331,10 +2332,11 @@ private fun InferencePerformanceSummary(state: CompositionUiState, installed: Bo
 }
 
 /**
- * Collapsed by default: model id/revision, runtime status, scheduler budget/cooldown,
- * the camera's ACTUAL live AE values and the capability ranges. Every number is
- * observed state — nothing here is estimated or fabricated. Timing detail lives in the
- * always-visible [InferencePerformanceSummary] above.
+ * Collapsed by default. Groups the real inference pipeline, per-pass performance, the
+ * token/TTFT contract (d1 is a discriminative single forward — both stated, not faked),
+ * model details, process-lifetime counters, process memory (CPU inference has no separate
+ * device memory) and the camera/HAL readings. Every number is observed state; architecture
+ * lines describe the shipping graph. Nothing is estimated or fabricated.
  */
 @Composable
 private fun DeveloperDiagnostics(
@@ -2352,10 +2354,46 @@ private fun DeveloperDiagnostics(
             color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
     if (expanded) {
+        val stats by InferenceStats.snapshots.collectAsStateWithLifecycle()
+        // One 1 s tick while expanded: refreshes the memory sample and the live foreground
+        // duration. PSS sampling itself stays off the steady-state (collapsed) path.
+        var memory by remember { mutableStateOf<ProcessMemorySnapshot?>(null) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                memory = ProcessMemoryProbe.sample()
+                delay(1_000L)
+            }
+        }
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
         Column(Modifier.fillMaxWidth().padding(bottom = 6.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            DiagLine("模型", "${modelEntry?.id ?: "—"} · ${modelEntry?.revision?.take(7) ?: "—"}")
-            DiagLine("运行态", state.status.name + (state.statusText?.let { " · $it" } ?: ""))
+            DiagSection("推理链路")
+            Text(
+                "分析帧 640×480（KEEP_ONLY_LATEST）→ 96px 统计与规则候选 → A/B/C 合成 512² sheet" +
+                    " → 视觉塔 FP16（1024 patches）→ 文本嵌入 Q4 → 决策头 Q4 输出 3 logits" +
+                    " → 换序双轮一致性门 → margin ≥ 0.10 采纳，否则弃权。单飞串行，慢则降频不排队。",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f))
+
+            DiagSection("推理性能")
+            DiagLine("画面分析", (state.fastAdviceMs?.let { "$it ms" } ?: "—") + " · 96px 规则层")
+            val segments = listOf(
+                "视觉塔 ${state.lastVisionMs?.let { ms -> formatInferenceTime(ms) } ?: "—"}",
+                "嵌入 ${state.lastEmbeddingsMs?.let { ms -> formatInferenceTime(ms) } ?: "—"}",
+                "决策头 ${state.lastDecisionMs?.let { ms -> formatInferenceTime(ms) } ?: "—"}",
+            ).joinToString(" · ")
+            DiagLine("分段耗时", segments + "（最近一次首轮）")
+            DiagLine("总耗时", (state.lastInferenceMs?.let { formatInferenceTime(it) } ?: "—") +
+                " · 含换序一致性轮")
+            val history = state.inferenceHistoryMs
+            if (history.isNotEmpty()) {
+                val sorted = history.sorted()
+                DiagLine("最近 10 次",
+                    "中位 ${sorted[sorted.size / 2]} · 最小 ${sorted.first()} / 最大 ${sorted.last()} ms")
+            } else {
+                DiagLine("最近 10 次", "尚无完成记录")
+            }
+            DiagLine("首结果延迟", stats.firstRankMs?.let { formatInferenceTime(it) } ?: "—")
             DiagLine("调度", "预算 %.0f s · 冷却 %d ms".format(state.inferenceBudgetMs / 1000f, state.sampleIntervalMs))
             state.lastOutcome?.let { DiagLine("上次结果", when (it) {
                 CompositionOutcome.RETURNED -> "已选择构图"
@@ -2365,6 +2403,40 @@ private fun DeveloperDiagnostics(
                 CompositionOutcome.SCENE_CHANGED -> "画面变化，旧结果忽略"
                 CompositionOutcome.FAILED -> "失败"
             }) }
+
+            DiagSection("模型情况")
+            DiagLine("模型", "${modelEntry?.id ?: "—"} · ${modelEntry?.revision?.take(7) ?: "—"}")
+            DiagLine("量化构成", "视觉塔 FP16 · 嵌入 Q4 · 决策头 Q4")
+            DiagLine("磁盘占用", (state.bytes?.let { formatBytes(it) } ?: "—") + " · 清单校验字节")
+            DiagLine("后端", state.runtimeLabel ?: "会话未就绪")
+            DiagLine("建图耗时", (state.runtimeReadyMs?.let { "$it ms" } ?: "—") + " · 三个 ORT session")
+            DiagLine("运行态", state.status.name + (state.statusText?.let { " · $it" } ?: ""))
+            DiagLine("输入 tokens", (state.lastPromptTokens?.let { "$it · 固定 prompt comp-choice-v0" }
+                ?: "—（完成一次推理后显示）"))
+            DiagLine("输出 tokens", "0 · 判别式输出 3 个选项 logits，不生成文本")
+            DiagLine("TTFT", "不适用 · 单次前向无 token 解码，亦无 KV cache；响应延迟见上方首结果延迟")
+
+            DiagSection("本次启动统计")
+            DiagLine("排名作业", "完成 ${stats.rankingsFinished} · 采纳 ${stats.adopted}" +
+                " / 弃权 ${stats.abstained} / 超时 ${stats.timedOut} / 失败 ${stats.failed}")
+            DiagLine("采纳率", stats.adoptionRate?.let { "%.0f%%".format(it * 100f) } ?: "—")
+            DiagLine("平均耗时",
+                (stats.averageRankMs?.let { formatInferenceTime(it) } ?: "—") + " · 每次排名墙钟均值")
+            val currentSessionMs = with(InferenceStats) { currentForegroundDurationMs(nowElapsed) }
+            DiagLine("前台会话", "${stats.foregroundSessions + if (currentSessionMs != null) 1 else 0} 次" +
+                " · 平均 ${stats.averageForegroundMs?.let { formatInferenceTime(it) } ?: "—"}" +
+                (currentSessionMs?.let { cur -> " · 本次 ${formatInferenceTime(cur)}" } ?: ""))
+
+            DiagSection("进程内存（CPU 推理，无独立显存）")
+            memory?.let { mem ->
+                DiagLine("PSS", "总 ${formatMemoryKb(mem.totalPssKb.toLong())}" +
+                    " · native ${formatMemoryKb(mem.nativePssKb.toLong())}" +
+                    " · Java ${formatMemoryKb(mem.dalvikPssKb.toLong())}")
+                DiagLine("native 堆", formatMemoryKb(mem.nativeAllocatedKb) +
+                    " · 含 ORT arena 与 MediaPipe，每秒刷新")
+            } ?: DiagLine("内存", "采样中…")
+
+            DiagSection("相机 / HAL")
             val live = cameraState.liveExposure
             if (live != null) {
                 DiagLine("实时测光", buildString {
@@ -2404,9 +2476,16 @@ private fun DeveloperDiagnostics(
 }
 
 @Composable
+private fun DiagSection(title: String) {
+    Text(title, Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 1.dp),
+        fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
+}
+
+@Composable
 private fun DiagLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth()) {
-        Text(label, Modifier.width(64.dp), fontSize = 10.sp,
+        Text(label, Modifier.width(68.dp), fontSize = 10.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace, maxLines = 1)
         Text(value, Modifier.weight(1f), fontSize = 10.sp,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f),

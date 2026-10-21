@@ -12,6 +12,7 @@ import dev.streetsnap.app.composition.ExposureIssue
 import dev.streetsnap.app.composition.LookAdviser
 import dev.streetsnap.app.composition.LookTarget
 import dev.streetsnap.app.edge.EdgeModelCatalog
+import dev.streetsnap.app.edge.InferenceStats
 import dev.streetsnap.app.pose.PoseAssistant
 import dev.streetsnap.camera.CameraController
 import dev.streetsnap.camera.ExposureMode
@@ -516,6 +517,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun onForegroundChanged(active: Boolean) {
         foreground = active
+        // Dev-diagnostics session counters (process-lifetime). Follows the Activity
+        // lifecycle, so rotations/config changes close and reopen a session by design.
+        InferenceStats.onForeground(active, android.os.SystemClock.elapsedRealtime())
         if (active) {
             // New foreground session: per-session budgets and the manual-pick silence reset.
             adviceBudget.reset()

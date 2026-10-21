@@ -70,6 +70,30 @@ class D1DecisionTest {
     }
 
     @Test
+    fun diagnosticsDefaultToNotMeasuredSentinels() {
+        val ranking = requireNotNull(D1Decision.toRanking(floatArrayOf(4f, 0f, 0f)))
+        assertEquals(-1L, ranking.visionMs)
+        assertEquals(-1L, ranking.embeddingsMs)
+        assertEquals(-1L, ranking.decisionMs)
+        assertEquals(-1, ranking.promptTokens)
+    }
+
+    @Test
+    fun perPassDiagnosticsArePassedThrough() {
+        val ranking = requireNotNull(D1Decision.toRanking(
+            floatArrayOf(4f, 0f, 0f),
+            visionMs = 12_345L,
+            embeddingsMs = 40L,
+            decisionMs = 88L,
+            promptTokens = 217,
+        ))
+        assertEquals(12_345L, ranking.visionMs)
+        assertEquals(40L, ranking.embeddingsMs)
+        assertEquals(88L, ranking.decisionMs)
+        assertEquals(217, ranking.promptTokens)
+    }
+
+    @Test
     fun supportsTwoToTenMarkers() {
         val ranking = requireNotNull(D1Decision.toRanking(floatArrayOf(4f, 0f)))
         assertEquals(0, ranking.selectedIndex)

@@ -21,6 +21,7 @@ import dev.streetsnap.app.edge.D1OmniRuntime
 import dev.streetsnap.app.edge.EdgeModelEntry
 import dev.streetsnap.app.edge.EdgeModelCatalog
 import dev.streetsnap.app.edge.EdgeModelStore
+import dev.streetsnap.app.edge.InferenceStats
 import dev.streetsnap.app.edge.ModelDownloadPlan
 import dev.streetsnap.camera.CompositionFrameSource
 import java.util.concurrent.atomic.AtomicLong
@@ -74,6 +75,16 @@ internal data class CompositionUiState(
     val modelSelectionMs: Long? = null,
     /** Wall-clock durations of the most recent ranking passes (success/timeout/failure), for dev diagnostics. */
     val inferenceHistoryMs: List<Long> = emptyList(),
+    /** Per-pass timings of the latest FIRST ranking pass (vision/tokenize+embeddings/decision), real measurements. */
+    val lastVisionMs: Long? = null,
+    val lastEmbeddingsMs: Long? = null,
+    val lastDecisionMs: Long? = null,
+    /** Actual BPE token count of the fixed choice prompt on the latest ranking pass. */
+    val lastPromptTokens: Int? = null,
+    /** Wall-clock spent constructing the three native ORT sessions (pre-bound warm-up). */
+    val runtimeReadyMs: Long? = null,
+    /** Real execution backend label (EP/threads) reported by the active ranker. */
+    val runtimeLabel: String? = null,
     val isRequestRunning: Boolean = false,
 )
 internal data class CompositionOverlay(
@@ -372,7 +383,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         invalidateView()
         _state.update { it.copy(install = ModelInstallStatus.REMOVING, status = AssistStatus.UNINSTALLED,
             statusText = null, isRequestRunning = false, inferenceStartedAtMs = null,
-            lastOutcome = null, lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
+            lastOutcome = null, lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null,
+            lastVisionMs = null, lastEmbeddingsMs = null, lastDecisionMs = null,
+            lastPromptTokens = null, runtimeReadyMs = null, runtimeLabel = null) }
         installJob = scope.launch {
             try {
                 // Runtime cleanup holds this lock until native sessions and any active inference end.
@@ -414,7 +427,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
             else -> AssistStatus.LOADING
         }, statusText = null, lastInferenceMs = null, fastAdviceMs = null, modelSelectionMs = null,
             isRequestRunning = false, sampleIntervalMs = 3_000L, inferenceBudgetMs = 30_000L,
-            inferenceStartedAtMs = null, lastOutcome = null) }
+            inferenceStartedAtMs = null, lastOutcome = null,
+            // Per-session values: the runtime is rebuilt (and no ranking has run) on restart.
+            lastVisionMs = null, lastEmbeddingsMs = null, lastDecisionMs = null,
+            lastPromptTokens = null, runtimeReadyMs = null, runtimeLabel = null) }
         sessionJob = scope.launch(Dispatchers.Main.immediate) {
             sessionMutex.withLock {
                 val sessionScope = CoroutineScope(currentCoroutineContext())
@@ -518,9 +534,32 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         val next = if (completed == null) cadence.recordTimeout(elapsed)
                             else cadence.recordCompleted(elapsed, selected != null)
                         nextModelAtMs = now + next.cooldownMs
+                        // Process-lifetime counters for the dev panel. A stale-but-finished job
+                        // (SCENE_CHANGED) really consumed one forward, so it counts as abstained.
+                        InferenceStats.recordRanking(
+                            outcome = when (outcome) {
+                                CompositionOutcome.RETURNED -> InferenceStats.RankOutcome.ADOPTED
+                                CompositionOutcome.TIMED_OUT -> InferenceStats.RankOutcome.TIMED_OUT
+                                CompositionOutcome.FAILED -> InferenceStats.RankOutcome.FAILED
+                                CompositionOutcome.NO_RESULT,
+                                CompositionOutcome.UNSTABLE_SELECTION,
+                                CompositionOutcome.SCENE_CHANGED -> InferenceStats.RankOutcome.ABSTAINED
+                            },
+                            elapsedMs = elapsed,
+                            visionMs = firstRanking?.visionMs,
+                            embeddingsMs = firstRanking?.embeddingsMs,
+                            decisionMs = firstRanking?.decisionMs,
+                            promptTokens = firstRanking?.promptTokens,
+                            nowMs = now,
+                        )
                         _state.update { it.copy(lastInferenceMs = elapsed.takeIf { fresh }, modelSelectionMs = elapsed.takeIf { fresh },
                             lastOutcome = outcome, inferenceStartedAtMs = null,
                             inferenceHistoryMs = (it.inferenceHistoryMs + elapsed).takeLast(10),
+                            // A timeout carries no pass breakdown; keep the previous real one visible.
+                            lastVisionMs = firstRanking?.visionMs?.takeIf { ms -> ms >= 0L } ?: it.lastVisionMs,
+                            lastEmbeddingsMs = firstRanking?.embeddingsMs?.takeIf { ms -> ms >= 0L } ?: it.lastEmbeddingsMs,
+                            lastDecisionMs = firstRanking?.decisionMs?.takeIf { ms -> ms >= 0L } ?: it.lastDecisionMs,
+                            lastPromptTokens = firstRanking?.promptTokens?.takeIf { tokens -> tokens >= 0 } ?: it.lastPromptTokens,
                             sampleIntervalMs = next.cooldownMs, inferenceBudgetMs = budgetMs,
                             statusText = when (outcome) {
                                 CompositionOutcome.RETURNED -> "AI 已从候选中选择构图"
@@ -548,6 +587,11 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         if (isCurrentSession()) {
                             rankingDisabled = true
                             val elapsed = started?.let { SystemClock.elapsedRealtime() - it }
+                            InferenceStats.recordRanking(
+                                InferenceStats.RankOutcome.FAILED, elapsed,
+                                firstRanking?.visionMs, firstRanking?.embeddingsMs,
+                                firstRanking?.decisionMs, firstRanking?.promptTokens,
+                                SystemClock.elapsedRealtime())
                             _state.update { it.copy(lastOutcome = CompositionOutcome.FAILED,
                                 lastInferenceMs = elapsed, modelSelectionMs = elapsed,
                                 inferenceHistoryMs = if (elapsed != null)
@@ -600,14 +644,16 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         val engine = withContext(Dispatchers.IO) {
                             D1OmniRuntime(installed)
                         }.also { created = it }
+                        val readyMs = SystemClock.elapsedRealtime() - builtAt
                         Log.i("StreetSnapComposition",
-                            "model_runtime_ready_ms=${SystemClock.elapsedRealtime() - builtAt} model=${model.id}")
+                            "model_runtime_ready_ms=$readyMs model=${model.id}")
                         if (!isCurrentSession()) {
                             withContext(Dispatchers.IO) { runCatching { engine.close() } }
                             return
                         }
                         runtime = engine
                         runtimeReady.complete(engine)
+                        _state.update { it.copy(runtimeReadyMs = readyMs, runtimeLabel = engine.runtimeLabel) }
                     } catch (cancelled: CancellationException) {
                         withContext(Dispatchers.IO) { runCatching { created?.close() } }
                         throw cancelled
