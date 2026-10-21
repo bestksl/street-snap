@@ -91,6 +91,11 @@ private fun LivePoseLayer(
     Box(modifier) {
         Canvas(Modifier.fillMaxSize()) {
             val sample = guide?.sample
+            // Only draw once a person is actually detected: the white figure hugs the real
+            // body and the amber target is projected onto that same body (it follows the
+            // moving person). With nobody in frame nothing is rendered — the bottom card
+            // carries the instruction; a fixed centre figure would pretend the person is
+            // already placed where the overlay is.
             if (sample != null && guide.personVisible) {
                 drawSkeleton(
                     points = sample.points.mapIndexed { index, point -> index to point }.toMap(),
@@ -112,23 +117,6 @@ private fun LivePoseLayer(
                         dashed = false,
                     )
                 }
-            } else {
-                // Nobody in frame: a dashed centred target so the pose is still legible.
-                val projected = PoseTemplate.projectCentered(
-                    definition.template.joints,
-                    centerX = size.width / 2f,
-                    topY = size.height * .10f,
-                    pixelsPerUnit = size.height * .42f,
-                )
-                drawSkeleton(
-                    points = projected,
-                    normalised = false,
-                    visible = { true },
-                    color = targetColor.copy(alpha = .55f),
-                    jointRadius = 3.5.dp.toPx(),
-                    strokeWidth = 2.dp.toPx(),
-                    dashed = true,
-                )
             }
         }
         Column(

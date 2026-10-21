@@ -64,16 +64,17 @@ class PoseFrameSource(
         }
     }
 
+    // Pause/resume only gates frame acceptance: the bound analyzer (and the session id it
+    // captured at activate()) stays valid across camera OPEN transitions, so generation must
+    // NOT change here — bumping it made every frame fail the session check until rebind.
     internal fun pause() = synchronized(lock) {
         active = false
-        generation++
         lastAcceptedAtMs = 0L
     }
 
     internal fun resume() = synchronized(lock) {
         if (!closed && !active) {
             active = true
-            generation++
             lastAcceptedAtMs = 0L
         }
     }

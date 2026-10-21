@@ -145,3 +145,32 @@ logcat 无 `StreetSnapPose` 告警、UI 演示横幅消失进入 `LivePoseLayer`
 56,673,752 B / SHA-256 `ab5ee2bd921e41e5ea768d102e2eb3ba15ad18ad97c46cfc4ebf75a36c89a32b`
 （2026-10-21，提交 20665ae）。全量基线 app 272 / camera 69 / color 32。
 排查方法可复用：`app/build/outputs/mapping/preview/mapping.txt` 反查短名→原类名。
+
+### 2026-10-21 补（T79）：实时帧被代际门全部丢弃 + 无人时不渲染火柴人
+
+T78 修完后混淆包不再退回演示，但 live 态下帧**从未到达检测器**：`detectAsync` 与 result
+回调零调用，底部卡永远显示姿势 invite（说明 `PoseGuide` 一直为 null）。临时在
+`PoseFrameSource.analyze` 入口打日志锁定根因——每帧都是 `active=true generation=3
+session=1`，全部被陈旧会话门丢弃：
+
+- `CameraController` 在相机状态 OPEN 抖动时对 source 连调 `pause()` + `resume()`；
+- 旧实现两者都 `generation++`（1→3），而 analyzer lambda 捕获的 session 是 `activate()`
+  返回的 1，且 analyzer 并未重绑；`analyze` 的 `generation != session` 门此后永久失败。
+- 对照 `CompositionFrameSource`：pause/resume 只切 `active`，generation 仅在
+  activate/deactivate（分析器真正重绑）时前进。PoseFrameSource 按此修正，注释写明
+  pause/resume 不得 bump generation。
+
+同时修正一处产品逻辑（用户指出"怎么可能先有小火柴人，人是活动的"）：live 层原先在无人
+时于画面中央画一个虚线目标火柴人，等于假装人已经站在那里。现改为**只在真正检测到人
+（`sample != null && guide.personVisible`）后**才画贴合真人的白骨架与投影到同一身体上的
+琥珀目标人；无人时取景器零渲染，仅由底部卡提示"把人放进画面，头到脚都入镜"。
+
+- 测试：新增 `PoseFrameSourceLifecycleTest` 3 例（间隔下界、pause/resume 后 session
+  仍有效、deactivate 才推进 generation）；全量 app 272 / camera 72 / color 32。
+- AVD 验证（debug 与混淆包各一次，模型已在位）：启动即显示"把人放进画面，头到脚都
+  入镜"（证明帧穿过 analyze→MediaPipe→PoseCoach），无演示横幅、无错误日志、画面无
+  火柴人；Home 切后台再回来后管线不中断（pause/resume 回归路径）。虚拟场景无真人，
+  **白骨架贴合与目标人投影到真人身体仍 not-verified，待真机**。
+- 新 APK 56,673,752 B / SHA-256
+  `fe640cbab043ae70ee7fea3a3aa125af2351d11f118c6496f1b7b00577b7e158`
+  （2026-10-21，覆盖桌面同名交付包）。
