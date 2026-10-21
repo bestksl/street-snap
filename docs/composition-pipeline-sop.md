@@ -223,6 +223,12 @@ T28 §2.2 标准 4 的落地。纯逻辑在 `composition/CropTrial.kt`：`CropTr
 
 **证据（loaded-only）。** APP 侧新增 `SubjectLocatorTest` 6 测（种子/4-连通/对角排除/权重份额/最强格平票）与 advisor 5 测（等密度抖动繁忙弱峰场必须 CONSERVATIVE、同场上左右主体收紧到 ≤0.76 且跨侧跟随、三层帧首选 DEPTH_LAYERS 且文案含前景/中景/远景且全幅、两平面对照不出三层、五维门逐维边界）。edge 仓逐字快照新增 `SubjectLocator.kt`（现五个整文件），38 帧复杂套件复跑（`advice-regression-complex-2026-10-21.json`）：冻结 204 帧首选分布**零差异**、M3/M4 不变，24 配对帧 M5 保持 6/6、mean/worst 漂移 0.0079/0.0157 逐位不变；新增 depth3_0/depth3_1（三分线主体）意图命中 2/2，depth2_0 平顶部两平面对照为 THIRDS。合成 96px 统计上弱峰端到端窗口很窄（可见色差团块几乎必让粗格饱和走强峰路径），弱峰路径的主要保证来自纯函数门测试与真机前的弃权回归；**真实杂乱街景的收紧效果、夜景点光源、真实雾霾/空气透视下的三层判定均 not-verified**，审美真值仍只来自独立人工标注照片集。全模块 **app 272 / camera 61 / color 32 单测全绿**。
 
+### 2026-10-21（T80）：开发者诊断面板专业化——推理链路、真实分段计时、token/TTFT、显存、会话统计
+
+用户诉求（逐字）：「开发者模式里需要说明 推理链路 当前推理性能 token 这些 ttft 比较专业一些 模型情况 显存这些 当前已完成会话次数 平均会话时长?」折叠区重做为六组：**推理链路**（640×480 KEEP_ONLY_LATEST → 96px 规则候选 → 512² sheet → FP16 视觉塔 1024 patches → Q4 嵌入 → Q4 决策头 3 logits → 换序双轮一致性 → margin ≥ 0.10 采纳，单飞串行慢则降频）；**推理性能**（规则层 fastAdviceMs、视觉/嵌入/决策三段耗时、含换序轮总耗时、最近 10 次中位/最小/最大、首结果延迟、调度预算/冷却、六态结果）；**模型情况**（id·rev、FP16/Q4/Q4 量化构成、清单字节、ORT 后端标签含 XNNPACK 是否真建图成功、三个 session 建图耗时、运行态、输入/输出 tokens、TTFT）；**本次启动统计**（排名作业四桶、采纳率、平均墙钟、前台会话次数/平均/本次时长）；**进程内存**；**相机/HAL** 原行不动。
+
+三条诚实性约束：①所有耗时来自真实计时点——`D1OmniRuntime.rank()` 内三段 `elapsedRealtime` 与建图计时，`CropRanking` 新四字段（visionMs/embeddingsMs/decisionMs/promptTokens）以 -1 表未测，retired/其他 ranker 路径不伪造；超时/失败轮保留上轮真实值不清空。②token 数是固定 prompt `comp-choice-v0` 经 ByteBPE 真实 encode 的 `ids.size`（约 217），输出恒为 0；**TTFT 显式标注「不适用」**——d1 是单次判别式前向（3 logits softmax），无自回归解码、无生成 token、无 KV cache（见 inference-engineering `case-d1-omni-on-device.md` §8），最接近的真实指标是首结果延迟。③CPU 推理无独立设备显存，不虚构显存数：用 `Debug.MemoryInfo` 的总/native/Java PSS 加 native 堆分配（ORT arena、MediaPipe 计入 native），仅展开时 1s 采样，标题即注明「CPU 推理，无独立显存」。计数器放进程级 `InferenceStats` object（CompositionAssistant 频繁 restart 会清空内部计数），in-memory only 随进程清零；前台会话由 CameraScreen ON_RESUME/ON_PAUSE 驱动（旋转按设计计一次）。新增 10 测（app → 282）；AVD 六组渲染与实时采样 verified，PSS/耗时等 QEMU 数值 loaded-only 不外推真机，装上 d1 后的真机分段与采纳率 not-verified。
+
 ## 历史诊断：为什么先前没有框
 
 此前直接让通用 SmolVLM 生成裁切坐标，实际输出包含 `[0,0,0,0]`、残缺坐标或普通描述，被合法性检查拒绝。相机输入与 ONNX 推理已打通；未经过本项目构图/定位训练的模型不能仅凭提示词保证坐标和审美能力。此前 Q4 语义探针曾连续两次正确识别画面右侧电视，描述任务也出现人物幻觉，不能据此证明可靠定位。
