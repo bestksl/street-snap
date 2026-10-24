@@ -1,9 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- Local, explicitly launched validation only; absent from Preview/Release. -->
-    <instrumentation
-        android:name="dev.streetsnap.app.validation.CompositionRankingValidation"
-        android:targetPackage="${applicationId}"
-        android:functionalTest="true"
-        android:handleProfiling="false" />
+    <!-- Debug-only manifest. The former CompositionRankingValidation instrumentation
+         was removed with SmolVlmRuntime on 2026-10-20; nothing to declare here. -->
 </manifest>
