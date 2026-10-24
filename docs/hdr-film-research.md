@@ -218,7 +218,47 @@
   - 铭牌 GR III 矢量 90×56dp=180:112 等比 0.5×，拨盘/握柄/镜头不再局促。
   软件渲染只证路径与量级，**真机光晕观感仍 not-verified**；审美质量唯一证据仍是独立人工标注照片集。
 
-## 六、主要参考
+## 六、2026-10-20 三次回调（T45/T46，HDF-1/HDF-2）：点光源辉光强化——tight core + 独立宽光晕双层模型
+
+用户反馈（逐字要点）：「HDF 的特效还是不明显。主要 HDF 一般你可以搜一下样章……它一般都是高光的时候，那个灯啊，它会有个光晕在那里面。」本轮研究环境无法访问在线样章 URL，样章/真机夜景照片留待人工核对；以下方向据光学扩散原理与 §五 已核实的理光 HDF 事实推导，不把没看到的样章当证据。
+
+### 1. 两个先查清的事实
+
+- **按钮与 uniform 的命名错位**：UI 上标着「HDF」的按钮实际驱动 `hdrEnabled → uHdr`（legacy uniform 名），UI 上的「柔光」chip 才驱动 `hdfEnabled → uHdf`。T39 克制化调的是 uHdr（真 HDF 按钮），T41 排查「还是不明显」时首先核对了这一层，避免改错路径。
+- **单模糊层加宽必然发灰**：T24/T39 共用一对 bloom FBO，要更大的光晕只能在同一对上增加模糊轮次，结果灯核被抹成灰雾——这是单层架构的结构性问题，不是再调阈值能解决的。
+
+### 2. 双层光学辉光模型（loaded-only：软件渲染 AVD 验证管线与量级）
+
+bloom 改为**两对独立 FBO**（`GlRenderer.prepareBloom(width, height, wideWanted)`）：
+
+| 层 | 长边 | 职责 |
+| --- | --- | --- |
+| tight core（uBloom, unit2） | ≤384 px | 灯核紧光晕，保留灯的染色；不能再被加宽 |
+| wide halo（uBloomWide, unit3） | ≤192 px | 独立宽软光晕；下采样自带 box-filter 预模糊，再走高斯轮次 |
+
+合成着色器（`ColorShaders.kt`）关键点：
+
+- `scatterGap = 1 − clamp(color)`：光晕只在比光源暗的区域显出，**暗部零抬升**（屏幕式光散射语义），此因子是载荷项；
+- 亮部提取 `brightAt` 用 **max-channel 软膝**而非 luma：红灯/蓝灯 luma 低但单通道接近 clip，也必须被提取（T39 已修，T41 保持：uHdr 膝 .74/.92，uHdf 膝 .72/.90）；
+- 真 HDF 按钮（uHdr）新双层叠加：`amount = mix(0.22, 0.68, uHdr)`，`coreHalo = mix(luma(glow), glow, .60) * 0.70`，`wideHalo = mix(luma(wideTex), wideTex, .75) * 0.45`，合项 `color += scatterGap * (coreHalo + wideHalo) * amount`——轻度去饱和的宽层模拟空气中的散射光球，紧层保留灯色；
+- 柔光（uHdf）路径：`core * 1.50 + wide * 0.55`，语义不变；
+- `uHdr = 0 / uHdf = 0` 时输出路径不变，无效果开关零差异。
+
+### 3. 排查并修掉的实质 bug：HDF 按钮路径拿不到宽层
+
+改完双层后 AVD 上 HDF 按钮仍无宽光晕。定位：`draw()` 之前只在柔光路径准备/绑定宽 FBO（`wideWanted` 原等价于 `diffusionOn`），真 HDF 按钮走 uHdr 时 unit3 绑到 texture 0，宽层贡献为零。修法：`val wideWanted = diffusionOn || hdrOn`，两种 look 都 `extractHighlights` 宽表并绑 `wideBloomTextures[0]`。同 shader 同时驱动预览与成片，二者自动一致。
+
+### 4. AVD 代理量化与证据边界
+
+AVD VirtualScene 是静态房间、无路灯/灯泡等点光源，无法直接验证「灯有光晕」的目标观感；以电视棋盘格的近白格做**代理光源**，同帧开/关做像素差分（PIL + statistics，暗格 n=83,929）：
+
+- 两种开态暗格 luma 平均抬升 **+24.03 / +30.35**（0–255），关态同区域仅 +3.84（噪声量级），差分 p90 +127；
+- 抬升沿近白格边缘空间衰减，符合光晕分布而非整片抬色；
+- 全程无 GL error、无 FATAL，拍照链路正常。
+
+这只证明管线连通、量级可见、暗部不被抬；棋盘格不是灯，qemu 软件 GL 的模糊/带宽与真机 GPU 不同。**真实路灯/点光源夜景的辉光目视效果仍 not-verified**，唯一下一步是荣耀 Vs3 夜景实拍人工核对（含与理光 HDF 样章的目视对标）；审美/氛围判断只认独立人工评估。
+
+## 七、主要参考
 
 - [LearnOpenGL Bloom](https://learnopengl.com/Advanced-Lighting/Bloom) / [Physically Based Bloom 2022](https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom) / [GPU Gems 21 Real-Time Glow](https://developer.nvidia.com/gpugems/gpugems/part-iv-image-processing/chapter-21-real-time-glow)
 - [Catlike Coding Bloom（soft knee）](https://catlikecoding.com/unity/tutorials/advanced-rendering/bloom/) / [Unity post-processing Bloom](https://docs.unity3d.com/Packages/com.unity.postprocessing@2.2/manual/Bloom.html)

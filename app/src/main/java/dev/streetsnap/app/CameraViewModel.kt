@@ -12,6 +12,8 @@ import dev.streetsnap.app.composition.ExposureIssue
 import dev.streetsnap.app.composition.LookAdviser
 import dev.streetsnap.app.composition.LookTarget
 import dev.streetsnap.app.edge.EdgeModelCatalog
+import dev.streetsnap.app.edge.InferenceStats
+import dev.streetsnap.app.pose.PoseAssistant
 import dev.streetsnap.camera.CameraController
 import dev.streetsnap.camera.ExposureMode
 import dev.streetsnap.camera.LumaMeter
@@ -58,6 +60,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     private val repository = SettingsRepository(application)
     private val saver = PhotoSaver(application)
     internal val composition = CompositionAssistant(application, viewModelScope)
+    internal val pose = PoseAssistant(application, viewModelScope)
     private val adviceBudget = AdviceSessionBudget()
     private val lookAdviser = LookAdviser(budget = adviceBudget)
     private val exposureAdviser = ExposureAdviser(budget = adviceBudget)
@@ -98,12 +101,15 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val capture = camera.state.value.settings
         val caps = camera.state.value.capabilities
         val step = caps?.exposureCompensationStepEv ?: 0.0
+        val settings = _settings.value
         val advice = exposureAdviser.onFrame(
             stats,
             // EV compensation does nothing in manual mode; never suggest a control that is inert.
             evAdjustable = capture.exposureMode != ExposureMode.MANUAL && step > 0.0,
             canLowerEv = capture.exposureCompensationIndex > (caps?.exposureCompensationMin ?: 0),
             canRaiseEv = capture.exposureCompensationIndex < (caps?.exposureCompensationMax ?: 0),
+            // Wide-range card says "switch HDF on"; hide it once either diffusion look is active.
+            diffusionEnabled = settings.hdrEnabled || settings.hdfEnabled,
         ) ?: return
         val nextEv = (capture.exposureCompensationIndex + advice.issue.evDirection) * step
         _exposureAdviceCard.value = ExposureAdviceCard(
@@ -143,16 +149,18 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
                 _settingsLoaded.value = true
                 syncComposition()
                 syncMeter()
+                syncPose()
             }
         }
     }
 
     init {
         composition.sceneChangeListener = {
-            // Same scene-change contract as composition advice: pending streak and card die
-            // with the old scene; session history survives so the same card cannot bounce back.
+            // T75: a pan or AF jitter must not delete a visible film/look hint — tone advice is
+            // about light quality (night, dusk, warmth) and survives small camera moves. The
+            // adviser still drops its pending streak, and a different scene's new key replaces
+            // the card through the normal onFrame path; dismiss/session rules stay unchanged.
             lookAdviser.onSceneChanged()
-            if (trialLook == null) _lookAdviceCard.value = null
         }
         viewModelScope.launch {
             composition.sceneReading.collect { reading ->
@@ -329,7 +337,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         applyColor()
     }
 
-    fun focus(point: MeteringPoint, lock: Boolean = false) = latestCameraAction("tapFocus") { camera.focus(point, lock) }
+    fun focus(point: MeteringPoint, lock: Boolean = false) = latestCameraAction("tapFocus") {
+        // T76: hold the composition overlay/arrow through the AF hunt this tap triggers.
+        composition.notifyFocusEngaged()
+        camera.focus(point, lock)
+    }
 
     fun autoFocus() = latestCameraAction("focus") {
         if (camera.state.value.settings.focusDistanceDiopters != null) camera.setManualFocus(null)
@@ -418,6 +430,14 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         update { it.copy(alignmentHapticEnabled = enabled) }
     }
 
+    // T72 pose assistant. Enabling while no model is installed keeps the demo browser live.
+    fun setPoseAssistantEnabled(enabled: Boolean) = update { it.copy(poseAssistantEnabled = enabled) }
+    fun selectPose(id: String) = pose.selectPose(id)
+    fun nextPose() = pose.nextPose()
+    fun installPoseModel() = pose.install()
+    fun cancelPoseInstall() = pose.cancelInstall()
+    fun removePoseModel() = pose.removeModel()
+
     /** × on an exposure card: hidden for the rest of this foreground session, no persistence. */
     fun dismissExposureAdvice() {
         val issue = exposureAdviser.visibleIssue ?: run {
@@ -456,26 +476,22 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         _lookAdviceCard.value = null
     }
 
-    /** × on the card: remember the key for 7 days and count a consecutive-dismiss streak. */
+    /**
+     * × on the card: remember the key for 7 days (per-key suppression) and hide it for this
+     * session. T75: this no longer flips the whole feature off after a streak — users had no
+     * visible reason why film/look suggestions "disappeared"; the settings toggle stays the
+     * only off switch.
+     */
     fun dismissLookAdvice() {
         val card = _lookAdviceCard.value ?: return
         revertTrialLook()
         lookAdviser.markConsumed(card.key)
-        var turnedOff = false
         update { settings ->
-            val streak = settings.lookAdviceDismissStreak + 1
-            turnedOff = streak >= DISMISS_STREAK_AUTO_OFF
             settings.copy(
                 lookDismissedAt = settings.lookDismissedAt + (card.key to System.currentTimeMillis()),
-                lookAdviceDismissStreak = if (turnedOff) 0 else streak,
-                lookAdviceEnabled = if (turnedOff) false else settings.lookAdviceEnabled,
             )
         }
         _lookAdviceCard.value = null
-        if (turnedOff) {
-            lookAdviser.resetSession()
-            notify("已连续忽略 $DISMISS_STREAK_AUTO_OFF 次，影调建议已关闭，可在拍摄设置中重新开启")
-        }
     }
 
     private fun revertTrialLook() {
@@ -501,6 +517,9 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun onForegroundChanged(active: Boolean) {
         foreground = active
+        // Dev-diagnostics session counters (process-lifetime). Follows the Activity
+        // lifecycle, so rotations/config changes close and reopen a session by design.
+        InferenceStats.onForeground(active, android.os.SystemClock.elapsedRealtime())
         if (active) {
             // New foreground session: per-session budgets and the manual-pick silence reset.
             adviceBudget.reset()
@@ -518,8 +537,11 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         if (_settingsLoaded.value) {
             syncComposition()
             syncMeter()
+            syncPose()
         }
     }
+
+    private fun syncPose() = pose.configure(_settings.value.poseAssistantEnabled, foreground)
     private fun syncComposition() = composition.configure(
         _settings.value.compositionModel, _settings.value.compositionEnabled, foreground,
         realtime = _settings.value.compositionRealtime,
@@ -615,6 +637,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         if (_settingsLoaded.value) {
             syncComposition()
             syncMeter()
+            syncPose()
         }
         saveSettingsJob?.cancel()
         saveSettingsJob = viewModelScope.launch {
@@ -645,13 +668,10 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         composition.close()
+        pose.close()
         camera.close()
         colors.close()
         noticeChannel.close()
     }
 
-    companion object {
-        /** Three consecutive × taps switch the suggestion feature off until re-enabled in settings. */
-        const val DISMISS_STREAK_AUTO_OFF = 3
-    }
 }

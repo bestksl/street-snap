@@ -11,6 +11,13 @@ data class CropRanking(
     val margin: Float,
     val probabilities: List<Float>,
     val rawScores: List<Float>,
+    // Real per-pass diagnostics from the forward (d1 only); -1 marks "not measured",
+    // which the retired SmolVLM softmax path and any future ranker leave as default.
+    val visionMs: Long = -1L,
+    val embeddingsMs: Long = -1L,
+    val decisionMs: Long = -1L,
+    /** Actual BPE token count of the fixed choice prompt fed to the embeddings graph. */
+    val promptTokens: Int = -1,
 )
 
 /** Keep abstention separate from constrained decoding, which always produces a winner. */

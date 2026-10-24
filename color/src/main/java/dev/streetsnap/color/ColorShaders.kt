@@ -20,6 +20,12 @@ internal object ColorShaders {
         uniform highp ${if (external) "samplerExternalOES" else "sampler2D"} uImage;
         uniform sampler3D uLut;
         uniform sampler2D uBloom;
+        // Independent, much lower-resolution broad-halo layer (HDF only). The tight bright
+        // core stays in uBloom; keeping the wide layer separate means heavily blurring the
+        // halo can never smear the core into the washed-out gray veil of the earlier design.
+        uniform sampler2D uBloomWide;
+        // Experimental scale-aware layer: only small locally-bright point lights survive.
+        uniform sampler2D uBloomPoint;
         uniform mat4 uInputTransform;
         uniform vec3 uDomainMin;
         uniform vec3 uDomainMax;
@@ -30,9 +36,9 @@ internal object ColorShaders {
         uniform vec4 uColor; // saturation, hue, contrast, brightness
         uniform vec4 uDetail; // highlights, shadows, sharpness, clarity
         uniform float uHdf;
-        // 0 = Ricoh-style HDF off (identical output); >0 = strength. HDF only diffuses
-        // highlights near clipping: a faint top roll-off plus a restrained halo, with
-        // midtones and shadows left crisp. (Uniform keeps its legacy "hdr" name.)
+        // 0 = Ricoh-style HDF off (identical output); >0 = strength. HDF is pure optical
+        // diffusion of highlights near clipping (a tight restrained halo); there is no tone
+        // mapping at all, and midtones/shadows are left crisp. (Uniform keeps its legacy name.)
         uniform float uHdr;
         uniform vec3 uWhiteBalanceGain;
         uniform vec2 uHueRotation; // precomputed cosine/sine, +/-20 degrees
@@ -46,6 +52,28 @@ internal object ColorShaders {
         in vec2 vUv;
         out vec4 fragColor;
         const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+        // Two-layer optical-diffusion tuning, injected from BloomStyle (single source
+        // of truth in Kotlin); compile-time constants, behaviour identical to literals.
+        const float B_KNEE_HDF_LO = ${BloomStyle.KNEE_HDF_LO};
+        const float B_KNEE_HDF_HI = ${BloomStyle.KNEE_HDF_HI};
+        const float B_KNEE_HDR_LO = ${BloomStyle.KNEE_HDR_LO};
+        const float B_KNEE_HDR_HI = ${BloomStyle.KNEE_HDR_HI};
+        const float B_HDF_CORE_CLIP_GAIN = ${BloomStyle.HDF_CORE_CLIP_GAIN};
+        const float B_HDF_CORE_GAIN = ${BloomStyle.HDF_CORE_GAIN};
+        const float B_HDF_WIDE_GAIN = ${BloomStyle.HDF_WIDE_GAIN};
+        const float B_HDF_WIDE_SAT = ${BloomStyle.HDF_WIDE_SAT};
+        const float B_HDR_AMOUNT_LO = ${BloomStyle.HDR_AMOUNT_LO};
+        const float B_HDR_AMOUNT_HI = ${BloomStyle.HDR_AMOUNT_HI};
+        const float B_HDR_CORE_SAT = ${BloomStyle.HDR_CORE_SAT};
+        const float B_HDR_CORE_GAIN = ${BloomStyle.HDR_CORE_GAIN};
+        const float B_HDR_WIDE_SAT = ${BloomStyle.HDR_WIDE_SAT};
+        const float B_HDR_WIDE_GAIN = ${BloomStyle.HDR_WIDE_GAIN};
+        const float B_POINT_NEIGHBOUR = ${BloomStyle.POINT_NEIGHBOUR};
+        const float B_POINT_CONTRAST_LO = ${BloomStyle.POINT_CONTRAST_LO};
+        const float B_POINT_CONTRAST_HI = ${BloomStyle.POINT_CONTRAST_HI};
+        const float B_POINT_SAT = ${BloomStyle.POINT_SAT};
+        const float B_HDF_POINT_GAIN = ${BloomStyle.HDF_POINT_GAIN};
+        const float B_HDR_POINT_GAIN = ${BloomStyle.HDR_POINT_GAIN};
 
         float luminance(vec3 color) { return dot(color, LUMA); }
 
@@ -79,27 +107,22 @@ internal object ColorShaders {
             return clamp(color + tonal, 0.0, 1.0);
         }
 
-        // Narkowicz ACES filmic fit: keeps hue in the highlight roll-off (UE4 default).
-        vec3 acesFilm(vec3 x) {
-            const float a = 2.51;
-            const float b = 0.03;
-            const float c = 2.43;
-            const float d = 0.59;
-            const float e = 0.14;
-            return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-        }
-
         vec3 brightAt(vec2 uv) {
             vec3 color = grade(sourceAt(uv));
-            if (uHdr > 0.0) {
-                // HDF keys on the brightest channel (colored lamps keep their tint) but the
-                // knee is high: only light approaching clipping spreads, so ordinary skies
-                // and midtones never feed the halo.
+            if (uHdf > 0.0 || uHdr > 0.0) {
+                // Key on the BRIGHTEST CHANNEL, not on luma: a red/blue lamp has low luma but
+                // a high single channel, and must still bloom (this was the HDF regression —
+                // HDF set uHdf but this branch only looked at uHdr, so HDF fell through to the
+                // luma knee and coloured point lights were never extracted). The soft knee only
+                // admits light approaching clipping, so ordinary skies and midtones stay out
+                // and the shadows get zero lift downstream. HDF uses a slightly wider/knee than
+                // the HDR look so lamps read clearly at the default strength.
                 float key = max(color.r, max(color.g, color.b));
-                return color * smoothstep(0.74, 0.92, key);
+                float lo = uHdf > 0.0 ? B_KNEE_HDF_LO : B_KNEE_HDR_LO;
+                float hi = uHdf > 0.0 ? B_KNEE_HDF_HI : B_KNEE_HDR_HI;
+                return color * smoothstep(lo, hi, key);
             }
-            // A soft high-light knee excludes middle gray, so wider diffusion does not wash
-            // an evenly lit scene with a gray veil. Exposure still determines light sources.
+            // Defensive only: prepareBloom runs with uHdf/uHdr > 0, so this path is unused.
             return color * smoothstep(0.66, 0.94, luminance(color));
         }
 
@@ -136,6 +159,26 @@ internal object ColorShaders {
                 fragColor = vec4(glow, 1.0);
                 return;
             }
+            if (uPass == 3) {
+                // Point-light mask, sampled from the ALREADY keyed tight highlight sheet
+                // (no re-grade). A small lamp is locally much brighter than its box
+                // neighbourhood; inside a broad bright window/sky the two are equal, so
+                // the contrast term is zero and broad surfaces converge instead of
+                // blooming. The centre brightness multiplies in to reject dark noise.
+                vec3 c = texture(uBloom, vUv).rgb;
+                float r = B_POINT_NEIGHBOUR;
+                vec3 neighbour = 0.25 * (
+                    texture(uBloom, vUv + vec2( r, 0.0)).rgb +
+                    texture(uBloom, vUv + vec2(-r, 0.0)).rgb +
+                    texture(uBloom, vUv + vec2(0.0,  r)).rgb +
+                    texture(uBloom, vUv + vec2(0.0, -r)).rgb);
+                float centre = max(c.r, max(c.g, c.b));
+                float around = max(neighbour.r, max(neighbour.g, neighbour.b));
+                float contrast = (centre - around) / max(centre, 0.0001);
+                float pointness = centre * smoothstep(B_POINT_CONTRAST_LO, B_POINT_CONTRAST_HI, contrast);
+                fragColor = vec4(c * pointness, 1.0);
+                return;
+            }
 
             vec3 source = sourceAt(vUv);
             vec3 color = grade(source);
@@ -151,32 +194,49 @@ internal object ColorShaders {
                 float midtone = smoothstep(0.0, 0.2, y) * (1.0 - smoothstep(0.8, 1.0, y));
                 color += clamp(detail * uDetail.w * 0.8, -0.10, 0.10) * midtone;
             }
-            if (uHdr > 0.0) {
-                // HDF is diffusion, not an HDR tone map: nothing happens through the midtones.
-                // A faint roll-off right at clipping keeps blown whites soft with some colour,
-                // instead of the old shoulder that remapped everything above middle grey.
-                float shoulderMask = smoothstep(0.78, 0.97, y);
-                float shoulderAmount = mix(0.10, 0.28, uHdr) * shoulderMask;
-                float headroom = 1.0 + (mix(1.04, 1.14, uHdr) - 1.0) * shoulderMask;
-                vec3 toned = acesFilm(color * headroom);
-                color = mix(color, toned, shoulderAmount);
-            }
+            // HDF is purely optical diffusion: no tone mapping at all (the old ACES
+            // shoulder re-graded the highlights and read as "washed out"). The only
+            // effect is the scattered halo added below, keyed on near-clipping light.
             if (uHdf > 0.0 || uHdr > 0.0) {
                 vec3 glow = texture(uBloom, vUv).rgb;
                 // Screen-style light scattering preserves the original bright center and
                 // keeps the dark regions clean (the 1-color factor is load-bearing).
                 vec3 scatterGap = 1.0 - clamp(color, 0.0, 1.0);
                 if (uHdf > 0.0) {
-                    // Diffuse bright light over the untouched center detail, instead of blurring it.
-                    // The broader bloom is visible around lamps/windows even at the default 0.4.
-                    // HDF-only output stays exactly as before (no HDR desaturation applied).
-                    color += scatterGap * glow * uHdf * 1.25;
+                    // Two-layer optical diffusion (Black Pro-Mist 1/4 style):
+                    //  - tight core keeps the lamp's tint and gains as the blurred highlight
+                    //    approaches clipping (the extracted sheet is clamped to RGBA8, so the
+                    //    near-clipping excess is driven from post-blur luminance);
+                    //  - broad halo is an independent low-resolution layer, mildly desaturated,
+                    //    reading as a soft spherical glow around point lamps/bright windows
+                    //    without the gray fog a single widened blur produces.
+                    // scatterGap (1 - color) is load-bearing for keeping shadows at zero lift.
+                    vec3 core = texture(uBloom, vUv).rgb;
+                    core *= 1.0 + B_HDF_CORE_CLIP_GAIN * luminance(core);
+                    vec3 wideTex = texture(uBloomWide, vUv).rgb;
+                    vec3 wide = mix(vec3(luminance(wideTex)), wideTex, B_HDF_WIDE_SAT);
+                    // Scale-aware spherical halo that only small point lights feed.
+                    vec3 pointTex = texture(uBloomPoint, vUv).rgb;
+                    vec3 point = mix(vec3(luminance(pointTex)), pointTex, B_POINT_SAT);
+                    color += scatterGap * (core * B_HDF_CORE_GAIN + wide * B_HDF_WIDE_GAIN +
+                        point * B_HDF_POINT_GAIN) * uHdf;
                 }
                 if (uHdr > 0.0) {
-                    // Restrained, mostly-neutral halo (real HDF never stains midtones); the
-                    // weight is well under the old 0.90-1.90 HDR-look range by design.
-                    vec3 halo = mix(vec3(luminance(glow)), glow, 0.70);
-                    color += scatterGap * halo * mix(0.30, 0.70, uHdr);
+                    // The actual HDF button (legacy uniform name): same two-layer optical
+                    // model as the soft diffusion, tuned a touch tighter. A tinted tight
+                    // core plus the INDEPENDENT broad halo is what makes point lamps and
+                    // street lights read with a visible glow at the default strength — the
+                    // old tight-only, heavily desaturated single halo was the "HDF not
+                    // obvious" report. scatterGap still guarantees zero shadow lift.
+                    float amount = mix(B_HDR_AMOUNT_LO, B_HDR_AMOUNT_HI, uHdr);
+                    vec3 coreHalo = mix(vec3(luminance(glow)), glow, B_HDR_CORE_SAT);
+                    vec3 wideTex = texture(uBloomWide, vUv).rgb;
+                    vec3 wideHalo = mix(vec3(luminance(wideTex)), wideTex, B_HDR_WIDE_SAT);
+                    // Extra spherical halo restricted to small point lights (experimental).
+                    vec3 pointTex = texture(uBloomPoint, vUv).rgb;
+                    vec3 pointHalo = mix(vec3(luminance(pointTex)), pointTex, B_POINT_SAT);
+                    color += scatterGap * (coreHalo * B_HDR_CORE_GAIN + wideHalo * B_HDR_WIDE_GAIN +
+                        pointHalo * B_HDR_POINT_GAIN) * amount;
                 }
             }
             vec2 centered = (vUv - 0.5) * 1.41421356;

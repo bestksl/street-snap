@@ -43,6 +43,10 @@ internal class ExposureAdviser(
      * not apply; wide-range HDF advice is still allowed.
      * @param canLowerEv / canRaiseEv false at the compensation range ends — a nudge with
      * no available action is withheld rather than shown.
+     * @param diffusionEnabled true while either diffusion look (the HDF button or the
+     * soft-diffusion look) is on: the wide-dynamic-range card only tells the user to
+     * switch HDF on, so once it already is, the card has no action left and is withheld.
+     * EV nudges are unaffected because HDF does not change exposure.
      * Returns an advice exactly on the frame it becomes visible, otherwise null.
      */
     fun onFrame(
@@ -50,8 +54,9 @@ internal class ExposureAdviser(
         evAdjustable: Boolean,
         canLowerEv: Boolean,
         canRaiseEv: Boolean,
+        diffusionEnabled: Boolean = false,
     ): ExposureAdvice? {
-        val detected = detect(stats, evAdjustable, canLowerEv, canRaiseEv)
+        val detected = detect(stats, evAdjustable, canLowerEv, canRaiseEv, diffusionEnabled)
         if (detected == null) {
             candidate = null
             candidateCount = 0
@@ -78,12 +83,18 @@ internal class ExposureAdviser(
         evAdjustable: Boolean,
         canLowerEv: Boolean,
         canRaiseEv: Boolean,
+        diffusionEnabled: Boolean,
     ): ExposureIssue? {
         if (stats == null || stats.sampleCount <= 0L) return null
         val highlights = stats.highlightRatio >= highlightLimit
         val shadows = stats.shadowRatio >= shadowLimit
+        // Both ends clip first: EV cannot save both poles at once, so this must never fall
+        // through to a single-pole EV nudge. With diffusion already on, the card's only
+        // suggestion ("switch HDF on") is applied, so there is nothing left to show.
+        if (highlights && shadows) {
+            return if (diffusionEnabled) null else ExposureIssue.WIDE_DYNAMIC_RANGE
+        }
         return when {
-            highlights && shadows -> ExposureIssue.WIDE_DYNAMIC_RANGE
             highlights && evAdjustable && canLowerEv -> ExposureIssue.HIGHLIGHTS_CLIPPED
             shadows && evAdjustable && canRaiseEv -> ExposureIssue.SHADOWS_CLIPPED
             else -> null

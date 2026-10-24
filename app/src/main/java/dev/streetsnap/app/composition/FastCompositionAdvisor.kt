@@ -29,6 +29,12 @@ internal data class FastCompositionResult(
      * This is an image-statistic hint, not person detection, and must stay conservative.
      */
     val subjectLooksDistant: Boolean,
+    /**
+     * T73: normalized rectangle of the connected saliency block the crop ranker chased on a
+     * busy backdrop ("where the subject mass sits"). Null on conservative/featureless frames.
+     * Image statistics only, never person/object detection.
+     */
+    val subjectLocus: SubjectLocus? = null,
 )
 
 /**
@@ -41,6 +47,18 @@ internal data class FastCompositionResult(
  * fit. No style gets a hand-tuned prior probability, so labels follow what the frame shows.
  */
 internal object FastCompositionAdvisor {
+    private val DEFAULT_SCALES = listOf(0.68, 0.76, 0.84, 0.92, 1.0)
+
+    // T73 weak-peak subject path (see hasWeakPeak below).
+    private val WEAK_PEAK_SCALES = listOf(0.52, 0.60, 0.68, 0.76, 0.84, 0.92, 1.0)
+    // A 1-3 cell spike on a busy field is as often a chance cluster of darker/lighter
+    // backdrop blocks as a subject; distant 1-2 cell masses keep the separate
+    // detectDistantSubject channel. The weak-peak path serves mid-size subjects only.
+    private const val WEAK_PEAK_MIN_CELLS = 4
+    private const val WEAK_PEAK_WEIGHT_SHARE = 0.25
+    private const val WEAK_PEAK_MAX_CELL_RATIO = 0.40
+    private const val WEAK_PEAK_MIN_COLOR_SHARE = 0.40
+
     fun suggest(width: Int, height: Int, argb: IntArray): FastCompositionResult {
         require(width > 0 && height > 0 && width.toLong() * height == argb.size.toLong())
         val factor = min(1.0, 96.0 / max(width, height))
@@ -69,21 +87,193 @@ internal object FastCompositionAdvisor {
             val contrast = max(0.0, colourDifference(pixels[index], background) - 0.04)
             contrast.pow(1.4) * 0.65 + max(0.0, edge - 0.025) * 0.8
         }
-        val total = signal.sum()
-        if (total / pixels.size < 0.004 || w < 8 || h < 8) {
+        if (signal.sum() / pixels.size < 0.004 || w < 8 || h < 8) {
             return FastCompositionResult(conservativeCrops(medianLuminance), subjectLooksDistant = false)
         }
 
-        val energy = Integral(w, h, signal)
-        val horizontalMoment = Integral(w, h, DoubleArray(signal.size) { signal[it] * (it % w + 0.5) / w })
-        val verticalMoment = Integral(w, h, DoubleArray(signal.size) { signal[it] * (it / w + 0.5) / h })
-        val edgeEnergy = Integral(w, h, edges)
+        // T69 saliency gating against isotropic busy backdrops (brickwork, foliage, sensor
+        // noise). Per-pixel floor subtraction cannot remove them: texture block edges and
+        // per-pixel noise carry edge terms above any flat floor. Averaged on a coarse 6×6
+        // grid they are uniform (cell density ≈ frame mean, ratio ~1) while a real subject
+        // forms a peak (ratio well above 1); each pixel keeps its signal in proportion to its
+        // cell's excess. The SAME subject then drives centroid/moments/retained-energy on
+        // every backdrop, so the suggested crop tightens around it instead of only on white.
+        val probeEnergy = Integral(w, h, signal)
+        // Square cells keyed on the short edge: six rows always, and as many columns as the
+        // aspect ratio requires (9 on a 3:2 frame). A fixed 6x6 grid would draw rectangular
+        // 16x10.7px cells on 96x64 preview frames, lighting whole wide columns around a subject
+        // and pulling the crop centre toward the cell instead of the subject. 96x96 stays 6x6
+        // exactly, so all frozen square-suite metrics are unchanged.
+        val saliencyRows = 6
+        val saliencyCols = max(1, kotlin.math.round(w.toDouble() * saliencyRows / h).toInt())
+        val rawTotal = signal.sum()
+        val meanSignalDensity = rawTotal / pixels.size
+        val cellWeight = DoubleArray(saliencyCols * saliencyRows) { index ->
+            val gx = index % saliencyCols
+            val gy = index / saliencyCols
+            val density = probeEnergy.density(w, h,
+                gx / saliencyCols.toDouble(), gy / saliencyRows.toDouble(),
+                (gx + 1) / saliencyCols.toDouble(), (gy + 1) / saliencyRows.toDouble())
+            ((density / max(1e-9, meanSignalDensity) - 1.15) / 0.60).coerceIn(0.0, 1.0)
+        }
+        val effective = DoubleArray(signal.size) { index ->
+            val gx = ((index % w) * saliencyCols / w).coerceIn(0, saliencyCols - 1)
+            val gy = ((index / w) * saliencyRows / h).coerceIn(0, saliencyRows - 1)
+            signal[index] * cellWeight[gy * saliencyCols + gx]
+        }
+        // Feature detectors keep the RAW statistics (their gates were tuned on them); the
+        // saliency split below only decides what the crop ranker chases. Extracting features
+        // first lets a strong ORGANISED field (even columns, a horizon, a tonal split) keep
+        // the old raw-signal ranking, while an isotropic texture with neither a peak nor an
+        // organised direction abstains instead of inventing rhythm/symmetry.
+        val features = SceneFeatures.extract(w, h, pixels, signal, probeEnergy)
+        // A locatable subject needs a strong coarse peak (max cell weight, not a top-k mean:
+        // a distant 0.10-size subject fills just one 6×6 cell) AND enough of the frame's total
+        // signal inside the peak regions. Pure isotropic texture has random cells nudged up but
+        // keeps almost no energy in them (effRatio ~0.08); an organised field without any peak
+        // (columns, horizons) is rescued by the feature branch below.
+        val peakStrength = cellWeight.maxOrNull() ?: 0.0
+        val effectiveRatio = effective.sum() / max(1e-9, rawTotal)
+        val hasSalientPeak = peakStrength >= 0.60 && effectiveRatio >= 0.20
+        // T73 weak-peak path: a real subject on an ordinary busy backdrop (a crowd, a market
+        // stall, foliage gaps) often tops out between 0.45 and 0.60 because the backdrop lifts
+        // the mean cell density, so the strong gate dropped the frame into conservative crops
+        // and the advice rectangle never tightened. The connected saliency BLOCK must (a) hold
+        // a real share of all fired weight and (b) stay compact — isotropic texture lights most
+        // cells weakly (share stays tiny) or floods them into one block spanning the grid, and
+        // both signatures are rejected here. The pure-texture abstention tests lock that door.
+        val gridCellCount = saliencyCols * saliencyRows
+        val located = SubjectLocator.locate(cellWeight, saliencyCols, saliencyRows)
+        val subjectLocus = located?.let {
+            it.copy(colorShare = blockColorShare(w, h, pixels, edges, background, it))
+        }
+        val hasWeakPeak = !hasSalientPeak &&
+            acceptsWeakPeak(peakStrength, effectiveRatio, subjectLocus, gridCellCount)
+        val peakAccepted = hasSalientPeak || hasWeakPeak
+        // diagonal joins the organised-field list so a one-slope picture keeps ranking on raw
+        // signal exactly as before (its crop geometry is what separates DIAGONAL from
+        // LEADING_LINES); isotropic hash texture has diagonal ~0 and is not rescued.
+        // Rhythm counts as organisation only with a directional carrier (columns/horizon):
+        // an isotropic texture field trips the autocorrelation rhythm gate on its own, and
+        // without the carrier it must abstain, not invent repetition.
+        val rhythmOrganised = features.repetition *
+            maxOf(features.verticalStrength, features.horizontalSplit)
+        val organisedStrength = maxOf(
+            features.verticalStrength, features.horizontalSplit,
+            features.convergence, features.diagonal, features.contrast, rhythmOrganised,
+        )
+        val hasOrganisedField = organisedStrength >= 0.50
+        // Repeated diagonal bands cross every coarse cell on a 3:2 frame (no peak ever forms)
+        // yet still read ~0.45 on the diagonal detector: real directional structure, rescued
+        // at a slightly lower gate. Per-pixel noise tops out around 0.36 and must abstain.
+        val diagonalField = !hasOrganisedField && features.diagonal >= 0.40
+        // Mirror-symmetric facades carry frame-wide geometry; the SYMMETRY seed needs a
+        // near-full crop in the ranked pool, which peak reweighting squeezes out. Isotropic
+        // texture also scores symmetric (~0.86) but holds almost no energy in any cell
+        // (effRatio ~0.15), so concentrated energy is required alongside the symmetry score.
+        // A centred blob also scores symmetric, but its high `centered` reading already
+        // expresses CENTERED on the peak path — the rescue targets symmetric fields WITHOUT
+        // a central mass (one off-axis sign on a facade).
+        val symmetricField = features.symmetry >= 0.85 && effectiveRatio >= 0.50 &&
+            features.centered < 0.30
+        val fieldIsOrganised = hasOrganisedField || diagonalField || symmetricField
+        if (!peakAccepted && !fieldIsOrganised) {
+            return FastCompositionResult(conservativeCrops(medianLuminance), subjectLooksDistant = false)
+        }
+        // An organised field (columns, horizon, tonal split, diagonal/converging lines) runs
+        // through the whole frame, so it keeps ranking on raw signal exactly as before; the
+        // saliency reweighting applies only to peak-type subject scenes on busy backdrops.
+        // T73: a located weak-peak subject is specific evidence (a compact, colour-dominant
+        // block), while a busy backdrop can trip a generic organisation detector (a railing's
+        // rhythm, a facade's columns) — so on weak-peak frames the subject path takes the
+        // whole frame. Strong peaks keep the shipped precedence (organised field wins).
+        val peakTypeFrame = peakAccepted && (hasWeakPeak || !fieldIsOrganised)
+        val ranking = if (peakTypeFrame) effective else signal
+
+        val energy = Integral(w, h, ranking)
+        val horizontalMoment = Integral(w, h, DoubleArray(ranking.size) { ranking[it] * (it % w + 0.5) / w })
+        val verticalMoment = Integral(w, h, DoubleArray(ranking.size) { ranking[it] * (it / w + 0.5) / h })
+        // On peak-type frames cut edges are weighted by the same saliency cells: cutting
+        // empty/zero-weight backdrop must be free on a textured backdrop exactly as it is on
+        // a flat one. With raw edges, a textured field priced every cut at its mean density,
+        // which systematically favoured frame-edge-hugging crops (fewer cut lines) over flat
+        // backdrops — the same subject then flipped between its two thirds placements as the
+        // backdrop changed. Organised fields keep the raw edge image.
+        // Coarse-centroid anchoring, saliency-weighted cut edges, the centre-location
+        // override and the inner-crop tie-break all exist for a subject on a BUSY backdrop;
+        // on a quiet field nearly all energy already sits in the subject cells (effRatio ~1),
+        // so every statistic is the subject itself and the shipped behaviour is kept exactly.
+        // T73: a weak-peak frame is busy by construction (the backdrop is what depressed the
+        // peak), so it always takes the busy-backdrop machinery even when effRatio lands high.
+        val busyBackdrop = peakTypeFrame && (hasWeakPeak || effectiveRatio < 0.85)
+        val saliencyEdges = if (busyBackdrop) {
+            DoubleArray(edges.size) { index ->
+                val gx = ((index % w) * saliencyCols / w).coerceIn(0, saliencyCols - 1)
+                val gy = ((index / w) * saliencyRows / h).coerceIn(0, saliencyRows - 1)
+                edges[index] * cellWeight[gy * saliencyCols + gx]
+            }
+        } else {
+            edges
+        }
+        val edgeEnergy = Integral(w, h, saliencyEdges)
+        val total = ranking.sum()
+        // Cut-edge penalty is density-normalised on the saliency-ranked path: the old raw
+        // sum over totalEdges was diluted to nearly nothing on busy backdrops (every cut
+        // looked cheap), letting centroid-chasing full-frame crops win. Density vs the frame
+        // mean makes a cut through empty space free (~0), uniform texture neutral (~1) and a
+        // real subject edge expensive (well above 1). The organised-field path ranks on raw
+        // signal and keeps the original raw-sum penalty below.
+        val meanEdgeDensity = saliencyEdges.sum() / pixels.size
         val totalEdges = max(1e-9, edges.sum())
-        val centerX = horizontalMoment.sum(0, 0, w, h) / total
-        val centerY = verticalMoment.sum(0, 0, w, h) / total
+        val pixelCenterX = horizontalMoment.sum(0, 0, w, h) / total
+        val pixelCenterY = verticalMoment.sum(0, 0, w, h) / total
+        // On peak-type frames the candidate positions anchor on the COARSE cell centroid rather
+        // than the pixel-weighted one: cells lit by the subject also contain in-cell backdrop
+        // (a 22px subject spans 2-3 square cells), whose residual texture energy skews the
+        // pixel centroid and made the same subject on flat vs textured backdrops pick thirds
+        // positions a fifth of the frame apart. The cell centroid depends only on which cells
+        // fire, so it tracks the subject across backdrops. Organised fields keep the exact
+        // pixel centroid as before.
+        val centerX: Double
+        val centerY: Double
+        var cellCenterX = Double.NaN
+        var cellCenterY = Double.NaN
+        if (busyBackdrop && cellWeight.sum() > 1e-9) {
+            var cellSX = 0.0
+            var cellSY = 0.0
+            var cellSW = 0.0
+            for (k in cellWeight.indices) {
+                val weight = cellWeight[k]
+                cellSX += weight * ((k % saliencyCols) + 0.5) / saliencyCols
+                cellSY += weight * ((k / saliencyCols) + 0.5) / saliencyRows
+                cellSW += weight
+            }
+            cellCenterX = cellSX / cellSW
+            cellCenterY = cellSY / cellSW
+            centerX = cellCenterX
+            centerY = cellCenterY
+        } else {
+            centerX = pixelCenterX
+            centerY = pixelCenterY
+        }
+        // The RAW centered detector is symmetry × centre-cell density; an isotropic busy
+        // backdrop fills every 3×3 cell and reads "centred" even when the subject sits off
+        // axis. On peak-type frames score CENTERED from the saliency peak's own canvas
+        // location instead, so the style does not flip when only the backdrop changes.
+        val styleFeatures = if (busyBackdrop) {
+            val peakCentered =
+                (1 - hypot(cellCenterX - 0.5, cellCenterY - 0.5) / 0.35).coerceIn(0.0, 1.0)
+            SceneFeatures.withCentered(features, peakCentered)
+        } else {
+            features
+        }
         val ranked = mutableListOf<ScoredCrop>()
 
-        for (scale in listOf(0.68, 0.76, 0.84, 0.92, 1.0)) {
+        // T73: weak-peak subjects on busy backdrops are typically small in frame; offer two
+        // tighter scales so the rectangle can close around them. The retained-energy term still
+        // rejects a tight crop that severs the block (its edges are priced at subject density).
+        val scales = if (hasWeakPeak) WEAK_PEAK_SCALES else DEFAULT_SCALES
+        for (scale in scales) {
             fun positions(center: Double): List<Double> =
                 ((0..6).map { (1.0 - scale) * it / 6 } +
                     listOf(1.0 / 3, 0.5, 2.0 / 3).map { (center - scale * it).coerceIn(0.0, 1.0 - scale) }).distinct()
@@ -105,8 +295,30 @@ internal object FastCompositionAdvisor {
                 if (y0 > 0) severedEdges += edgeEnergy.sum(x0, y0 - 1, x1, min(h, y0 + 2))
                 if (y1 < h) severedEdges += edgeEnergy.sum(x0, max(0, y1 - 2), x1, y1 + 1)
                 val concentration = (1.0 - scale) / 0.32
+                // Organised fields keep the shipped raw-sum penalty; subject-on-busy-backdrop
+                // frames use the density-normalised one (see meanEdgeDensity above).
+                val edgePenalty = if (!peakTypeFrame) {
+                    0.22 * severedEdges / totalEdges
+                } else {
+                    val cutLength = 2.0 * (y1 - y0) + 2.0 * (x1 - x0)
+                    val severedDensity = if (cutLength > 0.0) severedEdges / (3.0 * cutLength) else 0.0
+                    val edgeCutRatio = if (meanEdgeDensity > 1e-12) severedDensity / meanEdgeDensity else 0.0
+                    0.15 * edgeCutRatio.coerceAtMost(2.5)
+                }
+                // Deterministic tie-break on busy-backdrop frames only: a subject near a thirds
+                // latitude has two geometrically equal placements (it sits at 1/3 inside a
+                // lowered crop, or 2/3 inside a frame-edge-hugging one). Backdrop energy used
+                // to tip that tie and made the crop flip between backdrops; prefer the crop
+                // that stays inside the frame. Small enough to never override a real signal
+                // difference (the weakest live score term is an order of magnitude larger).
+                val edgeHug = if (busyBackdrop) {
+                    (if (x0 == 0) 1.0 else 0.0) + (if (y0 == 0) 1.0 else 0.0) +
+                        (if (x1 == w) 1.0 else 0.0) + (if (y1 == h) 1.0 else 0.0)
+                } else {
+                    0.0
+                }
                 val score = (0.64 * retained / total + 0.14 * thirds + 0.06 * balance +
-                    0.16 * concentration - 0.22 * severedEdges / totalEdges).coerceIn(0.0, 1.0)
+                    0.16 * concentration - edgePenalty - 0.004 * edgeHug).coerceIn(0.0, 1.0)
                 ranked += ScoredCrop(left, top, scale, score, u, v)
             }
         }
@@ -119,16 +331,69 @@ internal object FastCompositionAdvisor {
             return FastCompositionResult(conservativeCrops(medianLuminance), subjectLooksDistant = false)
         }
 
-        val features = SceneFeatures.extract(w, h, pixels, signal, energy)
-        val enriched = enrichWithStyleSeeds(selected, ranked, features)
+        val enriched = enrichWithStyleSeeds(selected, ranked, styleFeatures)
         val subjectLooksDistant = detectDistantSubject(w, signal, selected.first())
-        val styled = assignStyles(enriched, features).map { (crop, style) ->
+        val styled = assignStyles(enriched, styleFeatures).map { (crop, style) ->
             val move = CompositionActions.plan(
                 crop.rectangle(), style, crop.u.toFloat(), crop.v.toFloat())?.sentence
             CompositionCandidate(crop.rectangle(), crop.score.toFloat(),
-                describe(style, crop, features), true, style, move)
+                describe(style, crop, styleFeatures), true, style, move)
         }
-        return FastCompositionResult(styled, subjectLooksDistant)
+        return FastCompositionResult(styled, subjectLooksDistant,
+            if (peakTypeFrame) subjectLocus else null)
+    }
+
+    /**
+     * T73 weak-peak gate, kept as a pure function so the texture-rejection boundary is
+     * unit-testable without rendering frames. A saturated-but-small subject mass on a busy
+     * field (peak cell strong, only 12-20% of frame signal in the reweighted mass) qualifies;
+     * a chance texture spike (1-3 cells, low weight share, edge-dominated colour share) and a
+     * flood block spanning the grid do not. Strong peaks never reach this path.
+     */
+    internal fun acceptsWeakPeak(
+        peakStrength: Double,
+        effectiveRatio: Double,
+        locus: SubjectLocus?,
+        gridCellCount: Int,
+    ): Boolean {
+        if (locus == null) return false
+        return peakStrength >= SubjectLocus.WEAK_PEAK &&
+            effectiveRatio >= SubjectLocus.WEAK_ENERGY_RATIO &&
+            locus.weightShare >= WEAK_PEAK_WEIGHT_SHARE &&
+            locus.cellCount >= WEAK_PEAK_MIN_CELLS &&
+            locus.cellCount <= (gridCellCount * WEAK_PEAK_MAX_CELL_RATIO).toInt() &&
+            locus.colorShare >= WEAK_PEAK_MIN_COLOR_SHARE
+    }
+
+    /**
+     * Fraction of a located block's per-pixel signal carried by the colour-distance term
+     * (a coherent tonal mass against the median background) rather than internal edges
+     * (T73). Uses the exact two component formulas of the per-pixel signal, so the reading
+     * is on the same scale. A hash-texture hot cell flickers around the median colour and
+     * scores near zero even when its block-edge density saturates the coarse grid.
+     */
+    private fun blockColorShare(
+        w: Int,
+        h: Int,
+        pixels: IntArray,
+        edges: DoubleArray,
+        background: Int,
+        locus: SubjectLocus,
+    ): Double {
+        val x0 = (locus.left * w).roundToInt().coerceIn(0, w - 1)
+        val x1 = (locus.right * w).roundToInt().coerceIn(x0 + 1, w)
+        val y0 = (locus.top * h).roundToInt().coerceIn(0, h - 1)
+        val y1 = (locus.bottom * h).roundToInt().coerceIn(y0 + 1, h)
+        var colorTerm = 0.0
+        var edgeTerm = 0.0
+        for (y in y0 until y1) for (x in x0 until x1) {
+            val index = y * w + x
+            colorTerm += max(0.0, colourDifference(pixels[index], background) - 0.04).pow(1.4)
+            edgeTerm += max(0.0, edges[index] - 0.025)
+        }
+        val colorEnergy = 0.65 * colorTerm
+        val edgeEnergy = 0.8 * edgeTerm
+        return colorEnergy / (colorEnergy + edgeEnergy + 1e-9)
     }
 
     /** A tight inner-grid cell holding a large share of all energy reads as a far, small subject. */
@@ -183,6 +448,8 @@ internal object FastCompositionAdvisor {
         CompositionStyle.REPETITION -> f.repetition
         CompositionStyle.CONTRAST -> f.contrast
         CompositionStyle.CONVERGENCE -> f.convergence
+        // T73: foreground band + mid-band mass + distant structure all active at once.
+        CompositionStyle.DEPTH_LAYERS -> f.threeLayerDepth
         // The cut-edge detector already folds in coverage span, end insets and the
         // opposite-side negative-space gate, so the raw reading is the scene evidence.
         CompositionStyle.EDGE_CUT -> f.cutEdge.max()
@@ -199,6 +466,7 @@ internal object FastCompositionAdvisor {
         CompositionStyle.REPETITION,
         CompositionStyle.CONTRAST,
         CompositionStyle.CONVERGENCE,
+        CompositionStyle.DEPTH_LAYERS,
     )
 
     /**
@@ -218,6 +486,7 @@ internal object FastCompositionAdvisor {
         // geometric centre, not the energy centroid: one off-axis high-contrast object must
         // not decide whether the frame itself sits on the axis of symmetry.
         val centreU = crop.left + scale / 2.0
+        val frameV = crop.top + scale / 2.0
         // Symmetry keeps most of the mirrored structure and centres it; a tight crop that
         // chases one detail destroys the reading.
         val symmetryGeometry = (1 - abs(centreU - 0.5) / 0.25).coerceIn(0.0, 1.0) *
@@ -264,12 +533,19 @@ internal object FastCompositionAdvisor {
                 (1 - abs(v - 0.58) / 0.30).coerceIn(0.0, 1.0),
             CompositionStyle.FRAME to f.frame *
                 (1 - abs(scale - 0.88) / 0.12).coerceIn(0.0, 1.0),
+            // When all three depth bands are active the three-layer reading (T73) is the more
+            // complete description, so the single-foreground claim yields to it deterministically.
             CompositionStyle.FOREGROUND_DEPTH to maxOf(
                 f.foreground[0] * ((scale - 0.80) / 0.12).coerceIn(0.0, 1.0) *
                     ((v - 0.42) / 0.30).coerceIn(0.0, 1.0),
                 f.foreground[1] * ((scale - 0.80) / 0.12).coerceIn(0.0, 1.0) *
                     ((0.58 - v) / 0.30).coerceIn(0.0, 1.0),
-            ),
+            ) * (1.0 - 0.7 * f.threeLayerDepth),
+            // Three readable planes need a wide, vertically centred crop: stepping in or
+            // tilting kills one of the bands.
+            CompositionStyle.DEPTH_LAYERS to f.threeLayerDepth *
+                ((scale - 0.80) / 0.12).coerceIn(0.0, 1.0) *
+                (1 - abs(frameV - 0.5) / 0.30).coerceIn(0.0, 1.0),
             CompositionStyle.NEGATIVE_SPACE to maxOf(
                 f.negSpace[0] * ((0.55 - u) / 0.35).coerceIn(0.0, 1.0),
                 f.negSpace[1] * ((u - 0.45) / 0.35).coerceIn(0.0, 1.0),
@@ -283,9 +559,12 @@ internal object FastCompositionAdvisor {
                 (1.0 - 0.75 * f.edgeCrowd),
             CompositionStyle.SYMMETRY to
                 sceneEvidence(CompositionStyle.SYMMETRY, f) * symmetryGeometry,
+            // T73: with all three depth planes active, "vertical structure" (a railing in
+            // the foreground) is the weaker description and yields to the three-layer reading.
             CompositionStyle.VERTICAL to f.verticalStrength *
                 ((scale - 0.80) / 0.12).coerceIn(0.0, 1.0) *
-                (1 - abs(centreU - 0.5) / 0.30).coerceIn(0.0, 1.0),
+                (1 - abs(centreU - 0.5) / 0.30).coerceIn(0.0, 1.0) *
+                (1.0 - 0.55 * f.threeLayerDepth),
             CompositionStyle.HORIZON to f.horizontalSplit *
                 ((scale - 0.72) / 0.16).coerceIn(0.0, 1.0) * horizonGeometry,
             CompositionStyle.REPETITION to f.repetition *
@@ -374,6 +653,11 @@ internal object FastCompositionAdvisor {
         CompositionStyle.FOREGROUND_DEPTH ->
             if (features.foregroundBottomStrong) "前景层次 · 纳入下方前景与远处主体呼应，画面更有纵深"
             else "前景层次 · 保留上方前景层次，让主体从层次中显露"
+        CompositionStyle.DEPTH_LAYERS ->
+            if (features.foregroundBottomStrong)
+                "三层纵深 · 下方前景、中景主体、上方远景各占一层，稍退后把三层叠进画面"
+            else
+                "三层纵深 · 上方前景、中景主体、远处背景层层递进，站位把三层都收进来"
         CompositionStyle.NEGATIVE_SPACE -> when {
             features.negSpace[0] >= features.negSpace[1] && features.negSpace[0] > 0.0 ->
                 "留白构图 · 保留左侧大片留白，主体更突出、更有呼吸感"
@@ -540,10 +824,38 @@ internal class SceneFeatures private constructor(
     val cutEdge: DoubleArray,
     /** One small mass on a predominantly quiet field (minimalism, not a featureless frame). */
     val minimal: Double,
+    /**
+     * T73 three-band depth reading, indices 0 = bottom (foreground), 1 = middle (subject
+     * band), 2 = top (distant background). [depthBands] are edge-magnitude densities relative
+     * to the frame mean (structure per band); [depthSignal] are colour/edge signal densities
+     * relative to the frame mean (a tonal mass without edges still registers). A uniform sky
+     * band stays near zero on purpose: a sky-over-ground split belongs to HORIZON, not depth.
+     */
+    val depthBands: DoubleArray,
+    val depthSignal: DoubleArray,
+    /** All three bands active at once: 0 unless foreground, mid subject and background coexist. */
+    val threeLayerDepth: Double,
 ) {
     val foregroundBottomStrong: Boolean get() = foreground[0] >= foreground[1]
 
     companion object {
+        /**
+         * Peak-type frames replace the RAW centered reading (symmetry × centre-cell density,
+         * which an isotropic texture fills across the whole frame) with the saliency peak's
+         * own location on the canvas. Everything else is shared verbatim; the backing arrays
+         * are read-only and intentionally aliased.
+         */
+        fun withCentered(source: SceneFeatures, centered: Double): SceneFeatures =
+            SceneFeatures(
+                source.symmetry, source.diagonal, source.slashDominant, source.slopePurity,
+                source.leading, centered, source.scattered, source.frame, source.triangle,
+                source.verticalStrength, source.horizontalSplit, source.horizonY,
+                source.repetition, source.contrast, source.darkShare, source.convergence,
+                source.lateralTexture, source.foreground, source.negSpace, source.edgeCrowd,
+                source.cutEdge, source.minimal, source.depthBands, source.depthSignal,
+                source.threeLayerDepth,
+            )
+
         @Suppress("LongMethod", "ComplexMethod")
         fun extract(w: Int, h: Int, pixels: IntArray, signal: DoubleArray,
             energy: FastCompositionAdvisor.Integral): SceneFeatures {
@@ -878,6 +1190,59 @@ internal class SceneFeatures private constructor(
                     (lowerContent / (meanDensity * 1.1)).coerceIn(0.0, 1.0),
             )
 
+            // T73 three-band depth: near structure at the bottom (railing, flowers, a
+            // shoulder), a content mass in the middle band (the subject plane) and distant
+            // structure at the top (buildings, foliage). Uniform texture fills every band at
+            // the frame mean and the foreground ramp (which needs a clear gain over the mean)
+            // stays zero; an empty sky keeps the background ramp zero, so a sky/ground split
+            // stays with HORIZON. The background is judged against BOTH the frame mean and
+            // the middle band, because a very strong near band (a railing) lifts the frame
+            // mean and would otherwise hide an ordinarily busy distant plane.
+            val fgBottomMag = magEnergy.density(w, h, 0.0, 0.70, 1.0, 1.0)
+            val midMag = magEnergy.density(w, h, 0.0, 0.30, 1.0, 0.70)
+            val bgTopMag = magEnergy.density(w, h, 0.0, 0.0, 1.0, 0.30)
+            val depthBands = doubleArrayOf(
+                fgBottomMag / globalMag, midMag / globalMag, bgTopMag / globalMag,
+            )
+            val depthSignal = doubleArrayOf(
+                sigDensity(0.0, 0.70, 1.0, 1.0) / meanDensity,
+                sigDensity(0.0, 0.30, 1.0, 0.70) / meanDensity,
+                sigDensity(0.0, 0.0, 1.0, 0.30) / meanDensity,
+            )
+            val foregroundLayer = ((fgBottomMag / globalMag - 1.12) / 0.40).coerceIn(0.0, 1.0)
+            // The subject plane is read as a concentrated MASS inside the middle band, not
+            // as band-vs-frame density: a strong foreground (a railing) lifts the frame mean
+            // and would hide an evenly lit subject. Five overlapping 1/3-wide windows scan
+            // the band: a subject standing on a thirds line straddles two fixed thirds, so
+            // fixed columns split its mass in half and under-read it, while a sliding window
+            // wraps a centred OR thirds-placed mass. Even texture lights every window equally
+            // (ratio ~1). The absolute window-density gate rejects a tiny distant speck on
+            // an otherwise empty band: concentration alone can be high when the mean is ~0.
+            val midWindows = DoubleArray(5) { k ->
+                val cx = (k + 1) / 6.0
+                sigDensity(cx - 1.0 / 6, 0.30, cx + 1.0 / 6, 0.70)
+            }
+            val midWinMean = midWindows.average()
+            val midWinMax = midWindows.max()
+            val midConcentration = if (midWinMean > 1e-9) {
+                ((midWinMax / midWinMean - 1.45) / 0.60).coerceIn(0.0, 1.0)
+            } else {
+                0.0
+            }
+            val midSignificance =
+                ((midWinMax / max(1e-9, meanDensity) - 1.15) / 0.45).coerceIn(0.0, 1.0)
+            val middleLayer = midConcentration * midSignificance
+            // Distant structure carries edges; a hazy distant plane carries tonal signal
+            // with weak edges (aerial perspective), accepted at slightly lower confidence.
+            val backgroundLayer = maxOf(
+                ((bgTopMag / globalMag - 0.78) / 0.34).coerceIn(0.0, 1.0),
+                0.8 * ((bgTopMag / max(1e-9, midMag) - 0.55) / 0.30).coerceIn(0.0, 1.0),
+                ((depthSignal[2] - 0.85) / 0.30).coerceIn(0.0, 1.0) *
+                    ((bgTopMag / globalMag - 0.55) / 0.25).coerceIn(0.0, 1.0),
+            )
+            val threeLayerDepth = minOf(foregroundLayer, middleLayer, backgroundLayer) *
+                (1.0 - 0.6 * horizontalSplit)
+
             // Frame: dark or busy border around a content-bearing middle.
             val borderRegions = arrayOf(
                 doubleArrayOf(0.0, 0.0, 0.12, 1.0), doubleArrayOf(0.88, 0.0, 1.0, 1.0),
@@ -1022,7 +1387,7 @@ internal class SceneFeatures private constructor(
             return SceneFeatures(symmetry, diagonal, orientationSign >= 0.0, slopePurity, leading,
                 centered, scattered, frame, triangle, verticalStrength, horizontalSplit, horizonY,
                 repetition, contrast, darkShare, convergence, lateralTexture, foreground, negSpace,
-                edgeCrowd, cutEdge, minimal)
+                edgeCrowd, cutEdge, minimal, depthBands, depthSignal, threeLayerDepth)
         }
     }
 }

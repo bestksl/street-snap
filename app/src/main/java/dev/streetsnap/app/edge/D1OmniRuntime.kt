@@ -43,6 +43,14 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
     private val bosTokenId: Int
     private val hiddenSize: Int
     private val imageTextLength: Int
+    // Real thread budget/EP actually in use, surfaced verbatim to dev diagnostics.
+    private val intraOpThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
+    private var visionUsesXnnpack = false
+    override val runtimeLabel: String by lazy {
+        // Keep in sync with libs/onnxruntime-android-*-arm64.aar; there is no NNAPI EP.
+        val visionDelegate = if (visionUsesXnnpack) " · XNNPACK 视觉塔" else " · CPU 视觉塔（XNNPACK 回退）"
+        "ONNX Runtime CPU · intra-op $intraOpThreads / inter-op 1$visionDelegate"
+    }
     private val lock = Any()
     private val closed = AtomicBoolean(false)
     private val running = AtomicBoolean(false)
@@ -73,27 +81,32 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
         environment = OrtEnvironment.getEnvironment()
         val opened = mutableListOf<OrtSession>()
         try {
-            val intraOpThreads = Runtime.getRuntime().availableProcessors().coerceIn(2, 4)
-            fun open(path: String, useXnnpack: Boolean, threads: Int): OrtSession =
+            // Returns the session paired with whether XNNPACK actually built the graph, so the
+            // CPU-only retry below is observable rather than silently pretending XNNPACK is on.
+            fun open(path: String, useXnnpack: Boolean, threads: Int): Pair<OrtSession, Boolean> =
                 try {
                     OrtSession.SessionOptions().use { options ->
                         if (useXnnpack) options.addXnnpack(mapOf("intra_op_num_threads" to intraOpThreads.toString()))
                         options.setIntraOpNumThreads(threads)
                         options.setInterOpNumThreads(1)
                         options.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                        environment.createSession(path, options)
+                        environment.createSession(path, options) to useXnnpack
                     }
                 } catch (error: Throwable) {
                     // MatMulNBits/GatherBlockQuantized may not be covered by every vendor
                     // build's XNNPACK path; retry CPU-only so a supported graph still loads.
                     if (useXnnpack) open(path, useXnnpack = false, threads = intraOpThreads) else throw error
                 }
-            vision = open(File(installed.directory, installed.plan.visionFile).absolutePath,
-                useXnnpack = true, threads = 1).also { opened += it }
+            open(File(installed.directory, installed.plan.visionFile).absolutePath,
+                useXnnpack = true, threads = 1).also { (session, usedXnnpack) ->
+                    vision = session
+                    visionUsesXnnpack = usedXnnpack
+                    opened += session
+                }
             embeddings = open(File(installed.directory, installed.plan.embeddingFile).absolutePath,
-                useXnnpack = false, threads = intraOpThreads).also { opened += it }
+                useXnnpack = false, threads = intraOpThreads).also { opened += it.first }.first
             decision = open(File(installed.directory, installed.plan.decoderFile).absolutePath,
-                useXnnpack = false, threads = intraOpThreads).also { opened += it }
+                useXnnpack = false, threads = intraOpThreads).also { opened += it.first }.first
             require(vision.inputNames.containsAll(listOf("pixel_values", "pixel_attention_mask", "spatial_shapes"))) {
                 "d1 视觉模型接口不兼容"
             }
@@ -189,6 +202,7 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
     private fun rank(argb: IntArray, options: OrtSession.RunOptions): CropRanking? {
         val startedAt = SystemClock.elapsedRealtime()
         var visionMs = 0L
+        var embeddingsMs = 0L
         var decisionMs = 0L
         var ranking: CropRanking? = null
         val temporary = mutableListOf<OnnxTensor>()
@@ -222,6 +236,7 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
             // 2) Prompt: choice over A/B/C. State stays empty (the image is the whole
             // state, as the image tasks were trained); the criteria-rich v1 wording was
             // rejected by isolated probing on 2026-10-18 and reverted to v0.
+            val embeddingsStarted = SystemClock.elapsedRealtime()
             val encoded = D1Prompt.encode(
                 encode = { text -> tokenizer.encode(text) },
                 idOf = { token -> if (token == "<bos>") bosTokenId else tokenizer.specialId(token) },
@@ -244,6 +259,7 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
                 }
             }
             require(textEmbeddings.size == ids.size * hiddenSize) { "d1 文本嵌入长度不匹配" }
+            embeddingsMs = SystemClock.elapsedRealtime() - embeddingsStarted
 
             // 4) Prefix first, then text; marker positions stay text-relative (the graph
             // slices off prefix_len internally before gathering the markers).
@@ -281,7 +297,13 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
                                         val logits = FloatArray(optionCount).also {
                                             requireNotNull(tensor.floatBuffer).get(it)
                                         }
-                                        ranking = D1Decision.toRanking(logits)
+                                        ranking = D1Decision.toRanking(
+                                            logits,
+                                            visionMs = visionMs,
+                                            embeddingsMs = embeddingsMs,
+                                            decisionMs = decisionMs,
+                                            promptTokens = ids.size,
+                                        )
                                     }
                                 }
                             }
@@ -300,7 +322,8 @@ class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker
         } finally {
             temporary.asReversed().forEach { it.close() }
             log("rank_total_ms=${SystemClock.elapsedRealtime() - startedAt} vision_ms=$visionMs " +
-                "decision_ms=$decisionMs selected=${ranking?.selectedIndex} " +
+                "embeddings_ms=$embeddingsMs decision_ms=$decisionMs selected=${ranking?.selectedIndex} " +
+                "text_tokens=${ranking?.promptTokens ?: -1} " +
                 "prompt=${D1Prompt.CANDIDATE_PROMPT_VERSION}")
         }
     }

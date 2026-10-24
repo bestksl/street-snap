@@ -16,10 +16,11 @@ class ExposureAdviserTest {
     private val healthy = stats(highlights = 0.01, shadows = 0.02)
 
     private fun ExposureAdviser.feed(stats: ExposureStats?, times: Int,
-        evAdjustable: Boolean = true, canLowerEv: Boolean = true, canRaiseEv: Boolean = true): ExposureAdvice? {
+        evAdjustable: Boolean = true, canLowerEv: Boolean = true, canRaiseEv: Boolean = true,
+        diffusionEnabled: Boolean = false): ExposureAdvice? {
         var last: ExposureAdvice? = null
         repeat(times) {
-            last = onFrame(stats, evAdjustable, canLowerEv, canRaiseEv)
+            last = onFrame(stats, evAdjustable, canLowerEv, canRaiseEv, diffusionEnabled)
         }
         return last
     }
@@ -44,6 +45,32 @@ class ExposureAdviserTest {
         assertEquals(ExposureIssue.WIDE_DYNAMIC_RANGE,
             adviser.feed(both, 2, evAdjustable = false)!!.issue)
         assertEquals(0, ExposureIssue.WIDE_DYNAMIC_RANGE.evDirection)
+    }
+
+    @Test fun wideRangeCardHiddenWhileDiffusionAlreadyOn() {
+        val adviser = ExposureAdviser(confirmFrames = 2)
+        // The card says "switch HDF on"; with either diffusion look enabled it has no
+        // remaining action, so it must not fire even after the confirm window.
+        assertNull(adviser.feed(both, 6, diffusionEnabled = true))
+        assertNull(adviser.visibleIssue)
+    }
+
+    @Test fun wideRangeCardFiresAfterDiffusionTurnedOffInSameSession() {
+        val adviser = ExposureAdviser(confirmFrames = 2)
+        // Enabled-but-clipping frames must not consume the once-per-session slot either:
+        // switching diffusion off later still surfaces the suggestion.
+        assertNull(adviser.feed(both, 6, diffusionEnabled = true))
+        assertEquals(ExposureIssue.WIDE_DYNAMIC_RANGE,
+            adviser.feed(both, 2, diffusionEnabled = false)!!.issue)
+    }
+
+    @Test fun singlePoleEvNudgeUnaffectedByDiffusion() {
+        val adviser = ExposureAdviser(confirmFrames = 2)
+        // HDF scatters highlights but does not change exposure; the EV nudge still applies.
+        assertEquals(ExposureIssue.HIGHLIGHTS_CLIPPED,
+            adviser.feed(blown, 2, diffusionEnabled = true)!!.issue)
+        assertEquals(ExposureIssue.SHADOWS_CLIPPED,
+            adviser.feed(crushed, 2, diffusionEnabled = true)!!.issue)
     }
 
     @Test fun thresholdEdgesDoNotFire() {

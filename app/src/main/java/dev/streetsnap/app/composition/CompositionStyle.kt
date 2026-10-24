@@ -20,6 +20,8 @@ internal enum class CompositionStyle(val title: String) {
     HORIZON_SPLIT("水平腰斩"),
     FRAME("框式构图"),
     FOREGROUND_DEPTH("前景层次"),
+    /** Three readable depth bands — foreground, a mid-ground subject, distant background (T73). */
+    DEPTH_LAYERS("三层纵深"),
     REPETITION("节奏构图"),
     CONTRAST("明暗对比"),
     NEGATIVE_SPACE("留白构图"),

@@ -11,17 +11,18 @@ import dev.streetsnap.app.composition.CandidateContactSheet
 import dev.streetsnap.app.composition.CandidateSelectionGate
 import dev.streetsnap.app.composition.CompositionCandidate
 import dev.streetsnap.app.composition.FastCompositionAdvisor
+import dev.streetsnap.app.composition.FocusDisturbanceGate
 import dev.streetsnap.app.composition.SceneReading
 import dev.streetsnap.app.composition.SceneReadings
 import dev.streetsnap.app.edge.CompositionSuggestion
 import dev.streetsnap.app.edge.CropRanking
 import dev.streetsnap.app.edge.CandidateRanker
 import dev.streetsnap.app.edge.D1OmniRuntime
+import dev.streetsnap.app.edge.EdgeModelEntry
 import dev.streetsnap.app.edge.EdgeModelCatalog
-import dev.streetsnap.app.edge.EdgeModelKind
 import dev.streetsnap.app.edge.EdgeModelStore
+import dev.streetsnap.app.edge.InferenceStats
 import dev.streetsnap.app.edge.ModelDownloadPlan
-import dev.streetsnap.app.edge.SmolVlmRuntime
 import dev.streetsnap.camera.CompositionFrameSource
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -45,6 +46,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
+/**
+ * How long a scene-mismatched overlay may linger while the next analysed frame republishes
+ * advice (T40 anti-flicker). Two analysis frames at 250 ms fit inside, so continuous camera
+ * motion never blanks the guide; a real scene cut with no fresh advice drops it within this.
+ */
+private const val OVERLAY_CLEAR_GRACE_MS = 600L
+
 internal enum class ModelInstallStatus { CHECKING, ABSENT, PREPARING, AVAILABLE, DOWNLOADING, INSTALLED, REMOVING, FAILED }
 internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAILED }
 internal enum class CompositionOutcome { RETURNED, NO_RESULT, UNSTABLE_SELECTION, TIMED_OUT, SCENE_CHANGED, FAILED }
@@ -65,6 +73,18 @@ internal data class CompositionUiState(
     val adviceOrigin: AdviceOrigin? = null,
     val fastAdviceMs: Long? = null,
     val modelSelectionMs: Long? = null,
+    /** Wall-clock durations of the most recent ranking passes (success/timeout/failure), for dev diagnostics. */
+    val inferenceHistoryMs: List<Long> = emptyList(),
+    /** Per-pass timings of the latest FIRST ranking pass (vision/tokenize+embeddings/decision), real measurements. */
+    val lastVisionMs: Long? = null,
+    val lastEmbeddingsMs: Long? = null,
+    val lastDecisionMs: Long? = null,
+    /** Actual BPE token count of the fixed choice prompt on the latest ranking pass. */
+    val lastPromptTokens: Int? = null,
+    /** Wall-clock spent constructing the three native ORT sessions (pre-bound warm-up). */
+    val runtimeReadyMs: Long? = null,
+    /** Real execution backend label (EP/threads) reported by the active ranker. */
+    val runtimeLabel: String? = null,
     val isRequestRunning: Boolean = false,
 )
 internal data class CompositionOverlay(
@@ -122,7 +142,25 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
      */
     private val _alignmentPulse = MutableStateFlow(0L)
     val alignmentPulse = _alignmentPulse.asStateFlow()
+    /**
+     * Persistent "framing is aligned right now" phase (T40). Unlike [alignmentPulse] (a one-
+     * shot edge used for the buzz/check animation), this stays true while the achieved framing
+     * holds so the UI can keep a visible "ready to shoot" state instead of flashing for 1.3 s.
+     */
+    private val _alignmentConfirmed = MutableStateFlow(false)
+    val alignmentConfirmed = _alignmentConfirmed.asStateFlow()
     private val alignmentTracker = AlignmentTracker()
+    /**
+     * T40 anti-flicker: while the user moves with the guide, every analysed frame briefly
+     * reads as a scene mismatch. The old code nulled the overlay on each mismatch and the
+     * same frame republished it after the advisor pass, so a null gap reached the screen
+     * ~4x/s and the guide visibly winked. The visual clear waits one grace window; the
+     * republished advice of any later frame cancels it. The alignment state machine still
+     * resets immediately, so no praise can be earned across a genuine scene break.
+     */
+    private var overlayClearGrace: Job? = null
+    /** T76: tap-to-focus briefly suppresses scene-change clears (AF hunt is not a new scene). */
+    private val focusGate = FocusDisturbanceGate(now = { SystemClock.elapsedRealtime() })
     /** Coarse colour/light statistics from the latest rule-analysis frame; consumed later by look/exposure advice. */
     private val _sceneReading = MutableStateFlow<SceneReading?>(null)
     val sceneReading = _sceneReading.asStateFlow()
@@ -175,10 +213,22 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         if (equivalentMm > 0) focalLengthMm = equivalentMm
     }
 
+    /**
+     * The user explicitly asked for AF (tap / long-press lock). The motor hunt and AE
+     * re-convergence briefly perturb the scene signature, so scene-change clears are held
+     * back for one focus grace window (T76); a real pan afterwards clears advice as usual.
+     */
+    fun notifyFocusEngaged() {
+        focusGate.engage()
+    }
+
     fun invalidateView() {
         resultGate.invalidate(SystemClock.elapsedRealtime())
         _source.value?.invalidateFrames()
+        overlayClearGrace?.cancel()
+        overlayClearGrace = null
         alignmentTracker.reset()
+        _alignmentConfirmed.value = false
         _overlay.value = null
         _sceneReading.value = null
         expiryJob?.cancel()
@@ -214,10 +264,18 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         // Feed the alignment state machine before the same-guidance early return:
         // a static near-final scene keeps republishing the same overlay every frame,
         // and those frames are exactly the confirmation streak we count.
-        val framed = AlignmentFeedback.isFramed(crop, candidate.style)
-        if (alignmentTracker.observe(framed, candidate.action != null) == AlignmentEvent.ALIGNED) {
+        // T40: alignment reads "the asked-for move is satisfied" (centred, near-full frame),
+        // not "crop == full frame within 3 %", which the 0.92 band could never reach.
+        val guidance = AlignmentFeedback.guidanceFor(crop, candidate.style)
+        val event = alignmentTracker.observe(guidance)
+        _alignmentConfirmed.value = alignmentTracker.isConfirmedAligned
+        if (event == AlignmentEvent.ALIGNED) {
             _alignmentPulse.value = now
         }
+        // Fresh advice for the current view supersedes any pending scene-mismatch clear,
+        // so moving with the guide glides the overlay instead of blinking it each frame.
+        overlayClearGrace?.cancel()
+        overlayClearGrace = null
         val egg = easterEgg(subjectLooksDistant, origin, draw, now)
         if (egg != null) lastEasterEggAtMs = now
         // Rule analysis now runs several times per second. On a static scene the same
@@ -325,7 +383,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         invalidateView()
         _state.update { it.copy(install = ModelInstallStatus.REMOVING, status = AssistStatus.UNINSTALLED,
             statusText = null, isRequestRunning = false, inferenceStartedAtMs = null,
-            lastOutcome = null, lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
+            lastOutcome = null, lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null,
+            lastVisionMs = null, lastEmbeddingsMs = null, lastDecisionMs = null,
+            lastPromptTokens = null, runtimeReadyMs = null, runtimeLabel = null) }
         installJob = scope.launch {
             try {
                 // Runtime cleanup holds this lock until native sessions and any active inference end.
@@ -367,7 +427,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
             else -> AssistStatus.LOADING
         }, statusText = null, lastInferenceMs = null, fastAdviceMs = null, modelSelectionMs = null,
             isRequestRunning = false, sampleIntervalMs = 3_000L, inferenceBudgetMs = 30_000L,
-            inferenceStartedAtMs = null, lastOutcome = null) }
+            inferenceStartedAtMs = null, lastOutcome = null,
+            // Per-session values: the runtime is rebuilt (and no ranking has run) on restart.
+            lastVisionMs = null, lastEmbeddingsMs = null, lastDecisionMs = null,
+            lastPromptTokens = null, runtimeReadyMs = null, runtimeLabel = null) }
         sessionJob = scope.launch(Dispatchers.Main.immediate) {
             sessionMutex.withLock {
                 val sessionScope = CoroutineScope(currentCoroutineContext())
@@ -377,6 +440,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 var runtime: CandidateRanker? = null
                 var frames: CompositionFrameSource? = null
                 var modelJob: Job? = null
+                var runtimeJob: Job? = null
                 var rankingDisabled = false
                 var nextModelAtMs = 0L
                 var lastRankedScene: (() -> Boolean)? = null
@@ -385,15 +449,33 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 var selectedCandidate: CompositionCandidate? = null
 
                 fun clearVisibleAdvice() {
+                    overlayClearGrace?.cancel()
+                    overlayClearGrace = null
                     visibleScene = null
                     selectedScene = null
                     selectedCandidate = null
                     alignmentTracker.reset()
+                    _alignmentConfirmed.value = false
                     _overlay.value = null
                     _sceneReading.value = null
                     expiryJob?.cancel()
                     _state.update { it.copy(adviceOrigin = null, lastOutcome = null,
                         lastInferenceMs = null, modelSelectionMs = null, fastAdviceMs = null) }
+                }
+
+                // Scene mismatch while the camera is moving: reset praise immediately, but let
+                // the overlay survive [OVERLAY_CLEAR_GRACE_MS] — the same frame's advisor pass
+                // usually republishes via showAdvice, which cancels the grace. Only a genuine
+                // cut with no fresh guidance lets the timer clear the rectangle (T40).
+                fun requestGracefulClear() {
+                    alignmentTracker.reset()
+                    _alignmentConfirmed.value = false
+                    if (overlayClearGrace?.isActive != true) {
+                        overlayClearGrace = sessionScope.launch(Dispatchers.Main.immediate) {
+                            delay(OVERLAY_CLEAR_GRACE_MS)
+                            if (isCurrentSession()) clearVisibleAdvice()
+                        }
+                    }
                 }
 
                 // Runs as a session child on Main. Only independent sheets survive
@@ -452,8 +534,32 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         val next = if (completed == null) cadence.recordTimeout(elapsed)
                             else cadence.recordCompleted(elapsed, selected != null)
                         nextModelAtMs = now + next.cooldownMs
+                        // Process-lifetime counters for the dev panel. A stale-but-finished job
+                        // (SCENE_CHANGED) really consumed one forward, so it counts as abstained.
+                        InferenceStats.recordRanking(
+                            outcome = when (outcome) {
+                                CompositionOutcome.RETURNED -> InferenceStats.RankOutcome.ADOPTED
+                                CompositionOutcome.TIMED_OUT -> InferenceStats.RankOutcome.TIMED_OUT
+                                CompositionOutcome.FAILED -> InferenceStats.RankOutcome.FAILED
+                                CompositionOutcome.NO_RESULT,
+                                CompositionOutcome.UNSTABLE_SELECTION,
+                                CompositionOutcome.SCENE_CHANGED -> InferenceStats.RankOutcome.ABSTAINED
+                            },
+                            elapsedMs = elapsed,
+                            visionMs = firstRanking?.visionMs,
+                            embeddingsMs = firstRanking?.embeddingsMs,
+                            decisionMs = firstRanking?.decisionMs,
+                            promptTokens = firstRanking?.promptTokens,
+                            nowMs = now,
+                        )
                         _state.update { it.copy(lastInferenceMs = elapsed.takeIf { fresh }, modelSelectionMs = elapsed.takeIf { fresh },
                             lastOutcome = outcome, inferenceStartedAtMs = null,
+                            inferenceHistoryMs = (it.inferenceHistoryMs + elapsed).takeLast(10),
+                            // A timeout carries no pass breakdown; keep the previous real one visible.
+                            lastVisionMs = firstRanking?.visionMs?.takeIf { ms -> ms >= 0L } ?: it.lastVisionMs,
+                            lastEmbeddingsMs = firstRanking?.embeddingsMs?.takeIf { ms -> ms >= 0L } ?: it.lastEmbeddingsMs,
+                            lastDecisionMs = firstRanking?.decisionMs?.takeIf { ms -> ms >= 0L } ?: it.lastDecisionMs,
+                            lastPromptTokens = firstRanking?.promptTokens?.takeIf { tokens -> tokens >= 0 } ?: it.lastPromptTokens,
                             sampleIntervalMs = next.cooldownMs, inferenceBudgetMs = budgetMs,
                             statusText = when (outcome) {
                                 CompositionOutcome.RETURNED -> "AI 已从候选中选择构图"
@@ -481,8 +587,15 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         if (isCurrentSession()) {
                             rankingDisabled = true
                             val elapsed = started?.let { SystemClock.elapsedRealtime() - it }
+                            InferenceStats.recordRanking(
+                                InferenceStats.RankOutcome.FAILED, elapsed,
+                                firstRanking?.visionMs, firstRanking?.embeddingsMs,
+                                firstRanking?.decisionMs, firstRanking?.promptTokens,
+                                SystemClock.elapsedRealtime())
                             _state.update { it.copy(lastOutcome = CompositionOutcome.FAILED,
                                 lastInferenceMs = elapsed, modelSelectionMs = elapsed,
+                                inferenceHistoryMs = if (elapsed != null)
+                                    (it.inferenceHistoryMs + elapsed).takeLast(10) else it.inferenceHistoryMs,
                                 statusText = "模型比较暂不可用，保留图像构图建议") }
                             Log.w("StreetSnapComposition", "model_outcome=FAILED elapsed_ms=$elapsed", error)
                         }
@@ -496,9 +609,77 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     }
                 }
 
+                // PERF-1: build the native ONNX sessions off the camera critical path. Asset
+                // import, the store lookup and the three ALL_OPT session constructions run on
+                // IO, launched before ImageAnalysis is bound, so graph optimization overlaps
+                // CameraX binding and the first analysed frame instead of serialising behind
+                // them. The session still owns the published [runtime] and closes it exactly
+                // once in finally; a runtime built for a stale generation closes itself.
+                suspend fun ensureRuntimePublished(model: EdgeModelEntry) {
+                    var created: CandidateRanker? = null
+                    try {
+                        val installed = withContext(Dispatchers.IO) {
+                            if (!modelPreferences.getBoolean("bundled-disabled-${model.id}", false)) {
+                                store.installBundled(model) ?: store.installed(model)
+                            } else {
+                                store.installed(model)
+                            }
+                        }
+                        if (!isCurrentSession()) {
+                            withContext(Dispatchers.IO) { runCatching { created?.close() } }
+                            return
+                        }
+                        if (_state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
+                                ModelInstallStatus.REMOVING, ModelInstallStatus.AVAILABLE)) {
+                            _state.update { it.copy(install = if (installed == null) ModelInstallStatus.ABSENT else ModelInstallStatus.INSTALLED,
+                                bytes = installed?.plan?.totalBytes ?: it.bytes) }
+                        }
+                        if (installed == null) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                            _state.update { it.copy(statusText = "图像构图建议可用，可安装模型进行择优") }
+                            return
+                        }
+                        val builtAt = SystemClock.elapsedRealtime()
+                        val engine = withContext(Dispatchers.IO) {
+                            D1OmniRuntime(installed)
+                        }.also { created = it }
+                        val readyMs = SystemClock.elapsedRealtime() - builtAt
+                        Log.i("StreetSnapComposition",
+                            "model_runtime_ready_ms=$readyMs model=${model.id}")
+                        if (!isCurrentSession()) {
+                            withContext(Dispatchers.IO) { runCatching { engine.close() } }
+                            return
+                        }
+                        runtime = engine
+                        runtimeReady.complete(engine)
+                        _state.update { it.copy(runtimeReadyMs = readyMs, runtimeLabel = engine.runtimeLabel) }
+                    } catch (cancelled: CancellationException) {
+                        withContext(Dispatchers.IO) { runCatching { created?.close() } }
+                        throw cancelled
+                    } catch (error: Exception) {
+                        if (isCurrentSession()) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                            _state.update { it.copy(statusText = "本地模型暂不可用，图像构图建议仍可使用") }
+                            Log.w("StreetSnapComposition", "model_load_failed", error)
+                        }
+                    }
+                }
+
                 try {
                     val model = requireNotNull(EdgeModelCatalog.find(config.id))
                     val analysisWanted = config.foreground && (config.enabled || config.lookAdvice)
+                    // Start warming native sessions before the frame source is bound. An
+                    // image-only restart (after model removal) has no model to load.
+                    if (config.enabled && config.foreground) {
+                        if (imageOnly) {
+                            rankingDisabled = true
+                            runtimeReady.complete(null)
+                        } else {
+                            runtimeJob = sessionScope.launch(Dispatchers.Main.immediate) { ensureRuntimePublished(model) }
+                        }
+                    }
                     if (analysisWanted) {
                         // Rule advice runs in single-digit milliseconds, so the cadence is
                         // set by the frame clocks, not by compute: ~4 advice refreshes/s.
@@ -512,8 +693,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             },
                             onSceneChanged = {
                                 scope.launch(Dispatchers.Main.immediate) {
-                                    if (isCurrentSession()) {
-                                        clearVisibleAdvice()
+                                    // T76: the AF/AE hunt right after a focus tap is not a real
+                                    // scene change — keep the rectangle, arrow and look card.
+                                    if (isCurrentSession() && !focusGate.isDisturbing()) {
+                                        requestGracefulClear()
                                         sceneChangeListener?.invoke()
                                     }
                                 }
@@ -532,7 +715,8 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                 val frameMode = withContext(Dispatchers.Main.immediate) {
                                     if (!isCurrentSession() || !frame.isCurrent ||
                                         !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
-                                    if (visibleScene?.invoke() == false) clearVisibleAdvice()
+                                    if (visibleScene?.invoke() == false && !focusGate.isDisturbing())
+                                        requestGracefulClear()
                                     val requested = manualRequestPending
                                     if (!requested && !config.realtime && !config.lookAdvice) return@withContext null
                                     if (requested) {
@@ -647,42 +831,10 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         runtimeReady.complete(null)
                         awaitCancellation()
                     }
-                    try {
-                        val installed = withContext(Dispatchers.IO) {
-                            if (imageOnly) null
-                            else if (config.enabled && config.foreground &&
-                                !modelPreferences.getBoolean("bundled-disabled-${model.id}", false)) {
-                                store.installBundled(model) ?: store.installed(model)
-                            } else store.installed(model)
-                        }
-                        currentCoroutineContext().ensureActive()
-                        if (!imageOnly && _state.value.install !in listOf(ModelInstallStatus.PREPARING, ModelInstallStatus.DOWNLOADING,
-                                ModelInstallStatus.REMOVING, ModelInstallStatus.AVAILABLE)) {
-                            _state.update { it.copy(install = if (installed == null) ModelInstallStatus.ABSENT else ModelInstallStatus.INSTALLED,
-                                bytes = installed?.plan?.totalBytes ?: it.bytes) }
-                        }
-                        if (!config.enabled || !config.foreground) return@withLock
-                        if (installed == null) {
-                            rankingDisabled = true
-                            runtimeReady.complete(null)
-                            _state.update { it.copy(statusText = "图像构图建议可用，可安装模型进行择优") }
-                        } else {
-                            withContext(Dispatchers.IO) {
-                                runtime = when (model.kind) {
-                                    EdgeModelKind.D1_OMNI_CHOICE -> D1OmniRuntime(installed)
-                                    EdgeModelKind.SMOLVLM_CHOICE -> SmolVlmRuntime(installed)
-                                }
-                            }
-                            currentCoroutineContext().ensureActive()
-                            runtimeReady.complete(requireNotNull(runtime))
-                        }
-                    } catch (cancelled: CancellationException) { throw cancelled }
-                    catch (error: Exception) {
-                        rankingDisabled = true
-                        runtimeReady.complete(null)
-                        _state.update { it.copy(statusText = "本地模型暂不可用，图像构图建议仍可使用") }
-                        Log.w("StreetSnapComposition", "model_load_failed", error)
-                    }
+                    // enabled + foreground: runtimeJob has already warmed and published the
+                    // runtime off the critical path. A non-foreground session binds neither
+                    // frames nor a model and ends here instead of parking.
+                    if (!config.foreground) return@withLock
                     awaitCancellation()
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (error: Throwable) {
@@ -695,6 +847,9 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                     runtimeReady.complete(null)
                     withContext(NonCancellable) {
                         modelJob?.cancelAndJoin()
+                        // Join before closing: either the engine was published to [runtime]
+                        // (closed below) or a stale/cancelled build closed it itself.
+                        runtimeJob?.cancelAndJoin()
                         withContext(Dispatchers.IO) {
                             inferenceMutex.withLock { runCatching { runtime?.close() } }
                         }

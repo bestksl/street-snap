@@ -20,8 +20,13 @@ import android.util.Size
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ViewPort
@@ -66,6 +71,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -100,6 +106,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -127,6 +134,16 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.streetsnap.app.composition.CropTrial
+import dev.streetsnap.app.composition.GuideDirection
+import dev.streetsnap.app.composition.MoveGuide
+import dev.streetsnap.app.composition.MoveGuides
+import dev.streetsnap.app.composition.arrowAngleDeg
+import dev.streetsnap.app.composition.arrowLabel
+import dev.streetsnap.app.edge.InferenceStats
+import dev.streetsnap.app.edge.PoseModelCatalog
+import dev.streetsnap.app.pose.PoseModelStatus
+import dev.streetsnap.app.pose.PoseOverlayLayer
+import dev.streetsnap.app.pose.PoseUiState
 import dev.streetsnap.camera.CameraCapabilities
 import dev.streetsnap.camera.CameraState
 import dev.streetsnap.camera.ExposureMode
@@ -428,24 +445,41 @@ private fun Viewfinder(
     val histogram by model.histogram.collectAsStateWithLifecycle()
     val lookAdviceCard by model.lookAdviceCard.collectAsStateWithLifecycle()
     val exposureAdviceCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
-    // T34: one-shot "framing achieved" pulse. The green stroke/check is always shown;
-    // the buzz is opt-in and there is deliberately no sound path.
+    // T40: the one-shot pulse only fires the (opt-in) buzz; visibility is driven by the
+    // persistent confirmed phase, which stays true while the achieved framing holds and
+    // clears as soon as it drifts away — the goal no longer flashes for 1.3 s and vanishes.
     val alignmentPulse by model.composition.alignmentPulse.collectAsStateWithLifecycle()
-    var alignedVisible by remember { mutableStateOf(false) }
+    val alignmentConfirmed by model.composition.alignmentConfirmed.collectAsStateWithLifecycle()
+    // T72 pose assistant: the frame source is non-null only while live recognition is bound.
+    val poseState by model.pose.state.collectAsStateWithLifecycle()
+    val poseSource by model.pose.source.collectAsStateWithLifecycle()
+    // T40: the success sentence announces the achieved phase once, then the card fades out and
+    // only the persistent green frame + check remain (iPhone level/Mola restraint: a quiet
+    // steady-state, no permanent banner). Drifting out dismisses the timer and fades the card
+    // straight back in with the next move sentence.
+    var alignmentCardDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(alignmentConfirmed) {
+        if (alignmentConfirmed) {
+            alignmentCardDismissed = false
+            delay(2_200L)
+            alignmentCardDismissed = true
+        } else {
+            alignmentCardDismissed = false
+        }
+    }
+    val adviceCardAlpha by animateFloatAsState(
+        if (alignmentConfirmed && alignmentCardDismissed) 0f else 1f,
+        animationSpec = tween(320, easing = FastOutSlowInEasing), label = "adviceCardAlpha")
     val vibrator = remember(context) { context.getSystemService(Vibrator::class.java) }
     LaunchedEffect(alignmentPulse) {
-        if (alignmentPulse > 0L) {
-            alignedVisible = true
-            if (settings.alignmentHapticEnabled) {
-                @Suppress("MissingPermission") // VIBRATE is a normal permission, granted at install.
-                vibrator?.vibrate(VibrationEffect.createOneShot(20L, 60))
-            }
-            delay(1_300L)
-            alignedVisible = false
+        if (alignmentPulse > 0L && settings.alignmentHapticEnabled) {
+            @Suppress("MissingPermission") // VIBRATE is a normal permission, granted at install.
+            vibrator?.vibrate(VibrationEffect.createOneShot(20L, 60))
         }
     }
     val osdMode = settings.viewfinderOsd
-    val meteringWanted = osdMode != ViewfinderOsd.OFF || settings.exposureAdviceEnabled
+    val histogramWanted = ViewfinderOsd.showsHistogram(osdMode)
+    val meteringWanted = histogramWanted || settings.exposureAdviceEnabled
     val hasSize = width > 0 && height > 0
     var focusPoint by remember { mutableStateOf<Offset?>(null) }
     val manualFocus = state.settings.focusDistanceDiopters != null
@@ -459,7 +493,7 @@ private fun Viewfinder(
     }
     // The adjustment panel only changes the preview's size, not its 4:3 framing.
     // PreviewView handles those resizes without tearing down the camera session.
-    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource, meteringWanted) {
+    LaunchedEffect(preview, lifecycle, retry, hasSize, landscape, compositionSource, poseSource, meteringWanted) {
         if (!hasSize) return@LaunchedEffect
         model.onBindingStarted()
         bindingError = null
@@ -474,6 +508,7 @@ private fun Viewfinder(
                 .setScaleType(ViewPort.FILL_CENTER).build()
             model.camera.bind(lifecycle, preview.surfaceProvider, model.colors.previewEffect(model::onPreviewError), viewPort, rotation,
                 compositionFrames = compositionSource,
+                poseFrames = poseSource,
                 lumaMeter = if (meteringWanted) model.lumaMeter else null)
             model.onCameraBound()
         } catch (error: Exception) {
@@ -563,9 +598,13 @@ private fun Viewfinder(
                     val levelColor = if (abs(roll) < 1.5f) Color(0xFFE2FF79) else Color.White.copy(alpha = .78f)
                     drawLine(levelColor, pivot - delta, pivot + delta, 2.dp.toPx())
                 }
-                if (meteringWanted) histogram?.let { counts ->
-                    val panelWidth = 118.dp.toPx()
-                    val panelHeight = 48.dp.toPx()
+                // Small corner histogram window (Lightroom/ProShot convention): a quiet
+                // 100x42 translucent panel tucked under the top-right pills. The numeric
+                // exposure readout moved to the always-on shoulder strip above the shutter,
+                // so this never grows into a wide card covering the frame.
+                if (histogramWanted) histogram?.let { counts ->
+                    val panelWidth = 100.dp.toPx()
+                    val panelHeight = 42.dp.toPx()
                     val margin = 10.dp.toPx()
                     // Below the top-right composition/realtime/AF pills.
                     val panelLeft = size.width - panelWidth - margin
@@ -601,50 +640,73 @@ private fun Viewfinder(
                     drawRect(color, Offset(x - radius, y - radius),
                         androidx.compose.ui.geometry.Size(radius * 2, radius * 2), style = Stroke(1.5.dp.toPx()))
                 }
+                // T77: the HAL's own face-tracking rectangle (largest face, portrait-normalized
+                // sensor coordinates). The 3A library drives face/eye AF by itself; this thin
+                // box only shows which face it follows and it disappears under manual focus.
+                // FILL_CENTER viewport crop is not compensated yet — treat placement as
+                // loaded-only until verified on real devices.
+                state.liveFaces?.primary?.let { face ->
+                    val left = face.left.coerceIn(0f, 1f) * size.width
+                    val top = face.top.coerceIn(0f, 1f) * size.height
+                    val boxWidth = (face.right - face.left).coerceAtLeast(0f) * size.width
+                    val boxHeight = (face.bottom - face.top).coerceAtLeast(0f) * size.height
+                    drawRect(
+                        Color.White.copy(alpha = .5f),
+                        Offset(left, top),
+                        androidx.compose.ui.geometry.Size(boxWidth, boxHeight),
+                        style = Stroke(1.dp.toPx()),
+                    )
+                }
                 // While the T35 trial zoom fills the screen the guide rectangle and shade
                 // are the whole viewfinder, so hide them instead of masking the preview.
-                if (activeTrial == null) compositionOverlay?.let { overlay ->
+                if (activeTrial == null) {
                     // Reading the animated values here (inside the draw scope) means
                     // animation ticks only redraw this canvas, not recompose the screen.
+                    // Geometry, origin and alpha come from the smooth state rather than the
+                    // overlay itself, so the guide can cross-fade for ~180 ms after a scene
+                    // change / expiry instead of winking out (T40 anti-flicker pass).
                     val crop = smoothCrop.crop
-                    if (crop != null) {
+                    val guideAlpha = smoothCrop.alpha.value
+                    if (crop != null && guideAlpha > 0f) {
                     val left = (crop.left.coerceIn(0f, 1f) * size.width)
                     val top = (crop.top.coerceIn(0f, 1f) * size.height)
                     val right = (crop.right.coerceIn(0f, 1f) * size.width)
                     val bottom = (crop.bottom.coerceIn(0f, 1f) * size.height)
                     if (right > left && bottom > top) {
                         val tint = when {
-                            alignedVisible -> Color(0xFF54C97E)
-                            overlay.origin == AdviceOrigin.MODEL_SELECTION -> Color(0xFFE2FF79)
+                            alignmentConfirmed -> Color(0xFF54C97E)
+                            smoothCrop.snappedOrigin == AdviceOrigin.MODEL_SELECTION -> Color(0xFFE2FF79)
                             else -> Color(0xFFB7E3F6)
                         }
-                        val shade = Color.Black.copy(alpha = .26f)
+                        // Once the framing is achieved the guide stops dimming the picture;
+                        // the thin green frame is enough while the user takes the shot.
+                        val shade = Color.Black.copy(alpha = (if (alignmentConfirmed) .10f else .26f) * guideAlpha)
                         drawRect(shade, size = androidx.compose.ui.geometry.Size(size.width, top))
                         drawRect(shade, Offset(0f, bottom), androidx.compose.ui.geometry.Size(size.width, size.height - bottom))
                         drawRect(shade, Offset(0f, top), androidx.compose.ui.geometry.Size(left, bottom - top))
                         drawRect(shade, Offset(right, top), androidx.compose.ui.geometry.Size(size.width - right, bottom - top))
-                        drawRect(tint.copy(alpha = .95f), Offset(left, top),
+                        drawRect(tint.copy(alpha = (if (alignmentConfirmed) .9f else .95f) * guideAlpha), Offset(left, top),
                             androidx.compose.ui.geometry.Size(right - left, bottom - top),
-                            style = Stroke(if (alignedVisible) 3.dp.toPx() else 2.dp.toPx()))
+                            style = Stroke(if (alignmentConfirmed) 3.dp.toPx() else 2.dp.toPx()))
                         for (i in 1..2) {
                             val x = left + (right - left) * i / 3f
                             val y = top + (bottom - top) * i / 3f
-                            drawLine(tint.copy(alpha = .40f), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
-                            drawLine(tint.copy(alpha = .40f), Offset(left, y), Offset(right, y), .75.dp.toPx())
+                            drawLine(tint.copy(alpha = (if (alignmentConfirmed) .26f else .40f) * guideAlpha), Offset(x, top), Offset(x, bottom), .75.dp.toPx())
+                            drawLine(tint.copy(alpha = (if (alignmentConfirmed) .26f else .40f) * guideAlpha), Offset(left, y), Offset(right, y), .75.dp.toPx())
                         }
-                        if (alignedVisible) {
-                            // Brief confirmation mark inside the guide's top-right corner (T34).
+                        if (alignmentConfirmed) {
+                            // Persistent confirmation mark for as long as the framing holds (T40).
                             val mark = minOf(26.dp.toPx(), (right - left) / 5f, (bottom - top) / 5f)
                             // Inside the bottom-right corner: the advice card lives bottom-left
                             // and the top-right can be covered by the optional histogram card.
                             val center = Offset(right - mark * 1.35f, bottom - mark * 1.35f)
-                            drawCircle(Color.Black.copy(alpha = .40f), mark * .95f, center)
+                            drawCircle(Color.Black.copy(alpha = .40f * guideAlpha), mark * .95f, center)
                             val checkStroke = 2.5.dp.toPx()
                             val p0 = Offset(center.x - mark * .45f, center.y + mark * .05f)
                             val p1 = Offset(center.x - mark * .12f, center.y + mark * .38f)
                             val p2 = Offset(center.x + mark * .48f, center.y - mark * .35f)
-                            drawLine(tint, p0, p1, checkStroke, cap = StrokeCap.Round)
-                            drawLine(tint, p1, p2, checkStroke, cap = StrokeCap.Round)
+                            drawLine(tint.copy(alpha = guideAlpha), p0, p1, checkStroke, cap = StrokeCap.Round)
+                            drawLine(tint.copy(alpha = guideAlpha), p1, p2, checkStroke, cap = StrokeCap.Round)
                         }
                     }
                     }
@@ -663,6 +725,11 @@ private fun Viewfinder(
                 // Single quiet corner entry: off -> histogram -> histogram + exposure readout -> off.
                 OsdCycleButton(osdMode, model::cycleViewfinderOsd)
                 Spacer(Modifier.weight(1f))
+                OverlayPill(
+                    label = "姿势",
+                    enabled = true, description = "姿势助手开关",
+                    selected = settings.poseAssistantEnabled,
+                    onClick = { model.setPoseAssistantEnabled(!settings.poseAssistantEnabled) })
                 OverlayPill(
                     label = if (!compositionState.isRequestRunning) "构图" else "分析中",
                     enabled = state.isReady && !compositionState.isRequestRunning,
@@ -693,25 +760,24 @@ private fun Viewfinder(
                     })
             }
             // Persistent HDF toggle, stacked under the OSD corner button; the right column
-            // hosts the histogram/readout card.
+            // hosts only the optional small histogram window.
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
-            // Clipped-highlight/shadow hint under the HDF button it may point at; text-only.
-            exposureAdviceCard?.let { card ->
+            // Clipped-highlight/shadow hint. In framed portrait it lives in the black control
+            // band just above the shoulder strip (see ViewfinderOverlayBar) so it never covers
+            // the viewfinder; only the floating landscape path keeps the in-frame anchor.
+            if (!framed) exposureAdviceCard?.let { card ->
                 ExposureAdviceCardView(card, model::dismissExposureAdvice,
                     Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 100.dp))
             }
             // In framed portrait the film badge and look suggestion live in the nameplate
             // row (outside the picture), so they float in-frame only on landscape paths and
-            // when the nameplate is hidden. There they must step below whichever OSD card
-            // is showing (OFF: beside HDF, HISTOGRAM: under it, PARAMS: lowest).
+            // when the nameplate is hidden. The right column holds at most the small
+            // histogram window now (the numeric readout moved to the shoulder strip), so
+            // the badge has one stable slot: under the histogram or on the top row.
             if (!framed || nameplateHidden) {
                 val badgeTop by animateDpAsState(
-                    when (osdMode) {
-                        ViewfinderOsd.HISTOGRAM -> 106.dp
-                        ViewfinderOsd.PARAMS -> 180.dp
-                        else -> 52.dp
-                    }, label = "filmBadgeTop")
+                    if (histogramWanted) 102.dp else 52.dp, label = "filmBadgeTop")
                 val badgePreset = settings.colorRecipe().preset
                 val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
                     ?: badgePreset.displayName
@@ -727,30 +793,14 @@ private fun Viewfinder(
                         Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 56.dp))
                 }
             }
-            // DSLR-style readout under the histogram. Every value is reported by the
-            // camera: automatic slots read AUTO rather than a guessed number, aperture is
-            // shown only when the device actually reports a fixed one (most phones do not).
-            if (osdMode == ViewfinderOsd.PARAMS) {
-                val caps = state.capabilities
-                val capture = state.settings
-                val ev = capture.exposureCompensationIndex * (caps?.exposureCompensationStepEv ?: 0.0)
-                Column(Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = 106.dp).width(118.dp)
-                    .background(Color.Black.copy(alpha = .42f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 8.dp, vertical = 5.dp)) {
-                    OsdReadoutRow(capture.exposureMode.label,
-                        if (capture.exposureMode == ExposureMode.MANUAL) "EV —" else "EV %+.1f".format(ev))
-                    OsdReadoutRow("快门", capture.exposureTimeNs?.let(::shutterLabel) ?: "AUTO")
-                    OsdReadoutRow("ISO", capture.iso?.toString() ?: "AUTO")
-                    caps?.fixedAperture?.let { aperture ->
-                        OsdReadoutRow("光圈", "f/%.1f".format(aperture))
-                    }
-                }
-            }
+            // The DSLR-style numeric readout (mode/aperture/shutter/ISO/EV) is now the
+            // always-on shoulder strip above the shutter, where it never covers the picture.
             // Advice card sits above the floating shutter/focal bar (clearance computed above).
             // Compact by design: capped width, tight padding, single-line supporting rows so
             // it never covers more than a corner of the frame (user feedback, 2026-10-19).
             if (settings.compositionEnabled) {
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
+                    .graphicsLayer { alpha = adviceCardAlpha }
                     .widthIn(max = 208.dp)
                     .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp)
                     // T35: long-press the card to preview the suggested framing; releasing restores.
@@ -773,7 +823,13 @@ private fun Viewfinder(
                             }
                         }
                     }) {
-                    compositionOverlay?.suggestion?.let { s ->
+                    if (alignmentConfirmed) {
+                        // T40 closed loop: once the asked-for move is satisfied, the card stops
+                        // issuing instructions and states the achieved phase for as long as it
+                        // holds; drifting out of the band returns the move sentence automatically.
+                        Text("构图到位 · 可以拍了", color = Color(0xFF54C97E), fontSize = 11.sp,
+                            lineHeight = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                    } else compositionOverlay?.suggestion?.let { s ->
                         // T33: the executable move is the headline; terminology ("三分构图 · …")
                         // stays as the supporting line. Styles whose copy is already a move
                         // carry actionText = null and keep their single-line rendering.
@@ -789,11 +845,11 @@ private fun Viewfinder(
                                 lineHeight = 14.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
                         }
                     }
-                    compositionOverlay?.easterEgg?.let {
+                    if (!alignmentConfirmed) compositionOverlay?.easterEgg?.let {
                         Text(it, Modifier.padding(top = 1.dp), color = Color(0xFFE2FF79),
                             fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
-                    Text(compositionTimingLabel(compositionState), Modifier.padding(top = 1.dp),
+                    if (!alignmentConfirmed) Text(compositionTimingLabel(compositionState), Modifier.padding(top = 1.dp),
                         color = Color.White.copy(alpha = .72f), fontSize = 9.sp, maxLines = 1,
                         overflow = TextOverflow.Ellipsis)
                 }
@@ -806,6 +862,23 @@ private fun Viewfinder(
             }
             focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter).padding(bottom = floatingClearance + 8.dp),
                 color = Color.White, fontSize = 12.sp) }
+            // Bottom-right movement arrow: a glanceable "which way do I nudge the camera"
+            // cue derived from the same geometry/dead zones as the advice card sentence.
+            // Hidden in the green aligned phase and during the long-press trial zoom.
+            val moveGuide = if (!alignmentConfirmed && activeTrial == null)
+                suggestedBox?.let(MoveGuides::fromCrop) else null
+            val arrowAlpha by animateFloatAsState(
+                if (moveGuide != null) 1f else 0f,
+                animationSpec = tween(180, easing = FastOutSlowInEasing), label = "moveArrowAlpha")
+            if (arrowAlpha > 0.01f) {
+                MoveGuideIndicator(moveGuide, arrowAlpha,
+                    Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = floatingClearance))
+            }
+            // T72 pose assistant. Hidden during the long-press trial zoom like the pill row.
+            if (settings.poseAssistantEnabled && activeTrial == null) {
+                PoseOverlayLayer(poseState, settings.alignmentHapticEnabled, model::nextPose,
+                    Modifier.fillMaxSize())
+            }
         }
         val error = bindingError ?: previewError ?: state.error
         if (error != null) {
@@ -873,12 +946,8 @@ private fun OverlayPill(
 /** Top-left corner entry for the viewfinder OSD cycle; quiet when off, primary-tinted while showing. */
 @Composable
 private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
-    val active = mode != ViewfinderOsd.OFF
-    val description = when (mode) {
-        ViewfinderOsd.HISTOGRAM -> "正在显示直方图，点按追加拍摄参数"
-        ViewfinderOsd.PARAMS -> "正在显示直方图与拍摄参数，点按关闭取景信息"
-        else -> "显示曝光直方图"
-    }
+    val active = ViewfinderOsd.showsHistogram(mode)
+    val description = if (active) "正在显示直方图，点按关闭取景信息" else "显示曝光直方图"
     val tint = if (active) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
     Box(Modifier.size(38.dp).clip(CircleShape)
         .background(if (active) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
@@ -900,12 +969,32 @@ private fun OsdCycleButton(mode: String, onCycle: () -> Unit) {
     }
 }
 
+/** Tiny three-bar "analysis" mark: reads as an instrument readout, not a promo dot. */
+@Composable
+private fun AnalysisGlyph(modifier: Modifier = Modifier, tint: Color = Color.White.copy(alpha = .72f)) {
+    Canvas(modifier) {
+        val w = size.width
+        val h = size.height
+        val bar = w * .18f
+        val heights = listOf(h * .45f, h * .9f, h * .62f)
+        val xs = listOf(w * .12f, w * .41f, w * .70f)
+        for (i in 0..2) {
+            drawRoundRect(
+                tint,
+                Offset(xs[i], h - heights[i]),
+                androidx.compose.ui.geometry.Size(bar, heights[i]),
+                androidx.compose.ui.geometry.CornerRadius(bar * .5f, bar * .5f),
+            )
+        }
+    }
+}
+
 /**
- * Compact nameplate form of the realtime look suggestion (T30 card redesigned 2026-10-19):
- * a single small capsule sharing the top nameplate row with the film badge, instead of a
- * card floating over the picture. Suggesting state: the whole label area previews the look
- * and a separate × dismisses. Trying state: only Revert/Keep remain. The reason text stays
- * available through semantics so the visual form can be one quiet line.
+ * Compact nameplate form of the realtime look suggestion. Deliberately styled as a system
+ * analysis readout — hairline outline, cool glyph, neutral text actions, no accent CTA
+ * colour — so it never reads as an in-viewfinder promotion (user feedback, 2026-10-19).
+ * Suggesting state: the label area previews the look, × dismisses. Trying state: only
+ * Revert/Keep remain; the reason stays available through semantics.
  */
 @Composable
 private fun NameplateLookChip(
@@ -918,35 +1007,40 @@ private fun NameplateLookChip(
 ) {
     Row(
         modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Color.Black.copy(alpha = .62f))
+            .height(30.dp)
+            .clip(RoundedCornerShape(15.dp))
+            .background(Color.Black.copy(alpha = .42f))
+            .border(1.dp, Color.White.copy(alpha = .18f), RoundedCornerShape(15.dp))
             .then(if (card.trying) Modifier else
                 Modifier.clickable(role = Role.Button, onClick = onTry)
-                    .semantics { contentDescription = "影调建议：${card.label}，${card.reason}，点按试用" })
-            .padding(start = 9.dp, end = 2.dp),
+                    .semantics { contentDescription = "AI 影调建议：${card.label}，${card.reason}，点按试用" })
+            .padding(start = 9.dp, end = 4.dp),
         verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(7.dp).clip(RoundedCornerShape(4.dp)).background(Color(0xFFE2FF79)))
-        Spacer(Modifier.width(6.dp))
-        // The row only has room for the Chinese name; built-in labels carry a code prefix
-        // ("NC · 经典负片") that the chip drops. The trying state shares the row with two
-        // text actions, so it falls back to the short code ("NC") to keep both on screen.
-        // Semantics keep the full label.
+        // System-notification pattern: the whole chip IS the primary action (tap to try /
+        // tap to keep), and the only inline control is the dismiss/exit affordance. A
+        // separate coloured "试用" CTA both read as an ad banner and overflowed the 412dp
+        // nameplate row, crushing itself to a few pixels (2026-10-19).
+        if (!card.trying) {
+            AnalysisGlyph(Modifier.size(13.dp, 11.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        // Built-in labels carry a code prefix ("NC · 经典负片") the chip drops; the trying
+        // state shares the row with two text actions and falls back to the short code.
         val shortLabel = card.label.substringAfter(" · ")
         val chipLabel = if (card.trying && " · " in card.label)
-            "已试用 · " + card.label.substringBefore(" · ")
-        else (if (card.trying) "已试用 · " else "适合 · ") + shortLabel
+            "试用中 · " + card.label.substringBefore(" · ")
+        else (if (card.trying) "试用中 · " else "AI 建议 · ") + shortLabel
         Text(
             chipLabel,
-            Modifier.widthIn(max = if (card.trying) 104.dp else 150.dp),
-            color = Color.White.copy(alpha = .92f), fontSize = 12.sp,
+            Modifier.then(if (card.trying) Modifier.padding(end = 4.dp) else Modifier)
+                .widthIn(max = if (card.trying) 92.dp else 108.dp),
+            color = Color.White.copy(alpha = .9f), fontSize = 11.sp,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
         if (card.trying) {
             NameplateChipAction("还原", onRevert)
             NameplateChipAction("保留", onKeep, emphasized = true)
         } else {
             NameplateChipAction("×", onDismiss, description = "忽略此建议")
-            NameplateChipAction("试用", onTry, emphasized = true, description = "试用 ${card.label}")
         }
     }
 }
@@ -958,12 +1052,16 @@ private fun NameplateChipAction(
     emphasized: Boolean = false,
     description: String? = null,
 ) {
+    // Quiet hierarchy through alpha and a faint fill on the primary action — never the
+    // brand yellow, which made the suggestion look like a banner advertisement.
     TextButton(onClick = onClick,
-        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
-        modifier = Modifier.height(32.dp)
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+        modifier = Modifier.height(30.dp)
+            .then(if (emphasized)
+                Modifier.background(Color.White.copy(alpha = .14f), RoundedCornerShape(11.dp)) else Modifier)
             .semantics { if (description != null) contentDescription = description }) {
-        Text(label, fontSize = 12.sp,
-            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+        Text(label, fontSize = 11.sp,
+            color = if (emphasized) Color.White.copy(alpha = .95f) else Color.White.copy(alpha = .6f))
     }
 }
 
@@ -990,7 +1088,7 @@ private fun LookAdviceCardView(
             .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         Text(
-            (if (card.trying) "已试用 · " else "现在适合 · ") + card.label,
+            (if (card.trying) "试用中 · " else "AI 建议 · ") + card.label,
             color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
             maxLines = 1, overflow = TextOverflow.Ellipsis)
         Text(card.reason, Modifier.padding(top = 3.dp),
@@ -1016,11 +1114,15 @@ private fun LookAdviceAction(
     emphasized: Boolean = false,
     description: String? = null,
 ) {
+    // Neutral actions only: the primary one gets a faint fill instead of brand yellow.
     TextButton(onClick = onClick,
         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-        modifier = Modifier.heightIn(min = 36.dp).semantics { if (description != null) contentDescription = description }) {
+        modifier = Modifier.heightIn(min = 36.dp)
+            .then(if (emphasized)
+                Modifier.background(Color.White.copy(alpha = .14f), RoundedCornerShape(14.dp)) else Modifier)
+            .semantics { if (description != null) contentDescription = description }) {
         Text(label, fontSize = 12.sp,
-            color = if (emphasized) Color(0xFFE2FF79) else Color.White.copy(alpha = .85f))
+            color = if (emphasized) Color.White.copy(alpha = .95f) else Color.White.copy(alpha = .6f))
     }
 }
 
@@ -1061,16 +1163,63 @@ private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifie
     }
 }
 
-/** One labelled, reported-by-camera value in the OSD readout; never a fabricated number. */
+/**
+ * Bottom-right animated nudge answering "which way do I move?". Purely informational
+ * (not clickable), driven by the same geometry as the advice-card sentence
+ * ([MoveGuides]). The chevron endlessly slides a few dp toward its own direction so
+ * the cue reads as motion even in a static room. [guide] may be null while [alpha]
+ * is still fading out; the last direction then keeps rendering through the fade.
+ */
 @Composable
-private fun OsdReadoutRow(label: String, value: String) {
-    Row(Modifier.fillMaxWidth().padding(vertical = 1.dp),
-        horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, color = Color.White.copy(alpha = .55f), fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace, maxLines = 1)
-        Text(value, color = Color.White.copy(alpha = .92f), fontSize = 10.sp,
-            fontFamily = FontFamily.Monospace, maxLines = 1)
+private fun MoveGuideIndicator(guide: MoveGuide?, alpha: Float, modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "moveArrow")
+    val progress by transition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            tween(760, easing = FastOutSlowInEasing), RepeatMode.Reverse),
+        label = "moveArrowDrift")
+    val direction = guide?.direction
+    // T76: larger disc, darker backing, brighter/thicker chevrons and a longer slide so the
+    // nudge reads at a glance over busy pictures.
+    Box(modifier.size(46.dp).clip(CircleShape)
+        .background(Color.Black.copy(alpha = .50f * alpha))
+        .semantics {
+            if (direction != null) contentDescription = "移动方向提示：${direction.arrowLabel}"
+        }) {
+        val arrowColor = Color.White.copy(alpha = (.75f + .25f * progress) * alpha)
+        when {
+            direction == null -> Unit // fade-out tail only
+            direction == GuideDirection.FORWARD -> {
+                // Two small chevrons converging: step closer.
+                Canvas(Modifier.fillMaxSize().graphicsLayer {
+                    rotationZ = 90f
+                    translationY = density * (-5.2.dp.value + 3.4.dp.value * progress)
+                }) { drawGuideChevron(arrowColor, halfWidth = 3.0.dp.toPx(), halfHeight = 4.4.dp.toPx(),
+                    strokeWidth = 2.8.dp.toPx()) }
+                Canvas(Modifier.fillMaxSize().graphicsLayer {
+                    rotationZ = -90f
+                    translationY = density * (5.2.dp.value - 3.4.dp.value * progress)
+                }) { drawGuideChevron(arrowColor, halfWidth = 3.0.dp.toPx(), halfHeight = 4.4.dp.toPx(),
+                    strokeWidth = 2.8.dp.toPx()) }
+            }
+            else -> Box(Modifier.fillMaxSize().graphicsLayer { rotationZ = direction.arrowAngleDeg }) {
+                Canvas(Modifier.fillMaxSize().graphicsLayer {
+                    translationX = density * (-3.dp.value + 6.dp.value * progress)
+                }) {
+                    drawGuideChevron(arrowColor, halfWidth = 4.6.dp.toPx(), halfHeight = 7.2.dp.toPx(),
+                        strokeWidth = 3.2.dp.toPx())
+                }
+            }
+        }
     }
+}
+
+/** A round-capped ">" centred in the canvas, [halfWidth] back from the tip. */
+private fun DrawScope.drawGuideChevron(color: Color, halfWidth: Float, halfHeight: Float, strokeWidth: Float) {
+    val cx = size.width / 2f
+    val cy = size.height / 2f
+    drawLine(color, Offset(cx - halfWidth, cy - halfHeight), Offset(cx, cy), strokeWidth, cap = StrokeCap.Round)
+    drawLine(color, Offset(cx, cy), Offset(cx - halfWidth, cy + halfHeight), strokeWidth, cap = StrokeCap.Round)
 }
 
 /**
@@ -1148,6 +1297,9 @@ private fun ViewfinderOverlayBar(
     val exposureMode = state.settings.exposureMode
     val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
     val wbName = state.settings.whiteBalance.takeIf { it != WhiteBalanceMode.AUTO }?.displayName
+    // T74: in framed portrait the exposure hint shares the black band with the shoulder strip
+    // (second collector of the same StateFlow); the landscape floating path renders it in-frame.
+    val exposureCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
 
     // Only *manual overrides that can ruin a shot* get a persistent chip (Halide Mark III
     // pattern): non-auto WB, diffusion, MF, S/M exposure, EV. Tap jumps to the section,
@@ -1182,6 +1334,15 @@ private fun ViewfinderOverlayBar(
         // one block, so on tall 20:9 screens the slack splits above/below it instead of
         // opening a void between the focal row and the shutter (T22).
         if (framed) Spacer(Modifier.weight(1f))
+        // T74: the clipped-highlight/shadow hint belongs to the meter strip, so it sits
+        // directly above it in the black band — never over the 3:4 picture.
+        if (framed) exposureCard?.let { card ->
+            ExposureAdviceCardView(card, model::dismissExposureAdvice,
+                Modifier.padding(bottom = 4.dp))
+        }
+        // Always-on DSLR shoulder strip: live P/S meter values, mode and EV popups.
+        ExposureShoulderStrip(state, model,
+            Modifier.padding(bottom = if (framed) 5.dp else 4.dp))
         // Active manual overrides: visible tappable reminders that jump to the section.
         if (overrides.isNotEmpty()) {
             Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = if (framed) 3.dp else 4.dp)
@@ -1239,17 +1400,176 @@ private fun ViewfinderOverlayBar(
                 .semantics { contentDescription = "打开控制面板" },
                 horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                 Text("调整", fontWeight = FontWeight.Bold, color = Color.White, maxLines = 1)
-                Text(when (exposureMode) {
-                        ExposureMode.MANUAL -> "M · ISO ${state.settings.iso ?: "—"}"
-                        ExposureMode.SHUTTER_PRIORITY -> "S · ${shutterLabel(state.settings.exposureTimeNs ?: 8_000_000L)}"
-                        ExposureMode.PROGRAM -> "P · %+.1f EV".format(ev)
-                    },
-                    fontFamily = FontFamily.Monospace, fontSize = 10.sp,
-                    color = Color.White.copy(alpha = .72f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Live mode/shutter/ISO/EV live on the shoulder strip above, so the gateway
+                // stays a clean labelled button instead of carrying a compressed readout.
+                Text("参数", fontSize = 10.sp, color = Color.White.copy(alpha = .72f), maxLines = 1)
             }
         }
         // Counterweight to the leading spacer: keeps the whole control group centred.
         if (framed) Spacer(Modifier.weight(1f))
+    }
+}
+
+/**
+ * DSLR-style shoulder readout directly above the shutter: mode / fixed aperture / shutter /
+ * ISO / EV on one quiet monospace strip. In P and S the shutter and ISO are the camera's
+ * ACTUAL live values from CaptureResult — never an "AUTO" placeholder, never a guessed
+ * number; in M they are the dials. The mode letter and EV open small popups anchored on the
+ * strip, so no extra control ever floats over the picture. Aperture appears only on devices
+ * that actually report one. The green pip marks values driven by live metering.
+ */
+@Composable
+private fun ExposureShoulderStrip(
+    state: CameraState,
+    model: CameraViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val caps = state.capabilities
+    val capture = state.settings
+    val mode = capture.exposureMode
+    val live = state.liveExposure
+    val shutterNs = if (mode == ExposureMode.MANUAL) capture.exposureTimeNs else live?.exposureTimeNs
+    val iso = if (mode == ExposureMode.MANUAL) capture.iso else live?.iso
+    val liveFresh = mode != ExposureMode.MANUAL && live != null &&
+        (live.iso != null || live.exposureTimeNs != null)
+    val ev = capture.exposureCompensationIndex * (caps?.exposureCompensationStepEv ?: 0.0)
+    val modes = caps?.exposureModes ?: listOf(ExposureMode.PROGRAM)
+
+    Row(modifier.clip(RoundedCornerShape(18.dp)).background(Color.Black.copy(alpha = .42f))
+        .horizontalScroll(rememberScrollState())
+        .semantics(mergeDescendants = true) {}
+        .padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        ExposureModeChip(mode, modes, enabled = state.isReady && modes.size > 1, onSelect = model::setExposureMode)
+        caps?.fixedAperture?.let { aperture ->
+            ShoulderText("f/%.1f".format(aperture), description = "固定光圈")
+        }
+        ShoulderText(shutterNs?.let(::shutterLabel) ?: "—", strong = true,
+            description = if (liveFresh) "实时快门速度" else "快门速度")
+        ShoulderText(iso?.let { "ISO $it" } ?: "—", strong = true,
+            description = if (liveFresh) "实时感光度" else "感光度")
+        if (liveFresh) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(Color(0xFF54C97E))
+                .semantics { contentDescription = "实时测光读数" })
+        }
+        ExposureEvChip(
+            ev = ev,
+            manual = mode == ExposureMode.MANUAL,
+            enabled = state.isReady && mode != ExposureMode.MANUAL &&
+                (caps?.let { it.exposureCompensationMin < it.exposureCompensationMax } == true),
+            evIndex = capture.exposureCompensationIndex,
+            evMin = caps?.exposureCompensationMin ?: 0,
+            evMax = caps?.exposureCompensationMax ?: 0,
+            onChange = model::setExposure,
+        )
+    }
+}
+
+@Composable
+private fun ShoulderText(value: String, strong: Boolean = false, description: String) {
+    Text(value, color = Color.White.copy(alpha = if (strong) .95f else .72f),
+        fontSize = 11.sp, fontFamily = FontFamily.Monospace, maxLines = 1,
+        fontWeight = if (strong) FontWeight.SemiBold else FontWeight.Normal,
+        modifier = Modifier.semantics { contentDescription = description })
+}
+
+/** Mode letter with a P/S/M popup (A never appears: phone apertures are fixed). */
+@Composable
+private fun ExposureModeChip(
+    mode: ExposureMode,
+    modes: List<ExposureMode>,
+    enabled: Boolean,
+    onSelect: (ExposureMode) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val modeHint = when (mode) {
+        ExposureMode.PROGRAM -> "P 档：快门、ISO 自动"
+        ExposureMode.SHUTTER_PRIORITY -> "S 档：设定快门，ISO 自动"
+        ExposureMode.MANUAL -> "M 档：手动快门、ISO"
+    }
+    Box {
+        Row(Modifier.clip(RoundedCornerShape(12.dp))
+            .clickable(enabled = enabled, role = Role.DropdownList) { expanded = true }
+            .semantics {
+                contentDescription = "拍摄档位，$modeHint"
+                this.selected = true
+            }.padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(mode.label, color = Color.White.copy(alpha = if (enabled) .95f else .8f),
+                fontSize = 12.sp, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, maxLines = 1)
+            if (enabled) Text("▾", color = Color.White.copy(alpha = .6f), fontSize = 9.sp, maxLines = 1)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            modes.forEach { candidate ->
+                val hint = when (candidate) {
+                    ExposureMode.PROGRAM -> "快门、ISO 自动"
+                    ExposureMode.SHUTTER_PRIORITY -> "设定快门，ISO 自动"
+                    ExposureMode.MANUAL -> "手动快门、ISO"
+                }
+                Row(Modifier.fillMaxWidth().clickable(role = Role.Button) {
+                    expanded = false
+                    onSelect(candidate)
+                }.padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(candidate.label, fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        color = if (candidate == mode) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface)
+                    Text(hint, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+}
+
+/** EV readout that pops a small compensation scale anchored to the strip (never over the frame). */
+@Composable
+private fun ExposureEvChip(
+    ev: Double,
+    manual: Boolean,
+    enabled: Boolean,
+    evIndex: Int,
+    evMin: Int,
+    evMax: Int,
+    onChange: (Int) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    // At zero the strip shows just "EV"; a non-zero compensation reads as EV +0.3 etc.
+    val label = when {
+        manual -> "EV —"
+        kotlin.math.abs(ev) > 0.001 -> "EV %+.1f".format(ev)
+        else -> "EV"
+    }
+    Box {
+        Text(label, color = Color.White.copy(alpha = if (enabled) .95f else .55f),
+            fontSize = 11.sp, fontFamily = FontFamily.Monospace,
+            fontWeight = if (kotlin.math.abs(ev) > 0.001) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            modifier = Modifier.clip(RoundedCornerShape(10.dp))
+                .clickable(enabled = enabled, role = Role.DropdownList) { expanded = true }
+                .semantics {
+                    contentDescription = if (manual) "手动档不适用曝光补偿"
+                    else "曝光补偿，当前 ${if (kotlin.math.abs(ev) > 0.001) "%+.1f EV".format(ev) else "0 EV"}"
+                }.padding(horizontal = 4.dp, vertical = 2.dp))
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            Column(Modifier.width(236.dp).padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("曝光补偿", Modifier.weight(1f), fontSize = 13.sp)
+                    Text("%+.1f EV".format(ev), fontFamily = FontFamily.Monospace, fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold)
+                }
+                Slider(value = evIndex.toFloat(),
+                    onValueChange = { onChange(it.roundToInt()) },
+                    valueRange = evMin.toFloat()..evMax.toFloat(),
+                    steps = (evMax - evMin - 1).coerceAtLeast(0))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = { onChange(0) }, enabled = evIndex != 0) { Text("归零") }
+                }
+            }
+        }
     }
 }
 
@@ -1364,6 +1684,8 @@ private fun ShootingControls(
                     color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
+        // Same live shoulder readout as the phone capture screen (mode/aperture/shutter/ISO/EV).
+        ExposureShoulderStrip(state, model, Modifier.fillMaxWidth().padding(vertical = 2.dp))
         if (focalHint != null) Text(focalHint, Modifier.fillMaxWidth().padding(start = 4.dp, bottom = 4.dp),
             style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         if (adjustmentTab != AdjustmentTab.LOOK) {
@@ -1415,13 +1737,7 @@ private fun ShootingControls(
                 Text(if (adjustmentTab == null) "ADJ" else "收起", fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     color = if (adjustmentTab != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface)
-                val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
-                Text(when (state.settings.exposureMode) {
-                    ExposureMode.MANUAL -> "M · ISO ${state.settings.iso}"
-                    ExposureMode.SHUTTER_PRIORITY -> "S · ${shutterLabel(state.settings.exposureTimeNs ?: 8_000_000L)}"
-                    ExposureMode.PROGRAM -> "P · %+.1f EV".format(ev)
-                },
-                    fontFamily = FontFamily.Monospace, fontSize = 10.sp,
+                Text("参数", fontSize = 10.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
@@ -1733,6 +2049,7 @@ private fun StepButton(text: String, description: String, enabled: Boolean, onCl
 private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model: CameraViewModel,
     openMascotPicker: () -> Unit, compositionState: CompositionUiState) {
     val controlsRestored by model.controlsRestored.collectAsStateWithLifecycle()
+    val poseState by model.pose.state.collectAsStateWithLifecycle()
     val capabilities = state.capabilities
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text("拍摄参数", Modifier.weight(1f), style = MaterialTheme.typography.titleSmall)
@@ -1826,13 +2143,83 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)
     }
-    CompositionAssistantControls(compositionState, settings, model)
+    CompositionAssistantControls(compositionState, settings, model, state)
+    PoseAssistantControls(poseState, settings, model)
     Text("参数自动记忆。音量键可直接拍照。", Modifier.padding(vertical = 10.dp),
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
 
 @Composable
-private fun CompositionAssistantControls(state: CompositionUiState, settings: AppSettings, model: CameraViewModel) {
+private fun PoseAssistantControls(
+    state: PoseUiState,
+    settings: AppSettings,
+    model: CameraViewModel,
+) {
+    HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+    Text("姿势助手 · 实验性", style = MaterialTheme.typography.titleSmall)
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("火柴人姿势引导", style = MaterialTheme.typography.bodyMedium)
+            Text(when (state.modelStatus) {
+                PoseModelStatus.INSTALLED -> "实时识别已就绪 · 白骨架贴合人体，琥珀色小人示范目标姿势"
+                PoseModelStatus.DOWNLOADING -> "正在下载实时识别模型…"
+                PoseModelStatus.FAILED -> "实时识别模型不可用 · 当前为演示模式"
+                PoseModelStatus.CHECKING -> "正在检查模型…"
+                PoseModelStatus.ABSENT -> "未装模型时为演示模式：只浏览姿势，不读取画面"
+            }, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        Switch(settings.poseAssistantEnabled, { model.setPoseAssistantEnabled(it) },
+            modifier = Modifier.semantics { contentDescription = "姿势助手开关" })
+    }
+    Text("对准一个人，白骨架会贴合 ta 的身体；琥珀色小人指出手、腰、头该怎么摆，底部小字告诉你差在哪里。摆对保持两秒自动换下一个姿势。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    when (state.modelStatus) {
+        PoseModelStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
+        PoseModelStatus.ABSENT -> {
+            Text("实时识别模型：${formatBytes(PoseModelCatalog.lite.bytes)} · 仅下载到本机，不随 App 打包，可随时删除",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = model::installPoseModel,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("下载实时识别模型（${formatBytes(PoseModelCatalog.lite.bytes)}）")
+            }
+        }
+        PoseModelStatus.DOWNLOADING -> {
+            val total = state.totalBytes.coerceAtLeast(1L)
+            val progress = (state.downloadedBytes.toFloat() / total).coerceIn(0f, 1f)
+            androidx.compose.material3.LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("下载 ${formatBytes(state.downloadedBytes)} / ${formatBytes(total)}", Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelSmall)
+                TextButton(onClick = model::cancelPoseInstall) { Text("取消") }
+            }
+        }
+        PoseModelStatus.INSTALLED -> {
+            Text("实时识别模型已安装 · ${formatBytes(PoseModelCatalog.lite.bytes)}",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            TextButton(onClick = model::removePoseModel,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                Text("删除本地模型")
+            }
+        }
+        PoseModelStatus.FAILED -> {
+            Text(state.installError ?: "模型下载失败", style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.error, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            TextButton(onClick = model::installPoseModel, modifier = Modifier.heightIn(min = 48.dp)) { Text("重试") }
+        }
+    }
+    Text("模型来自 Google MediaPipe（Apache-2.0），所有计算都在手机本地完成，画面不上传、不保存。",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 8.dp))
+}
+
+@Composable
+private fun CompositionAssistantControls(
+    state: CompositionUiState,
+    settings: AppSettings,
+    model: CameraViewModel,
+    cameraState: CameraState,
+) {
     HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
     Text("构图辅助 · 实验性", style = MaterialTheme.typography.titleSmall)
     Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -1860,20 +2247,16 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
     if (state.status == AssistStatus.READY && settings.compositionRealtime) Text(
         "画面分析约每秒更新 · AI 完成后至少间隔 ${formatInferenceTime(state.sampleIntervalMs)}，画面未变则复用",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    // Only one ranker ships now; show its real name instead of a picker (legacy SmolVLM
+    // selections migrate to it automatically).
     val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
+        ?: dev.streetsnap.app.edge.EdgeModelCatalog.find(dev.streetsnap.app.edge.EdgeModelCatalog.DEFAULT_MODEL_ID)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-        dev.streetsnap.app.edge.EdgeModelCatalog.models.forEach { entry ->
-            val chosen = entry.id == settings.compositionModel
-            TextButton(onClick = { model.setCompositionModel(entry.id) }, modifier = Modifier.heightIn(min = 48.dp)
-                .semantics { selected = chosen; contentDescription = "构图模型：${entry.title}" }) {
-                Text(entry.title, fontSize = 11.sp,
-                    color = if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-    }
+    // Inference performance stays visible without opening the developer section: users
+    // asked to see how slow/fast the on-device model actually is on their phone.
+    InferencePerformanceSummary(state, state.install == ModelInstallStatus.INSTALLED)
+    DeveloperDiagnostics(state, cameraState, modelEntry)
     when (state.install) {
         ModelInstallStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
         ModelInstallStatus.ABSENT -> TextButton(onClick = model.composition::prepareInstall,
@@ -1913,6 +2296,201 @@ private fun CompositionAssistantControls(state: CompositionUiState, settings: Ap
     Text("点“构图”分析一次，也可开启实时。先显示画面分析建议，AI 比较候选后再择优；框仅供取景参考，照片不会自动裁切。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(bottom = 8.dp))
+}
+
+/**
+ * Always-visible on-device model performance: rolling wall-clock of the last ten
+ * rankings (success/timeout/failure all count) plus the cheap rule analysis. The
+ * same numbers used to be buried inside the collapsed developer section.
+ */
+@Composable
+private fun InferencePerformanceSummary(state: CompositionUiState, installed: Boolean) {
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        Text("推理性能", fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace)
+        val history = state.inferenceHistoryMs
+        when {
+            history.isNotEmpty() -> {
+                val sorted = history.sorted()
+                Text("AI 推理：最近 ${history.last()} ms · 中位 ${sorted[sorted.size / 2]} ms · 最小 ${sorted.first()} / 最大 ${sorted.last()}（${history.size} 次）",
+                    fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f))
+            }
+            installed -> Text("AI 推理：等待首次推理完成…",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            else -> Text("AI 推理：安装模型后显示实测耗时",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        state.fastAdviceMs?.let {
+            Text("画面分析：$it ms", fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f))
+        }
+    }
+}
+
+/**
+ * Collapsed by default. Groups the real inference pipeline, per-pass performance, the
+ * token/TTFT contract (d1 is a discriminative single forward — both stated, not faked),
+ * model details, process-lifetime counters, process memory (CPU inference has no separate
+ * device memory) and the camera/HAL readings. Every number is observed state; architecture
+ * lines describe the shipping graph. Nothing is estimated or fabricated.
+ */
+@Composable
+private fun DeveloperDiagnostics(
+    state: CompositionUiState,
+    cameraState: CameraState,
+    modelEntry: dev.streetsnap.app.edge.EdgeModelEntry?,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)
+        .clickable(role = Role.Button) { expanded = !expanded }
+        .semantics { contentDescription = if (expanded) "收起开发者诊断" else "展开开发者诊断" },
+        verticalAlignment = Alignment.CenterVertically) {
+        Text("开发者诊断", Modifier.weight(1f), fontSize = 12.sp)
+        Text(if (expanded) "收起 ▴" else "展开 ▾", fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+    if (expanded) {
+        val stats by InferenceStats.snapshots.collectAsStateWithLifecycle()
+        // One 1 s tick while expanded: refreshes the memory sample and the live foreground
+        // duration. PSS sampling itself stays off the steady-state (collapsed) path.
+        var memory by remember { mutableStateOf<ProcessMemorySnapshot?>(null) }
+        LaunchedEffect(Unit) {
+            while (true) {
+                memory = ProcessMemoryProbe.sample()
+                delay(1_000L)
+            }
+        }
+        val nowElapsed = android.os.SystemClock.elapsedRealtime()
+        Column(Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            DiagSection("推理链路")
+            Text(
+                "分析帧 640×480（KEEP_ONLY_LATEST）→ 96px 统计与规则候选 → A/B/C 合成 512² sheet" +
+                    " → 视觉塔 FP16（1024 patches）→ 文本嵌入 Q4 → 决策头 Q4 输出 3 logits" +
+                    " → 换序双轮一致性门 → margin ≥ 0.10 采纳，否则弃权。单飞串行，慢则降频不排队。",
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f))
+
+            DiagSection("推理性能")
+            DiagLine("画面分析", (state.fastAdviceMs?.let { "$it ms" } ?: "—") + " · 96px 规则层")
+            val segments = listOf(
+                "视觉塔 ${state.lastVisionMs?.let { ms -> formatInferenceTime(ms) } ?: "—"}",
+                "嵌入 ${state.lastEmbeddingsMs?.let { ms -> formatInferenceTime(ms) } ?: "—"}",
+                "决策头 ${state.lastDecisionMs?.let { ms -> formatInferenceTime(ms) } ?: "—"}",
+            ).joinToString(" · ")
+            DiagLine("分段耗时", segments + "（最近一次首轮）")
+            DiagLine("总耗时", (state.lastInferenceMs?.let { formatInferenceTime(it) } ?: "—") +
+                " · 含换序一致性轮")
+            val history = state.inferenceHistoryMs
+            if (history.isNotEmpty()) {
+                val sorted = history.sorted()
+                DiagLine("最近 10 次",
+                    "中位 ${sorted[sorted.size / 2]} · 最小 ${sorted.first()} / 最大 ${sorted.last()} ms")
+            } else {
+                DiagLine("最近 10 次", "尚无完成记录")
+            }
+            DiagLine("首结果延迟", stats.firstRankMs?.let { formatInferenceTime(it) } ?: "—")
+            DiagLine("调度", "预算 %.0f s · 冷却 %d ms".format(state.inferenceBudgetMs / 1000f, state.sampleIntervalMs))
+            state.lastOutcome?.let { DiagLine("上次结果", when (it) {
+                CompositionOutcome.RETURNED -> "已选择构图"
+                CompositionOutcome.NO_RESULT -> "模型未明确选择"
+                CompositionOutcome.UNSTABLE_SELECTION -> "一致性检查未过"
+                CompositionOutcome.TIMED_OUT -> "超时"
+                CompositionOutcome.SCENE_CHANGED -> "画面变化，旧结果忽略"
+                CompositionOutcome.FAILED -> "失败"
+            }) }
+
+            DiagSection("模型情况")
+            DiagLine("模型", "${modelEntry?.id ?: "—"} · ${modelEntry?.revision?.take(7) ?: "—"}")
+            DiagLine("量化构成", "视觉塔 FP16 · 嵌入 Q4 · 决策头 Q4")
+            DiagLine("磁盘占用", (state.bytes?.let { formatBytes(it) } ?: "—") + " · 清单校验字节")
+            DiagLine("后端", state.runtimeLabel ?: "会话未就绪")
+            DiagLine("建图耗时", (state.runtimeReadyMs?.let { "$it ms" } ?: "—") + " · 三个 ORT session")
+            DiagLine("运行态", state.status.name + (state.statusText?.let { " · $it" } ?: ""))
+            DiagLine("输入 tokens", (state.lastPromptTokens?.let { "$it · 固定 prompt comp-choice-v0" }
+                ?: "—（完成一次推理后显示）"))
+            DiagLine("输出 tokens", "0 · 判别式输出 3 个选项 logits，不生成文本")
+            DiagLine("TTFT", "不适用 · 单次前向无 token 解码，亦无 KV cache；响应延迟见上方首结果延迟")
+
+            DiagSection("本次启动统计")
+            DiagLine("排名作业", "完成 ${stats.rankingsFinished} · 采纳 ${stats.adopted}" +
+                " / 弃权 ${stats.abstained} / 超时 ${stats.timedOut} / 失败 ${stats.failed}")
+            DiagLine("采纳率", stats.adoptionRate?.let { "%.0f%%".format(it * 100f) } ?: "—")
+            DiagLine("平均耗时",
+                (stats.averageRankMs?.let { formatInferenceTime(it) } ?: "—") + " · 每次排名墙钟均值")
+            val currentSessionMs = with(InferenceStats) { currentForegroundDurationMs(nowElapsed) }
+            DiagLine("前台会话", "${stats.foregroundSessions + if (currentSessionMs != null) 1 else 0} 次" +
+                " · 平均 ${stats.averageForegroundMs?.let { formatInferenceTime(it) } ?: "—"}" +
+                (currentSessionMs?.let { cur -> " · 本次 ${formatInferenceTime(cur)}" } ?: ""))
+
+            DiagSection("进程内存（CPU 推理，无独立显存）")
+            memory?.let { mem ->
+                DiagLine("PSS", "总 ${formatMemoryKb(mem.totalPssKb.toLong())}" +
+                    " · native ${formatMemoryKb(mem.nativePssKb.toLong())}" +
+                    " · Java ${formatMemoryKb(mem.dalvikPssKb.toLong())}")
+                DiagLine("native 堆", formatMemoryKb(mem.nativeAllocatedKb) +
+                    " · 含 ORT arena 与 MediaPipe，每秒刷新")
+            } ?: DiagLine("内存", "采样中…")
+
+            DiagSection("相机 / HAL")
+            val live = cameraState.liveExposure
+            if (live != null) {
+                DiagLine("实时测光", buildString {
+                    append(live.iso?.let { iso -> "ISO $iso" } ?: "ISO —")
+                    append(" · ")
+                    append(live.exposureTimeNs?.let(::shutterLabel) ?: "快门 —")
+                    live.aperture?.let { append(" · f/%.1f".format(it)) }
+                    live.focalLengthMm?.let { append(" · 实际焦距 %.1f mm".format(it)) }
+                })
+            } else {
+                DiagLine("实时测光", "尚无相机读数")
+            }
+            val faces = cameraState.liveFaces
+            if (faces != null) {
+                DiagLine("人脸统计", "HAL 报告 ${faces.count} 张脸" +
+                    if (cameraState.settings.focusDistanceDiopters != null) " · 手动对焦下已停用" else "")
+            } else {
+                DiagLine("人脸统计", "无读数（手动对焦或会话未就绪）")
+            }
+            cameraState.capabilities?.let { caps ->
+                if (caps.supportsFaceDetection) {
+                    val eyeNote = if (caps.faceDetectMode == 2) " · 含眼部点位" else ""
+                    DiagLine("人脸检测", "HAL 模式 ${caps.faceDetectMode}$eyeNote · 最多 ${caps.maxFaceCount} 张")
+                } else {
+                    DiagLine("人脸检测", "该设备 HAL 未上报人脸统计能力")
+                }
+                DiagLine("曝光档", caps.exposureModes.joinToString(" / ") { it.label } +
+                    if (caps.fixedAperture != null) " · 固定 f/%.1f".format(caps.fixedAperture) else " · 无光圈档")
+                DiagLine("ISO 范围", "${caps.isoMin ?: "—"}–${caps.isoMax ?: "—"}")
+                val timeMin = caps.exposureTimeMinNs?.let(::shutterLabel) ?: "—"
+                val timeMax = caps.exposureTimeMaxNs?.let(::shutterLabel) ?: "—"
+                DiagLine("快门范围", "$timeMin – $timeMax")
+                DiagLine("EV 范围", "${caps.exposureCompensationMin}…${caps.exposureCompensationMax} × ${caps.exposureCompensationStepEv}")
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagSection(title: String) {
+    Text(title, Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 1.dp),
+        fontSize = 10.sp, fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary, fontFamily = FontFamily.Monospace)
+}
+
+@Composable
+private fun DiagLine(label: String, value: String) {
+    Row(Modifier.fillMaxWidth()) {
+        Text(label, Modifier.width(68.dp), fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant, fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(value, Modifier.weight(1f), fontSize = 10.sp,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = .85f),
+            fontFamily = FontFamily.Monospace)
+    }
 }
 
 private fun formatBytes(bytes: Long): String = when {
@@ -2019,7 +2597,8 @@ private fun CapabilitiesDialog(capabilities: CameraCapabilities?, error: String?
     })
 }
 
-private fun shutterLabel(timeNs: Long): String = if (timeNs < 1_000_000_000L)
+/** Formats a real CaptureResult exposure time as a camera-style fraction or seconds. */
+internal fun shutterLabel(timeNs: Long): String = if (timeNs < 1_000_000_000L)
     "1/${(1_000_000_000.0 / timeNs).roundToInt()} s" else "%.1f s".format(timeNs / 1_000_000_000.0)
 
 /** Normalized crop rectangle eased toward each incoming rule suggestion. */
@@ -2032,6 +2611,9 @@ private data class SmoothCrop(val left: Float, val top: Float, val right: Float,
 private class SmoothCropState {
     // Order: left, top, right, bottom.
     val edges = Array(4) { Animatable(0f) }
+    // 0f while no guide is shown; eased to 1f on appearance and back on clear so scene
+    // changes / expiry cross-fade instead of blinking (T40).
+    val alpha = Animatable(0f)
     var ready by mutableStateOf(false)
     var snappedOrigin: AdviceOrigin? = null
 
@@ -2055,7 +2637,12 @@ private fun rememberSmoothCrop(overlay: CompositionOverlay?): SmoothCropState {
     LaunchedEffect(overlay) {
         val current = overlay
         if (current == null) {
-            // Zoom, rotation or model switch invalidated the guide; next guidance snaps.
+            // Zoom, rotation or model switch invalidated the guide; fade the last frame out
+            // before dropping it (next guidance still snaps). A new overlay arriving inside
+            // this window cancels the fade and raises the alpha straight back to 1.
+            if (state.ready) {
+                state.alpha.animateTo(0f, tween(durationMillis = 180, easing = FastOutSlowInEasing))
+            }
             state.ready = false
             state.snappedOrigin = null
             return@LaunchedEffect
@@ -2081,6 +2668,8 @@ private fun rememberSmoothCrop(overlay: CompositionOverlay?): SmoothCropState {
                 }
             }
         }
+        // No-op while already visible; eases the first appearance (and recovers a fade-out).
+        state.alpha.animateTo(1f, tween(durationMillis = 220, easing = FastOutSlowInEasing))
     }
     return state
 }

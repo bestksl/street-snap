@@ -1,7 +1,10 @@
 package dev.streetsnap.camera
 
 import android.content.Context
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.TotalCaptureResult
 import android.os.Build
 import android.os.SystemClock
 import android.util.Rational
@@ -78,7 +81,12 @@ class CameraController(context: Context) {
     private var imageCapture: ImageCapture? = null
     private var imageAnalysis: ImageAnalysis? = null
     private var compositionSource: CompositionFrameSource? = null
+    private var poseSource: PoseFrameSource? = null
     private var meteringExecutor: ExecutorService? = null
+    // setSessionCaptureCallback runs on CameraX's own camera thread; the callback only reads a
+    // handful of keys and does a thread-safe StateFlow.update, so no extra executor is needed.
+    @Volatile private var lastLiveExposureAtMs = 0L
+    @Volatile private var lastFaceObservationAtMs = 0L
     private var sessionGeneration = 0L
     private val sessionScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var stateObserver: Observer<CameraXState>? = null
@@ -93,6 +101,11 @@ class CameraController(context: Context) {
         // Camera2 controls should acknowledge promptly; a stuck HAL must not disable every
         // control until the activity is recreated.
         const val CAMERA_CONTROL_TIMEOUT_MS = 2_000L
+        // Live AE readouts drive a small OSD strip; a few updates/second is plenty and avoids
+        // recomposing on every 30 fps CaptureResult.
+        const val LIVE_EXPOSURE_MIN_INTERVAL_MS = 200L
+        // HAL face boxes only feed a thin focus overlay; the same throttle cadence is enough.
+        const val LIVE_FACE_MIN_INTERVAL_MS = 200L
     }
 
     @RequiresPermission(android.Manifest.permission.CAMERA)
@@ -104,8 +117,9 @@ class CameraController(context: Context) {
         targetRotation: Int = Surface.ROTATION_0,
         compositionFrames: CompositionFrameSource? = null,
         lumaMeter: LumaMeter? = null,
+        poseFrames: PoseFrameSource? = null,
     ): CameraCapabilities = bindSession(lifecycleOwner, surfaceProvider, effect, viewPort, targetRotation,
-        compositionFrames, lumaMeter = lumaMeter)
+        compositionFrames, lumaMeter = lumaMeter, poseFrames = poseFrames)
 
     @RequiresPermission(android.Manifest.permission.CAMERA)
     private suspend fun bindSession(
@@ -116,6 +130,7 @@ class CameraController(context: Context) {
         targetRotation: Int,
         compositionFrames: CompositionFrameSource?,
         lumaMeter: LumaMeter? = null,
+        poseFrames: PoseFrameSource? = null,
         expectedGeneration: Long? = null,
         fallbackReason: String? = null,
     ): CameraCapabilities = withContext(Dispatchers.Main.immediate) {
@@ -128,7 +143,10 @@ class CameraController(context: Context) {
                 detachSession()
                 val generation = sessionGeneration
                 mutableState.update { it.copy(isBound = false, isReady = false, error = null,
-                    compositionAnalysisActive = false, compositionAnalysisError = fallbackReason) }
+                    compositionAnalysisActive = false, compositionAnalysisError = fallbackReason,
+                    liveExposure = null, liveFaces = null) }
+                lastLiveExposureAtMs = 0L
+                lastFaceObservationAtMs = 0L
                 var fallbackScheduled = false
                 try {
                     val cameraProvider = ProcessCameraProvider.getInstance(appContext)
@@ -146,6 +164,31 @@ class CameraController(context: Context) {
                         .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
                         .setJpegQuality(95)
                         .setResolutionSelector(resolutionSelector(Size(4000, 3000), 12_000_000L))
+                    // Live metered exposure (real ISO/shutter while in AUTO): read the actual
+                    // per-frame Camera2 result from the always-bound preview use case. Pinned
+                    // to this generation so a torn-down session can never publish stale values.
+                    val exposureCallbackGeneration = generation
+                    // Face rectangles arrive in active-array sensor pixels; capture the geometry
+                    // here so the camera-thread callback can rotate them to portrait-normalized.
+                    val activeArray = sensor.characteristics[CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE]
+                    val faceArrayWidth = activeArray?.width() ?: 0
+                    val faceArrayHeight = activeArray?.height() ?: 0
+                    val faceSensorOrientation = sensor.characteristics[CameraCharacteristics.SENSOR_ORIENTATION] ?: 0
+                    Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(
+                        object : CameraCaptureSession.CaptureCallback() {
+                            override fun onCaptureCompleted(
+                                session: CameraCaptureSession,
+                                request: CaptureRequest,
+                                result: TotalCaptureResult,
+                            ) {
+                                publishLiveExposure(result, exposureCallbackGeneration)
+                                publishFaceObservation(
+                                    result, exposureCallbackGeneration,
+                                    faceArrayWidth, faceArrayHeight, faceSensorOrientation,
+                                )
+                            }
+                        },
+                    )
                     sensor.physicalCameraId?.let { physicalId ->
                         Camera2Interop.Extender(previewBuilder).setPhysicalCameraId(physicalId)
                         Camera2Interop.Extender(captureBuilder).setPhysicalCameraId(physicalId)
@@ -160,27 +203,38 @@ class CameraController(context: Context) {
                     } else Rational(4, 3)
                     val sharedViewPort = viewPort ?: ViewPort.Builder(defaultViewAspect, targetRotation)
                         .setScaleType(ViewPort.FILL_CENTER).build()
-                    val newAnalysis = if (compositionFrames != null || lumaMeter != null) {
+                    val newAnalysis = if (compositionFrames != null || lumaMeter != null || poseFrames != null) {
                         try {
                             var sourceSession: Long? = null
                             compositionFrames?.let { source ->
                                 sourceSession = source.activate()
                                 compositionSource = source
                             }
+                            var poseSession: Long? = null
+                            poseFrames?.let { source ->
+                                poseSession = source.activate()
+                                poseSource = source
+                            }
                             val builder = ImageAnalysis.Builder().setTargetRotation(targetRotation)
                                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                                 .setResolutionSelector(resolutionSelector(Size(640, 480), 640L * 480L))
                             sensor.physicalCameraId?.let { Camera2Interop.Extender(builder).setPhysicalCameraId(it) }
-                            // Share the source's executor while both run; a meter-only session
-                            // gets its own single thread, torn down in detachSession().
-                            val analyzerExecutor = compositionFrames?.executor ?: obtainMeteringExecutor()
+                            // Share the composition source's executor while both run; a pose- or
+                            // meter-only session gets its own single thread, torn down in detachSession().
+                            val analyzerExecutor = compositionFrames?.executor
+                                ?: poseFrames?.executor ?: obtainMeteringExecutor()
                             builder.build().also { analysis ->
                                 imageAnalysis = analysis
                                 analysis.setAnalyzer(analyzerExecutor) { proxy ->
                                     // The meter is synchronous and self-throttling; the frame
                                     // source (if any) owns ImageProxy.close() afterwards.
                                     try { lumaMeter?.analyze(proxy) } catch (_: Exception) { }
+                                    // Pose borrows the open proxy and copies its own bitmap; it
+                                    // never closes the proxy. Throttled internally (~8 fps).
+                                    val pose = poseSession
+                                    if (poseFrames != null && pose != null)
+                                        try { poseFrames.analyze(proxy, pose) } catch (_: Exception) { }
                                     val session = sourceSession
                                     if (compositionFrames != null && session != null)
                                         compositionFrames.analyze(proxy, session)
@@ -192,8 +246,11 @@ class CameraController(context: Context) {
                             imageAnalysis = null
                             compositionFrames?.deactivate()
                             compositionFrames?.shutdownExecutor()
+                            poseFrames?.deactivate()
+                            poseFrames?.shutdownExecutor()
                             shutdownMeteringExecutor()
                             compositionSource = null
+                            poseSource = null
                             mutableState.update { it.copy(compositionAnalysisError = "取景分析暂不可用，拍摄仍可继续。") }
                             null
                         }
@@ -211,11 +268,14 @@ class CameraController(context: Context) {
                         if (newAnalysis == null || error is CancellationException) throw error
                         newAnalysis.clearAnalyzer()
                         compositionFrames?.deactivate()
+                        poseFrames?.deactivate()
                         cameraProvider.unbind(newPreview, newCapture, newAnalysis)
                         compositionFrames?.shutdownExecutor()
+                        poseFrames?.shutdownExecutor()
                         shutdownMeteringExecutor()
                         imageAnalysis = null
                         compositionSource = null
+                        poseSource = null
                         mutableState.update { it.copy(compositionAnalysisError = "设备不支持并行取景分析，已保留取景与拍摄。") }
                         cameraProvider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, group(null))
                     }
@@ -226,7 +286,13 @@ class CameraController(context: Context) {
                     val observer = Observer<CameraXState> { current ->
                         cameraOpen = current.type == CameraXState.Type.OPEN
                         if (!cameraOpen) focusSession.invalidate()
-                        if (cameraOpen) compositionSource?.resume() else compositionSource?.pause()
+                        if (cameraOpen) {
+                            compositionSource?.resume()
+                            poseSource?.resume()
+                        } else {
+                            compositionSource?.pause()
+                            poseSource?.pause()
+                        }
                         mutableState.update {
                             it.copy(
                                 isReady = cameraOpen && settingsApplied,
@@ -499,6 +565,14 @@ class CameraController(context: Context) {
                     // AF_OFF override cannot leave the lens stuck in manual mode.
                     caps.autoFocusMode?.let { setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, it) }
                 }
+                // T77: let the HAL's own 3A track faces (eyes included in FULL mode) while AF is
+                // automatic; face statistics stop and the overlay clears once the user goes MF.
+                if (caps.supportsFaceDetection) {
+                    setCaptureRequestOption(
+                        CaptureRequest.STATISTICS_FACE_DETECT_MODE,
+                        if (manualFocus) FaceDetectPolicy.MODE_OFF else requireNotNull(caps.faceDetectMode),
+                    )
+                }
             }.build()
         settingsApplied = false
         mutableState.update { it.copy(isReady = false, error = null) }
@@ -511,6 +585,10 @@ class CameraController(context: Context) {
             if (requestOptionsChanged) {
                 if (settings.focusDistanceDiopters != oldSettings.focusDistanceDiopters) {
                     focusSession.invalidate()
+                    // HAL face tracking only runs under automatic AF; do not leave a stale box
+                    // on screen during the first frames after switching to manual focus.
+                    lastFaceObservationAtMs = 0L
+                    mutableState.update { it.copy(liveFaces = null) }
                 }
                 // setCaptureRequestOptions replaces all interop options. Omitting AF overrides
                 // in automatic mode restores CameraX's continuous AF and tap-focus behavior.
@@ -568,6 +646,81 @@ class CameraController(context: Context) {
         meteringExecutor = null
     }
 
+    /**
+     * Reads the frame's ACTUAL metered exposure from a real Camera2 CaptureResult (T11: never
+     * fabricated AUTO numbers). Throttled and de-duplicated so a converged AE or a fixed manual
+     * setting does not recompose the OSD. [generation] drops callbacks from a torn-down session.
+     * Runs on CameraX's camera thread; StateFlow.update is thread-safe and the work is trivial.
+     */
+    private fun publishLiveExposure(result: android.hardware.camera2.CaptureResult, generation: Long) {
+        if (closed || generation != sessionGeneration) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastLiveExposureAtMs < LIVE_EXPOSURE_MIN_INTERVAL_MS) return
+        val iso = result.get(android.hardware.camera2.CaptureResult.SENSOR_SENSITIVITY)
+        val exposureTimeNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_EXPOSURE_TIME)
+        if (iso == null && exposureTimeNs == null) return
+        val aperture = result.get(android.hardware.camera2.CaptureResult.LENS_APERTURE)?.takeIf { it > 0f }
+        val focalLengthMm = result.get(android.hardware.camera2.CaptureResult.LENS_FOCAL_LENGTH)?.takeIf { it > 0f }
+        val frameTimestampNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) ?: 0L
+        val reading = LiveExposureReading(iso, exposureTimeNs, aperture, focalLengthMm, frameTimestampNs)
+        lastLiveExposureAtMs = now
+        mutableState.update { current ->
+            val previous = current.liveExposure
+            if (previous != null && previous.iso == reading.iso &&
+                previous.exposureTimeNs == reading.exposureTimeNs &&
+                previous.aperture == reading.aperture && previous.focalLengthMm == reading.focalLengthMm) {
+                current
+            } else {
+                current.copy(liveExposure = reading)
+            }
+        }
+    }
+
+    /**
+     * Reads HAL face statistics for the focus overlay (T77: zero new dependencies — the 3A
+     * libraries own face/eye AF; the app only shows the rectangles the HAL already reports).
+     * Throttled and de-duplicated like the AE readout, gated on automatic focus, and pinned to
+     * the session generation so a torn-down session can never publish stale faces.
+     */
+    private fun publishFaceObservation(
+        result: android.hardware.camera2.CaptureResult,
+        generation: Long,
+        activeArrayWidth: Int,
+        activeArrayHeight: Int,
+        sensorOrientationDegrees: Int,
+    ) {
+        if (closed || generation != sessionGeneration) return
+        val caps = mutableState.value.capabilities ?: return
+        if (!caps.supportsFaceDetection) return
+        // The HAL only runs face tracking while the request stays in automatic AF.
+        if (mutableState.value.settings.focusDistanceDiopters != null) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastFaceObservationAtMs < LIVE_FACE_MIN_INTERVAL_MS) return
+        val faces = result.get(android.hardware.camera2.CaptureResult.STATISTICS_FACES) ?: return
+        val boxes = faces.mapNotNull { face ->
+            val bounds = face.bounds
+            FaceDetectPolicy.normalizeFace(
+                bounds.left, bounds.top, bounds.right, bounds.bottom,
+                activeArrayWidth, activeArrayHeight, sensorOrientationDegrees,
+            )
+        }
+        val observation = FaceObservation(
+            count = faces.size,
+            primary = FaceDetectPolicy.primaryBox(boxes),
+            frameTimestampNs = result.get(android.hardware.camera2.CaptureResult.SENSOR_TIMESTAMP) ?: 0L,
+        )
+        lastFaceObservationAtMs = now
+        mutableState.update { current ->
+            val previous = current.liveFaces
+            if (previous != null && previous.count == observation.count &&
+                previous.primary == observation.primary) {
+                current
+            } else {
+                current.copy(liveFaces = observation)
+            }
+        }
+    }
+
     private fun detachSession() {
         sessionGeneration++
         focusSession.invalidate()
@@ -576,17 +729,25 @@ class CameraController(context: Context) {
         imageAnalysis?.clearAnalyzer()
         val oldCompositionSource = compositionSource
         oldCompositionSource?.deactivate()
+        val oldPoseSource = poseSource
+        oldPoseSource?.deactivate()
         val useCases = listOfNotNull(preview, imageCapture, imageAnalysis)
         if (useCases.isNotEmpty()) provider?.unbind(*useCases.toTypedArray())
         oldCompositionSource?.shutdownExecutor()
+        oldPoseSource?.shutdownExecutor()
         shutdownMeteringExecutor()
+        // sessionGeneration is bumped above the callback's pinned value, so any in-flight
+        // result delivered during the unbind handoff is dropped instead of going stale.
+        lastLiveExposureAtMs = 0L
+        lastFaceObservationAtMs = 0L
         preview?.setSurfaceProvider(null)
         camera = null
         preview = null
         imageCapture = null
         imageAnalysis = null
         compositionSource = null
-        mutableState.update { it.copy(compositionAnalysisActive = false) }
+        poseSource = null
+        mutableState.update { it.copy(compositionAnalysisActive = false, liveExposure = null, liveFaces = null) }
         cameraOpen = false
         settingsApplied = false
     }

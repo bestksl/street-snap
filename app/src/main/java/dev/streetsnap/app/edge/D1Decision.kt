@@ -11,7 +11,13 @@ import kotlin.math.exp
  * per-question-type temperature calibration (official prompt.py, image path).
  */
 internal object D1Decision {
-    fun toRanking(logits: FloatArray): CropRanking? {
+    fun toRanking(
+        logits: FloatArray,
+        visionMs: Long = -1L,
+        embeddingsMs: Long = -1L,
+        decisionMs: Long = -1L,
+        promptTokens: Int = -1,
+    ): CropRanking? {
         require(logits.size in 2..10) { "d1 returned ${logits.size} option scores" }
         if (logits.any { !it.isFinite() }) return null
         val maximum = logits.max()
@@ -22,6 +28,8 @@ internal object D1Decision {
         val margin = probabilities[order[0]] - probabilities[order[1]]
         val selected = order[0].takeIf { margin >= CropRankingScores.MIN_MARGIN }
         return CropRanking(selected, support = 1f, margin = margin,
-            probabilities = probabilities, rawScores = logits.toList())
+            probabilities = probabilities, rawScores = logits.toList(),
+            visionMs = visionMs, embeddingsMs = embeddingsMs, decisionMs = decisionMs,
+            promptTokens = promptTokens)
     }
 }

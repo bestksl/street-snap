@@ -99,6 +99,9 @@ internal object CameraCapabilityReader {
         if (manualFocus && focusCalibration != "calibrated") {
             notes += "手动对焦距离未经精确标定；使用屈光度控制，不提供米制距离承诺。"
         }
+        val faceModes = characteristics[CameraCharacteristics.STATISTICS_INFO_AVAILABLE_FACE_DETECT_MODES]
+        val faceDetectMode = FaceDetectPolicy.selectMode(faceModes)
+        val maxFaceCount = characteristics[CameraCharacteristics.STATISTICS_INFO_MAX_FACE_COUNT] ?: 0
         val exposure = info.exposureState
         val point = SurfaceOrientedMeteringPointFactory(1f, 1f).createPoint(0.5f, 0.5f)
         return CameraCapabilities(
@@ -128,6 +131,8 @@ internal object CameraCapabilityReader {
             supportsFocusMetering = info.isFocusMeteringSupported(
                 FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF).build(),
             ),
+            faceDetectMode = faceDetectMode,
+            maxFaceCount = maxFaceCount,
             notes = notes,
             whiteBalanceModes = WhiteBalanceSupport.availableModes(
                 characteristics[CameraCharacteristics.CONTROL_AWB_AVAILABLE_MODES],
