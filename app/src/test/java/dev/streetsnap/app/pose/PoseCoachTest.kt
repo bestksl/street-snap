@@ -173,6 +173,12 @@ class PoseCoachTest {
         this[PoseJoint.NOSE] = PosePoint(0f, .06f)
     }, minScore = .4f)
 
+    @Test
+    fun tiltHead_singleEar_chinUp_stillScores() = assertReady(byId("tilt_head"), pose {
+        this[PoseJoint.RIGHT_EAR] = PosePoint(-.065f, .075f, visibility = 0f)
+        this[PoseJoint.NOSE] = PosePoint(0f, -.02f)
+    })
+
     // ---- look back --------------------------------------------------------------
 
     @Test
@@ -184,6 +190,24 @@ class PoseCoachTest {
     fun lookBack_halfway_notReady() = assertNotReady(byId("look_back"), pose {
         this[PoseJoint.NOSE] = PosePoint(-.035f, .12f)
     }, minScore = .15f)
+
+    @Test
+    fun lookBack_singleEar_profileTurn_stillScores() = assertReady(byId("look_back"), pose {
+        // Turning the head hides the far ear; one ear plus the shoulder-width fallback
+        // must keep scoring instead of surfacing a "cannot see face" failure.
+        this[PoseJoint.RIGHT_EAR] = PosePoint(-.065f, .075f, visibility = 0f)
+        this[PoseJoint.NOSE] = PosePoint(-.07f, .12f)
+    })
+
+    @Test
+    fun lookBack_noEars_asksForFace() {
+        val guide = runFor(byId("look_back"), pose {
+            this[PoseJoint.LEFT_EAR] = PosePoint(.065f, .075f, visibility = 0f)
+            this[PoseJoint.RIGHT_EAR] = PosePoint(-.065f, .075f, visibility = 0f)
+        })
+        assertFalse(guide.ready)
+        assertTrue(guide.hint?.contains("头转") == true)
+    }
 
     // ---- weight on back leg -----------------------------------------------------
 

@@ -78,6 +78,14 @@ internal data class PoseSample(
 internal fun dist(first: PosePoint, second: PosePoint): Float =
     hypot(first.x - second.x, first.y - second.y)
 
+/** Unit vector from [from] to [to], or null when the two points coincide. */
+internal fun unitDirection(from: PosePoint, to: PosePoint): PosePoint? {
+    val dx = to.x - from.x
+    val dy = to.y - from.y
+    val length = hypot(dx, dy)
+    return if (length < 1e-6f) null else PosePoint(dx / length, dy / length)
+}
+
 /** Interior angle at [vertex] in degrees, 0..180. */
 internal fun angle(previous: PosePoint, vertex: PosePoint, next: PosePoint): Float {
     val v1x = previous.x - vertex.x
@@ -111,9 +119,17 @@ internal data class PoseTemplate(val joints: Map<Int, PosePoint>) {
     val torsoLength: Float get() = dist(shoulderMid, hipMid)
 
     /**
-     * Align the template onto the observed body: same torso centre, size and lean. Joints
-     * the observed sample cannot see are still projected (the amber target needs them),
-     * so projection never depends on per-joint visibility.
+     * Paint the target figure onto the observed body (T109):
+     *
+     * 1. a similarity transform (torso centre, torso length, torso lean) gives a base
+     *    projection in the template's fixed body proportions;
+     * 2. the shoulder and hip pairs are pinned to the observed joints exactly, so the
+     *    target shares the person's real shoulder width and hip width;
+     * 3. the nose and each visible limb chain is **retargeted**: same direction as the
+     *    template segment, but the observed person's own bone lengths, so the amber figure
+     *    is the user's own size ("you, doing the pose") rather than a generic mannequin;
+     * 4. joints the sample cannot see fall back to the base projection, and projection
+     *    never depends on per-joint visibility beyond the four torso anchors.
      */
     fun projectTo(sample: PoseSample): Map<Int, PosePoint>? {
         val ls = sample.point(PoseJoint.LEFT_SHOULDER) ?: return null
@@ -133,11 +149,55 @@ internal data class PoseTemplate(val joints: Map<Int, PosePoint>) {
         ) - Math.PI / 2.0
         val cos = cos(theta).toFloat()
         val sin = sin(theta).toFloat()
-        return joints.mapValues { (_, point) ->
+        val base = joints.mapValues { (_, point) ->
             val relative = point - templateMid
             val rotated = PosePoint(relative.x * cos - relative.y * sin, relative.x * sin + relative.y * cos)
             observedMid + rotated * scale
         }
+
+        val projected = HashMap(base)
+        // Real torso anchors: widths and the torso line hug the actual body.
+        projected[PoseJoint.LEFT_SHOULDER] = ls
+        projected[PoseJoint.RIGHT_SHOULDER] = rs
+        projected[PoseJoint.LEFT_HIP] = lh
+        projected[PoseJoint.RIGHT_HIP] = rh
+
+        // Head: nose at the observed head size along the template's head direction.
+        val templateNose = base.getValue(PoseJoint.NOSE)
+        sample.point(PoseJoint.NOSE)?.let { observedNose ->
+            unitDirection(observedShoulderMid, templateNose)?.let { direction ->
+                projected[PoseJoint.NOSE] =
+                    observedShoulderMid + direction * dist(observedShoulderMid, observedNose)
+            }
+        }
+
+        // Limb chains: template direction, the observed person's own bone lengths.
+        fun retargetChain(anchorIndex: Int, middleIndex: Int, endIndex: Int) {
+            val observedAnchor = sample.point(anchorIndex) ?: return
+            val observedMiddle = sample.point(middleIndex)
+            if (observedMiddle == null) return // middle and end keep the base projection
+            val middleDirection = unitDirection(base.getValue(anchorIndex), base.getValue(middleIndex))
+                ?: return
+            val newMiddle = observedAnchor + middleDirection * dist(observedAnchor, observedMiddle)
+            projected[middleIndex] = newMiddle
+            val endDirection = unitDirection(base.getValue(middleIndex), base.getValue(endIndex))
+            if (endDirection != null) {
+                val observedEnd = sample.point(endIndex)
+                val endLength = if (observedEnd != null) {
+                    dist(observedMiddle, observedEnd)
+                } else {
+                    // End joint hidden: keep the chain connected using the template's own
+                    // projected segment length (already in observed-image units).
+                    dist(base.getValue(middleIndex), base.getValue(endIndex))
+                }
+                projected[endIndex] = newMiddle + endDirection * endLength
+            }
+        }
+        retargetChain(PoseJoint.LEFT_SHOULDER, PoseJoint.LEFT_ELBOW, PoseJoint.LEFT_WRIST)
+        retargetChain(PoseJoint.RIGHT_SHOULDER, PoseJoint.RIGHT_ELBOW, PoseJoint.RIGHT_WRIST)
+        retargetChain(PoseJoint.LEFT_HIP, PoseJoint.LEFT_KNEE, PoseJoint.LEFT_ANKLE)
+        retargetChain(PoseJoint.RIGHT_HIP, PoseJoint.RIGHT_KNEE, PoseJoint.RIGHT_ANKLE)
+        return projected
     }
 
     companion object {

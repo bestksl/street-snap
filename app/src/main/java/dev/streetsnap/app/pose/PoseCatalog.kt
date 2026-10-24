@@ -281,6 +281,37 @@ internal object PoseCatalog {
         return degrees
     }
 
+    // ---- head-pose reference -------------------------------------------------
+
+    // Experimental adult head-width/shoulder-width ratio, used as the face-width scale
+    // only when a single ear is visible (profile/look-back poses hide one ear). Must be
+    // re-tested on photographed subjects alongside the other v1 thresholds.
+    private const val HEAD_WIDTH_TO_SHOULDER = 0.40f
+
+    /**
+     * Ear midpoint plus a face-width scale for the 2-D head-pose proxies. Two visible ears
+     * use the measured ear distance; one visible ear (the head is turned) uses that ear and
+     * the shoulder-width ratio above. Returns null only when neither ear can be seen.
+     */
+    private fun headReference(sample: PoseSample): Pair<PosePoint, Float>? {
+        val ears = listOfNotNull(
+            sample.point(PoseJoint.LEFT_EAR),
+            sample.point(PoseJoint.RIGHT_EAR),
+        )
+        val earMid = when (ears.size) {
+            2 -> midpoint(ears[0], ears[1])
+            1 -> ears[0]
+            else -> return null
+        }
+        if (ears.size == 2) {
+            dist(ears[0], ears[1]).takeIf { it > 1e-4f }?.let { return earMid to it }
+        }
+        val ls = sample.point(PoseJoint.LEFT_SHOULDER) ?: return null
+        val rs = sample.point(PoseJoint.RIGHT_SHOULDER) ?: return null
+        val shoulderWidth = dist(ls, rs).takeIf { it > 1e-4f } ?: return null
+        return earMid to shoulderWidth * HEAD_WIDTH_TO_SHOULDER
+    }
+
     // ---- 6. head tilt (look up) ---------------------------------------------
 
     private val tiltHead = PoseDefinition(
@@ -294,14 +325,13 @@ internal object PoseCatalog {
     ) { sample ->
         // Weak 2-D proxy (experimental, not verified): with the chin up, the nose sits
         // higher relative to the ear line. Side-profile tilts are not observable head-on.
+        // One visible ear is enough: a chin-up pose often hides the far ear (T110).
         val nose = sample.point(PoseJoint.NOSE)
-        val lEar = sample.point(PoseJoint.LEFT_EAR)
-        val rEar = sample.point(PoseJoint.RIGHT_EAR)
-        if (nose == null || lEar == null || rEar == null) {
+        if (nose == null) {
             return@PoseDefinition listOf(PoseOutcome("脸部可见", 0f, "看不到脸，把脸转进画面", visible = false))
         }
-        val earMid = midpoint(lEar, rEar)
-        val faceWidth = dist(lEar, rEar).takeIf { it > 1e-4f } ?: return@PoseDefinition listOf(missingBody())
+        val (earMid, faceWidth) = headReference(sample)
+            ?: return@PoseDefinition listOf(PoseOutcome("脸部可见", 0f, "看不到脸，把脸转进画面", visible = false))
         // Chin up lifts the nose toward/above the ear line in image coordinates, so this
         // grows positive; a level face sits around -0.3 and a clear tilt above +0.4.
         val proxy = (earMid.y - nose.y) / faceWidth
@@ -324,15 +354,14 @@ internal object PoseCatalog {
         )),
     ) { sample ->
         val nose = sample.point(PoseJoint.NOSE)
-        val lEar = sample.point(PoseJoint.LEFT_EAR)
-        val rEar = sample.point(PoseJoint.RIGHT_EAR)
-        if (nose == null || lEar == null || rEar == null) {
+        if (nose == null) {
             return@PoseDefinition listOf(PoseOutcome("脸部可见", 0f, "看不到脸，把脸转进画面", visible = false))
         }
-        val earMid = midpoint(lEar, rEar)
-        val earDistance = dist(lEar, rEar).takeIf { it > 1e-4f }
+        // Turning the head hides the far ear, so one visible ear plus the shoulder-width
+        // fallback is the common case here, not an edge case (T110).
+        val (earMid, faceWidth) = headReference(sample)
             ?: return@PoseDefinition listOf(PoseOutcome("头转向", 0f, "头转向侧后方，下巴带到肩外"))
-        val offset = abs(nose.x - earMid.x) / earDistance
+        val offset = abs(nose.x - earMid.x) / faceWidth
         val score = ramp(offset, .15f, .55f)
         listOf(
             PoseOutcome("头转向", score,

@@ -48,6 +48,9 @@ internal class PoseAssistant(
     private val store = PoseModelStore(appContext)
     private val model = PoseModelCatalog.lite
     private val coach = PoseCoach()
+    // T108: landmark jitter filter; guarded by coachLock together with the coach state.
+    private val smoother = PoseSmoother()
+    private var lastPersonAtMs = 0L
     private val coachLock = Any()
 
     private val _source = MutableStateFlow<PoseFrameSource?>(null)
@@ -138,7 +141,11 @@ internal class PoseAssistant(
             return false
         }
         detector = newDetector
-        synchronized(coachLock) { coach.reset() }
+        synchronized(coachLock) {
+            coach.reset()
+            smoother.reset()
+            lastPersonAtMs = 0L
+        }
         val newSource = PoseFrameSource(
             onError = { error -> Log.w("StreetSnapPose", error) },
         ) { bitmap -> newDetector.detect(bitmap) }
@@ -146,9 +153,26 @@ internal class PoseAssistant(
         return true
     }
 
-    private fun acceptSample(sample: PoseSample?) {
+    private fun acceptSample(raw: PoseSample?) {
+        val now = SystemClock.elapsedRealtime()
         val guide = synchronized(coachLock) {
-            coach.observe(sample, SystemClock.elapsedRealtime())
+            val present = raw != null &&
+                raw.points.count { it.isVisible } >= PERSON_MIN_VISIBLE_POINTS
+            val smoothed = if (present) {
+                lastPersonAtMs = now
+                smoother.accept(raw!!)
+            } else {
+                // One empty/near-empty MediaPipe result (a dropped frame, a brief full-body
+                // occlusion) must not flicker the skeleton or reset the ready streak: hold
+                // the last guide for a short grace window; past it, clear and restart clean.
+                if (lastPersonAtMs != 0L && now - lastPersonAtMs in 1..EMPTY_RESULT_GRACE_MS) {
+                    return
+                }
+                smoother.reset()
+                lastPersonAtMs = 0L
+                null
+            }
+            coach.observe(smoothed, now)
         }
         _state.update { state ->
             if (!state.live) state else state.copy(
@@ -174,7 +198,11 @@ internal class PoseAssistant(
                 withContext(Dispatchers.IO) { oldSource.close() }
             }
         }
-        synchronized(coachLock) { coach.reset() }
+        synchronized(coachLock) {
+            coach.reset()
+            smoother.reset()
+            lastPersonAtMs = 0L
+        }
         _state.update { it.copy(guide = null) }
     }
 
@@ -243,5 +271,13 @@ internal class PoseAssistant(
         runCatching { detector?.close() }
         _source.value?.close()
         _source.value = null
+    }
+
+    companion object {
+        // Torso plus roughly head/upper limbs present; below this an "occupied" MediaPipe
+        // result is treated as an empty detection instead of a person standing in frame.
+        private const val PERSON_MIN_VISIBLE_POINTS = 8
+        // ~2–3 pose results; matches PoseSmoother's per-joint occlusion hold.
+        private const val EMPTY_RESULT_GRACE_MS = 350L
     }
 }
