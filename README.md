@@ -148,7 +148,7 @@ Compose 叠加层：框（黄=模型选择 / 蓝=画面分析）+ 中文建议 +
 
 ## 安装与发布
 
-**Android 版可安装，最低 Android 12。** 体验最新代码：打开组织仓库的 [Actions → Android CI](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml)，选一次成功运行，在摘要下载 **Preview APK**（制品保留 30 天，需登录 GitHub）。CI 包包名独立、显示「途帧 CI」，可与正式版并存。
+**Android 版可安装，最低 Android 12。** 体验最新代码：下载 [Releases 页的开发版（自动持续构建）](https://github.com/light-witness-lab/street-snap/releases/tag/dev)里的 **street-snap-dev-preview.apk**（每次 main 合并后自动更新，免登录）。需要某次具体提交的构建时，再到 [Actions → Android CI](https://github.com/light-witness-lab/street-snap/actions/workflows/android.yml) 选成功运行下载（制品保留 30 天，需登录 GitHub）。开发版包名独立、显示「途帧 CI」，可与正式版并存。
 
 Preview 是开发测试签名的非调试构建（启用 R8 与资源裁剪，约 57MB，不含模型权重——构图与姿态模型均在 App 内按需显式下载）。覆盖安装同签名版本可保留拍摄参数。本地构建见 [Android 开发说明](docs/android-development.md)，CI 与签名发布见 [CI 与版本发布](docs/ci-and-releases.md)。**iOS** 后续开发。
 

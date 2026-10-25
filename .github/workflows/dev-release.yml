@@ -1,0 +1,115 @@
+name: Android dev pre-release
+
+# Continuous-deployment dev track: every merge to main refreshes ONE rolling
+# pre-release (tag "dev") on the repository's Releases page, always carrying the
+# newest preview APK under a stable asset name. Production releases stay manual
+# and distribution-signed via release.yml on v* tags.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dev-release-main
+  cancel-in-progress: false
+
+jobs:
+  dev_release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      # A stable CI-only debug keystore lets testers upgrade dev builds in place.
+      # It is generated once on a cache miss (standard debug credentials, never a
+      # distribution key) and restored from Actions cache afterwards; cache
+      # eviction simply means one reinstall. No secret management is required.
+      - name: Restore CI debug keystore
+        uses: actions/cache@v4
+        id: keystore_cache
+        with:
+          path: /home/runner/.android/debug.keystore
+          key: ci-debug-keystore-v1
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Generate CI debug keystore
+        if: steps.keystore_cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+      - uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '16111833'
+          packages: 'platform-tools'
+      - name: Install Android SDK
+        run: sdkmanager 'platforms;android-37.0' 'build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Tests and lint already run in android.yml for the same SHA; here we only
+      # build the shippable preview variant (R8 + resource shrinking).
+      - name: Build preview and debug APKs
+        run: ./gradlew -PciBuild=true :app:assemblePreview :app:assembleDebug --no-daemon
+      - name: Prepare APKs and checksums
+        id: packages
+        run: python3 .github/scripts/package-apks.py ci
+
+      - name: Assemble release assets under stable names
+        env:
+          DIST: dist
+        run: |
+          mkdir -p dist/release
+          cp "dist/preview/${{ steps.packages.outputs.preview_file }}" dist/release/street-snap-dev-preview.apk
+          cp "dist/debug/${{ steps.packages.outputs.debug_file }}" dist/release/street-snap-dev-debug.apk
+          (cd dist/release && shasum -a 256 street-snap-dev-preview.apk street-snap-dev-debug.apk > SHA256SUMS)
+
+      - name: Write release notes
+        env:
+          APP_VERSION: ${{ steps.packages.outputs.version }}
+          COMMIT: ${{ steps.packages.outputs.commit }}
+          SHA256: ${{ steps.packages.outputs.preview_sha256 }}
+          BASE_URL: ${{ github.server_url }}/${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            printf '## 途帧开发版 v%s · %s\n\n' "$APP_VERSION" "$COMMIT"
+            printf '**持续构建（自动）**：每次合入 main 后本页自动更新，只代表最新代码，不是正式版。\n\n'
+            printf '- 安装 **street-snap-dev-preview.apk**：R8 优化构建（约 57 MB），debug 开发签名。\n'
+            printf '- 包名 `dev.streetsnap.app.ci`，显示「途帧 CI」，可与正式版并存；同签名可覆盖安装（极少数缓存轮换后需卸载重装一次）。\n'
+            printf '- **不含模型权重**：姿势模型（5.8 MiB）与构图模型（约 418 MiB）在 App 内显式下载并校验 SHA-256，建议 Wi-Fi；不下载也可使用规则构图与姿势演示模式。\n'
+            printf '- Preview APK SHA-256：`%s`\n' "$SHA256"
+            printf -- '- 来源提交：[%s](%s/commit/%s) · [构建日志](%s)\n\n' "$COMMIT" "$BASE_URL" "$COMMIT" "$RUN_URL"
+            printf '### 最近提交\n\n```\n'
+            git log --oneline -10
+            printf '```\n'
+          } > release-notes.md
+
+      - name: Create or update rolling dev pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ steps.packages.outputs.version }}
+          COMMIT: ${{ steps.packages.outputs.commit }}
+        run: |
+          set -e
+          if gh release view dev >/dev/null 2>&1; then
+            # Keep the tag on the newest commit, replace notes and assets.
+            git tag -f dev "$GITHUB_SHA"
+            git push -f origin dev
+            gh release edit dev --notes-file release-notes.md \
+              --title "开发版 v${APP_VERSION} · ${COMMIT}" --prerelease
+          else
+            gh release create dev --target "$GITHUB_SHA" --prerelease \
+              --title "开发版 v${APP_VERSION} · ${COMMIT}" \
+              --notes-file release-notes.md
+          fi
+          gh release upload dev dist/release/street-snap-dev-preview.apk \
+            dist/release/street-snap-dev-debug.apk dist/release/SHA256SUMS \
+            --clobber
