@@ -22,6 +22,9 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the release notes can list the last 10 commits.
+          fetch-depth: 0
 
       # A stable CI-only debug keystore lets testers upgrade dev builds in place.
       # It is generated once on a cache miss (standard debug credentials, never a
