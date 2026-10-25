@@ -32,6 +32,18 @@ python3 .github/scripts/package-apks.py ci
 
 第二条命令需要 Python 3.8+，输出到 `dist/preview/` 和 `dist/debug/`；它只整理构建产物，不负责签名。
 
+## 开发版持续发布（自动，双轨之一）
+
+每次合入 `main`，[dev-release 工作流](../.github/workflows/dev-release.yml)自动构建 Preview/Debug APK，并刷新 [Releases](https://github.com/light-witness-lab/street-snap/releases) 页里**同一个滚动 pre-release**（固定标签 `dev`，固定资产名 `street-snap-dev-preview.apk`，旧资产被覆盖而非累积）。无需任何 Secret，也不需要手动打 tag：
+
+- 主页 Releases 区始终能看到最新开发版，不需要登录、不受 30 天制品期限限制；
+- 包名仍是 `dev.streetsnap.app.ci`（途帧 CI），与正式版并存；
+- 签名用 runner 首次生成、存入 Actions cache 的**专用 debug keystore**（标准 debug 凭据，非分发密钥），因此开发版之间通常可直接覆盖安装；cache 失效轮换后才需卸载重装一次；
+- 发布说明自动写入版本号、提交号、SHA-256 与最近 10 条提交，并注明模型权重不随包分发（App 内按需下载）；
+- 该工作流只在 `main` 上运行，PR 来自 fork 也不会获得写权限。
+
+`dev` 标签不匹配 `v*`，不会触发正式发布工作流。两条轨道互不干扰：开发轨自动滚动、debug 签名；正式轨按下文手动打 `v*` 标签、分发签名、默认只出草稿。
+
 ## 配置固定发布签名
 
 已公开的 **v0.2.0-dev APK 使用开发签名**。若下一版改用新分发密钥，同包名也不能直接覆盖安装，需要先卸载旧版；卸载会丢失应用内参数与导入的 LUT。请先记下参数、保留 LUT 原文件。切换后，后续公开版本持续使用同一把分发密钥。
