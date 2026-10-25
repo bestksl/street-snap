@@ -79,18 +79,24 @@ jobs:
           BASE_URL: ${{ github.server_url }}/${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          {
-            printf '## 途帧开发版 v%s · %s\n\n' "$APP_VERSION" "$COMMIT"
-            printf '**持续构建（自动）**：每次合入 main 后本页自动更新，只代表最新代码，不是正式版。\n\n'
-            printf '- 安装 **street-snap-dev-preview.apk**：R8 优化构建（约 57 MB），debug 开发签名。\n'
-            printf '- 包名 `dev.streetsnap.app.ci`，显示「途帧 CI」，可与正式版并存；同签名可覆盖安装（极少数缓存轮换后需卸载重装一次）。\n'
-            printf '- **不含模型权重**：姿势模型（5.8 MiB）与构图模型（约 418 MiB）在 App 内显式下载并校验 SHA-256，建议 Wi-Fi；不下载也可使用规则构图与姿势演示模式。\n'
-            printf '- Preview APK SHA-256：`%s`\n' "$SHA256"
-            printf -- '- 来源提交：[%s](%s/commit/%s) · [构建日志](%s)\n\n' "$COMMIT" "$BASE_URL" "$COMMIT" "$RUN_URL"
-            printf '### 最近提交\n\n```\n'
-            git log --oneline -10
-            printf '```\n'
-          } > release-notes.md
+          RECENT_COMMITS="$(git log --oneline -10)"
+          cat > release-notes.md <<EOF
+          ## 途帧开发版 v${APP_VERSION} · ${COMMIT}
+
+          **持续构建（自动）**：每次合入 main 后本页自动更新，只代表最新代码，不是正式版。
+
+          - 安装 **street-snap-dev-preview.apk**：R8 优化构建（约 57 MB），debug 开发签名。
+          - 包名 \`dev.streetsnap.app.ci\`，显示「途帧 CI」，可与正式版并存；同签名可覆盖安装（极少数缓存轮换后需卸载重装一次）。
+          - **不含模型权重**：姿势模型（5.8 MiB）与构图模型（约 418 MiB）在 App 内显式下载并校验 SHA-256，建议 Wi-Fi；不下载也可使用规则构图与姿势演示模式。
+          - Preview APK SHA-256：\`${SHA256}\`
+          - 来源提交：[${COMMIT}](${BASE_URL}/commit/${COMMIT}) · [构建日志](${RUN_URL})
+
+          ### 最近提交
+
+          \`\`\`
+          ${RECENT_COMMITS}
+          \`\`\`
+          EOF
 
       - name: Create or update rolling dev pre-release
         env:
