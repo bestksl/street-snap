@@ -799,15 +799,17 @@ private fun Viewfinder(
             // Compact by design: capped width, tight padding, single-line supporting rows so
             // it never covers more than a corner of the frame (user feedback, 2026-10-19).
             if (settings.compositionEnabled) {
-                // T115: the live pose card sits bottom-centre and runs up to ~100dp tall after
-                // its legend row was added; on a portrait phone it otherwise slides under this
-                // start-anchored card (user feedback: pose and composition hints overlap).
-                // Lift the composition card above it. Landscape keeps separate horizontal
-                // slots (corner vs centre), so no lift there. The gap stays constant in the
-                // ready phase even though the pose card shrinks, to avoid visible reflow.
+                // T115: the live pose card sits bottom-centre: 60dp bottom padding plus a card
+                // up to ~94dp tall (two-line supporting copy, legend row and progress bar).
+                // 112dp only cleared the card height, so the start-anchored composition card
+                // still overlapped its top ~20dp on portrait (user feedback: pose and
+                // composition hints overlap). Clear the full card plus a small gap. Landscape
+                // keeps separate horizontal slots (corner vs centre), so no lift there. The
+                // gap stays constant in the ready phase even though the pose card shrinks, to
+                // avoid visible reflow.
                 val poseCardVisible = settings.poseAssistantEnabled && poseState.live && activeTrial == null
                 val adviceBottom by animateDpAsState(
-                    floatingClearance + if (poseCardVisible && !landscape) 112.dp else 0.dp,
+                    floatingClearance + if (poseCardVisible && !landscape) 168.dp else 0.dp,
                     animationSpec = tween(220, easing = FastOutSlowInEasing), label = "adviceCardBottom")
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = adviceBottom)
                     .graphicsLayer { alpha = adviceCardAlpha }
