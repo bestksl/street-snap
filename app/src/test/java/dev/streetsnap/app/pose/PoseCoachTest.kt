@@ -226,12 +226,52 @@ class PoseCoachTest {
         assertNotReady(byId("weight_back"), pose())
     }
 
+    // ---- T115 second batch ------------------------------------------------------
+
+    @Test
+    fun crossArms_met() = assertReady(byId("cross_arms"), pose {
+        this[PoseJoint.LEFT_ELBOW] = PosePoint(.24f, .41f)
+        this[PoseJoint.LEFT_WRIST] = PosePoint(-.01f, .45f)
+        this[PoseJoint.RIGHT_ELBOW] = PosePoint(-.24f, .41f)
+        this[PoseJoint.RIGHT_WRIST] = PosePoint(.01f, .45f)
+    })
+
+    @Test
+    fun crossArms_neutral_notReady() = assertNotReady(byId("cross_arms"), pose())
+
+    @Test
+    fun oneHandOnHip_metLeft() = assertReady(byId("one_hand_on_hip"), pose {
+        this[PoseJoint.LEFT_ELBOW] = PosePoint(.22f, .40f)
+        this[PoseJoint.LEFT_WRIST] = PosePoint(.08f, .49f)
+    })
+
+    @Test
+    fun oneHandOnHip_neutral_notReady() = assertNotReady(byId("one_hand_on_hip"), pose())
+
+    @Test
+    fun sideReach_metLeft() = assertReady(byId("side_reach"), pose {
+        this[PoseJoint.LEFT_ELBOW] = PosePoint(.285f, .275f)
+        this[PoseJoint.LEFT_WRIST] = PosePoint(.42f, .27f)
+    })
+
+    @Test
+    fun sideReach_neutral_notReady() = assertNotReady(byId("side_reach"), pose())
+
+    @Test
+    fun handToChest_metRight() = assertReady(byId("hand_to_chest"), pose {
+        this[PoseJoint.RIGHT_ELBOW] = PosePoint(-.20f, .37f)
+        this[PoseJoint.RIGHT_WRIST] = PosePoint(.01f, .39f)
+    })
+
+    @Test
+    fun handToChest_neutral_notReady() = assertNotReady(byId("hand_to_chest"), pose())
+
     // ---- catalogue sanity -------------------------------------------------------
 
     @Test
-    fun catalogue_hasEightPosesWithUniqueTitles() {
-        assertEquals(8, PoseCatalog.poses.size)
-        assertEquals(8, PoseCatalog.poses.map { it.id }.toSet().size)
+    fun catalogue_hasTwelvePosesWithUniqueTitles() {
+        assertEquals(12, PoseCatalog.poses.size)
+        assertEquals(12, PoseCatalog.poses.map { it.id }.toSet().size)
         PoseCatalog.poses.forEach { definition ->
             assertTrue(definition.title.isNotEmpty())
             assertTrue(definition.invite.isNotEmpty())
@@ -320,12 +360,13 @@ class PoseCoachTest {
     }
 
     @Test
-    fun nextPose_cyclesAllEightAndLoops() {
+    fun nextPose_cyclesAllPosesAndLoops() {
         val coach = PoseCoach()
-        // next() advances from the initially selected first pose, so the first eight
-        // next() calls visit poses 2..8 then 1, and the ninth lands on pose 2 again.
+        // next() advances from the initially selected first pose, so the first N next()
+        // calls visit poses 2..N then 1, and the call after that lands on pose 2 again.
+        val count = PoseCatalog.poses.size
         val expected = PoseCatalog.poses.drop(1).map { it.id } + PoseCatalog.poses.first().id
-        val visited = generateSequence { coach.next() }.take(8).map { it.id }.toList()
+        val visited = generateSequence { coach.next() }.take(count).map { it.id }.toList()
         assertEquals(expected, visited)
         assertEquals(PoseCatalog.poses[1].id, coach.next().id)
     }

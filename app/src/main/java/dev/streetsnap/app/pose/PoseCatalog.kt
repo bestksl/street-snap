@@ -5,9 +5,9 @@ import kotlin.math.cos
 import kotlin.math.sin
 
 /**
- * The v1 pose library (T72): eight common standing portrait poses. Every condition is a
- * continuous 0..1 satisfaction score plus a joint-level hint for its unmet side, so the
- * coach can say which limb to move instead of only "not yet".
+ * The pose library: twelve common standing portrait poses (T72 v1 eight, T115 second
+ * batch four). Every condition is a continuous 0..1 satisfaction score plus a joint-level
+ * hint for its unmet side, so the coach can say which limb to move instead of only "not yet".
  *
  * Thresholds are a conservative v1 calibration in torso-length units (distance between
  * shoulder-mid and hip-mid = 1 T). They are documented inline and must be re-tuned on
@@ -37,6 +37,8 @@ internal object PoseCatalog {
         listOf(
             oneArmUp, bothArmsUp, handOnHead, handsOnHips,
             twist, tiltHead, lookBack, weightBack,
+            // T115: second batch drawn from the standard standing-portrait repertoire.
+            crossArms, oneHandOnHip, sideReach, handToChest,
         )
     }
 
@@ -407,6 +409,152 @@ internal object PoseCatalog {
                 if (shiftScore < SIDE_CONDITION_FULL) "重心压到后腿，胯向支撑腿送" else null),
             PoseOutcome("前直后屈", kneeScore,
                 if (kneeScore < SIDE_CONDITION_FULL) "前腿再伸直、后腿放松微屈" else null),
+        )
+    }
+
+    // ---- 9. arms crossed in front of the chest ------------------------------
+
+    private val crossArms = PoseDefinition(
+        id = "cross_arms",
+        title = "抱臂",
+        invite = "双臂横到胸前交叠，双肘向外打开",
+        template = PoseTemplate(neutralJoints(
+            leftElbow = PosePoint(.24f, .41f), leftWrist = PosePoint(-.01f, .45f),
+            rightElbow = PosePoint(-.24f, .41f), rightWrist = PosePoint(.01f, .45f),
+        )),
+    ) { sample ->
+        val eval = Eval(sample)
+        val torso = eval.torso() ?: return@PoseDefinition listOf(missingBody())
+        val (shoulderMid, _, t) = torso
+        val lw = sample.point(PoseJoint.LEFT_WRIST)
+        val rw = sample.point(PoseJoint.RIGHT_WRIST)
+        val le = sample.point(PoseJoint.LEFT_ELBOW)
+        val re = sample.point(PoseJoint.RIGHT_ELBOW)
+        if (lw == null || rw == null || le == null || re == null) return@PoseDefinition listOf(missingArms())
+        val shoulderHalf = abs(shoulderMid.x - (sample.point(PoseJoint.LEFT_SHOULDER)?.x ?: shoulderMid.x))
+            .takeIf { it > 1e-4f } ?: t
+        val wristMid = midpoint(lw, rw)
+        val crossScore = ramp(dist(lw, rw) / t, .50f, .15f)
+        val centerScore = ramp(abs(wristMid.x) / shoulderHalf, .90f, .35f)
+        val bandCenterY = shoulderMid.y + t * .70f
+        val bandScore = ramp(abs(wristMid.y - bandCenterY) / t, .50f, .15f)
+        val elbowScore = minOf(
+            ramp(abs(le.x - shoulderMid.x) / shoulderHalf, 1.0f, 1.6f),
+            ramp(abs(re.x - shoulderMid.x) / shoulderHalf, 1.0f, 1.6f),
+        )
+        listOf(
+            armOutcome("双腕在胸前交叉", minOf(crossScore, centerScore, bandScore),
+                "双腕横到胸前，小臂交叠起来"),
+            armOutcome("双肘外展", elbowScore, "双肘再向外打开"),
+        )
+    }
+
+    // ---- 10. one hand on hip -------------------------------------------------
+
+    private val oneHandOnHip = PoseDefinition(
+        id = "one_hand_on_hip",
+        title = "单手叉腰",
+        invite = "一只手叉到腰侧、手肘向外打开，另一手自然下垂",
+        template = PoseTemplate(neutralJoints(
+            leftElbow = PosePoint(.22f, .40f), leftWrist = PosePoint(.08f, .49f),
+        )),
+    ) { sample ->
+        val eval = Eval(sample)
+        val torso = eval.torso() ?: return@PoseDefinition listOf(missingBody())
+        val (shoulderMid, hipMid, t) = torso
+        val shoulderHalf = abs(shoulderMid.x - (sample.point(PoseJoint.LEFT_SHOULDER)?.x ?: shoulderMid.x))
+            .takeIf { it > 1e-4f } ?: t
+        data class Candidate(val side: String, val elbow: PosePoint, val wrist: PosePoint)
+        val candidates = listOfNotNull(
+            sample.point(PoseJoint.LEFT_ELBOW)?.let { e ->
+                sample.point(PoseJoint.LEFT_WRIST)?.let { w -> Candidate(SIDE_LEFT, e, w) } },
+            sample.point(PoseJoint.RIGHT_ELBOW)?.let { e ->
+                sample.point(PoseJoint.RIGHT_WRIST)?.let { w -> Candidate(SIDE_RIGHT, e, w) } },
+        )
+        if (candidates.isEmpty()) return@PoseDefinition listOf(missingArms())
+        val chosen = candidates.maxByOrNull { c ->
+            minOf(
+                ramp(dist(c.wrist, hipMid) / t, 1.0f, .40f),
+                ramp(abs(c.elbow.x - shoulderMid.x) / shoulderHalf, .9f, 1.5f),
+            )
+        }!!
+        val wristScore = ramp(dist(chosen.wrist, hipMid) / t, 1.0f, .40f)
+        val elbowScore = ramp(abs(chosen.elbow.x - shoulderMid.x) / shoulderHalf, .9f, 1.5f)
+        listOf(
+            armOutcome("单手叉在腰侧", wristScore, "${chosen.side}手叉到腰侧，落在胯骨上方"),
+            armOutcome("手肘外展", elbowScore, "${chosen.side}肘向外打开"),
+        )
+    }
+
+    // ---- 11. one arm reaching out sideways at shoulder height ---------------
+
+    private val sideReach = PoseDefinition(
+        id = "side_reach",
+        title = "单手侧展",
+        invite = "一只手向侧面打开与肩同高，手肘伸直",
+        template = PoseTemplate(neutralJoints(
+            leftElbow = PosePoint(.285f, .275f), leftWrist = PosePoint(.42f, .27f),
+        )),
+    ) { sample ->
+        val eval = Eval(sample)
+        val torso = eval.torso() ?: return@PoseDefinition listOf(missingBody())
+        val (shoulderMid, _, t) = torso
+        val shoulderHalf = abs(shoulderMid.x - (sample.point(PoseJoint.LEFT_SHOULDER)?.x ?: shoulderMid.x))
+            .takeIf { it > 1e-4f } ?: t
+        data class Candidate(val side: String, val shoulder: PosePoint, val elbow: PosePoint, val wrist: PosePoint)
+        val candidates = listOfNotNull(
+            arm(sample, SIDE_LEFT, PoseJoint.LEFT_SHOULDER, PoseJoint.LEFT_ELBOW, PoseJoint.LEFT_WRIST, t)
+                ?.let { Candidate(it.side, it.shoulder, it.elbow, it.wrist) },
+            arm(sample, SIDE_RIGHT, PoseJoint.RIGHT_SHOULDER, PoseJoint.RIGHT_ELBOW, PoseJoint.RIGHT_WRIST, t)
+                ?.let { Candidate(it.side, it.shoulder, it.elbow, it.wrist) },
+        )
+        if (candidates.isEmpty()) return@PoseDefinition listOf(missingArms())
+        fun reachScore(c: Candidate) = ramp(abs(c.wrist.x - shoulderMid.x) / shoulderHalf, 1.5f, 2.7f)
+        val chosen = candidates.maxByOrNull { c ->
+            minOf(reachScore(c), ramp(angle(c.shoulder, c.elbow, c.wrist), 125f, 160f))
+        }!!
+        listOf(
+            armOutcome("手臂侧举与肩平", reachScore(chosen), "${chosen.side}手向侧面打开，抬到与肩同高"),
+            armOutcome("手臂伸直", ramp(angle(chosen.shoulder, chosen.elbow, chosen.wrist), 125f, 160f),
+                "${chosen.side}肘再伸直一点"),
+        )
+    }
+
+    // ---- 12. one hand raised to the chest -----------------------------------
+
+    private val handToChest = PoseDefinition(
+        id = "hand_to_chest",
+        title = "手放心口",
+        invite = "一只手抬到胸口，手肘略向外打开",
+        template = PoseTemplate(neutralJoints(
+            rightElbow = PosePoint(-.20f, .37f), rightWrist = PosePoint(.01f, .39f),
+        )),
+    ) { sample ->
+        val eval = Eval(sample)
+        val torso = eval.torso() ?: return@PoseDefinition listOf(missingBody())
+        val (shoulderMid, _, t) = torso
+        val shoulderHalf = abs(shoulderMid.x - (sample.point(PoseJoint.LEFT_SHOULDER)?.x ?: shoulderMid.x))
+            .takeIf { it > 1e-4f } ?: t
+        val chest = PosePoint(shoulderMid.x, shoulderMid.y + t * .35f)
+        data class Candidate(val side: String, val elbow: PosePoint, val wrist: PosePoint)
+        val candidates = listOfNotNull(
+            sample.point(PoseJoint.LEFT_ELBOW)?.let { e ->
+                sample.point(PoseJoint.LEFT_WRIST)?.let { w -> Candidate(SIDE_LEFT, e, w) } },
+            sample.point(PoseJoint.RIGHT_ELBOW)?.let { e ->
+                sample.point(PoseJoint.RIGHT_WRIST)?.let { w -> Candidate(SIDE_RIGHT, e, w) } },
+        )
+        if (candidates.isEmpty()) return@PoseDefinition listOf(missingArms())
+        val chosen = candidates.maxByOrNull { c ->
+            minOf(
+                ramp(dist(c.wrist, chest) / t, .60f, .22f),
+                ramp(abs(c.elbow.x - shoulderMid.x) / shoulderHalf, .8f, 1.4f),
+            )
+        }!!
+        listOf(
+            armOutcome("手抬到胸口", ramp(dist(chosen.wrist, chest) / t, .60f, .22f),
+                "${chosen.side}手抬起来，轻轻放到胸口"),
+            armOutcome("手肘外展", ramp(abs(chosen.elbow.x - shoulderMid.x) / shoulderHalf, .8f, 1.4f),
+                "${chosen.side}肘略向外打开，不要夹着手臂"),
         )
     }
 
