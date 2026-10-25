@@ -26,7 +26,7 @@ sha256sum -c SHA256SUMS
 本地复现 CI 的包名与构建配置：
 
 ```sh
-./gradlew -PciBuild=true :app:assemblePreview :app:assembleDebug
+./gradlew -PciBuild=true :app:assemblePreview :app:assembleDebug :app:assembleRelease
 python3 .github/scripts/package-apks.py ci
 ```
 
