@@ -807,7 +807,7 @@ private fun Viewfinder(
                 // ready phase even though the pose card shrinks, to avoid visible reflow.
                 val poseCardVisible = settings.poseAssistantEnabled && poseState.live && activeTrial == null
                 val adviceBottom by animateDpAsState(
-                    floatingClearance + if (poseCardVisible && maxHeight > maxWidth) 112.dp else 0.dp,
+                    floatingClearance + if (poseCardVisible && !landscape) 112.dp else 0.dp,
                     animationSpec = tween(220, easing = FastOutSlowInEasing), label = "adviceCardBottom")
                 Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = adviceBottom)
                     .graphicsLayer { alpha = adviceCardAlpha }
