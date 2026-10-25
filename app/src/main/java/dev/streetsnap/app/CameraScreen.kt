@@ -53,14 +53,21 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.windowInsetsTopHeight
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -235,12 +242,22 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
     }
 
     Surface(modifier = Modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+        // Edge-to-edge: the camera tree itself is NOT wrapped in safeDrawingPadding.
+        // Padding the whole tree translates nameplate + viewfinder + shutter as one
+        // rigid block whenever the inset set changes (transient system bars, IME,
+        // returning from another activity), which reads as the whole screen jumping
+        // down. Each branch instead consumes only the edge its chrome touches (T116).
+        Box(Modifier.fillMaxSize()) {
             if (!permitted) {
-                PermissionPanel(denied, { permission.launch(Manifest.permission.CAMERA) }, activity::openAppSettings)
+                Box(Modifier.fillMaxSize().safeDrawingPadding()) {
+                    PermissionPanel(denied, { permission.launch(Manifest.permission.CAMERA) }, activity::openAppSettings)
+                }
             } else {
                 BoxWithConstraints(Modifier.fillMaxSize()) {
                     val landscape = maxWidth > maxHeight
+                    val density = LocalDensity.current
+                    val statusBarTop = with(density) { WindowInsets.statusBars.getTop(density).toDp() }
+                    val navigationBarBottom = with(density) { WindowInsets.navigationBars.getBottom(density).toDp() }
                     if (landscape && maxWidth >= 600.dp) {
                         // Large landscape screens keep the all-controls side rail; the
                         // phone portrait path below is the floating full-screen viewfinder.
@@ -248,7 +265,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         Row(Modifier.fillMaxSize()) {
                             Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay, compositionState,
                                 Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ },
-                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
+                                onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
+                                systemBarTop = statusBarTop)
                             ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                 Modifier.width(sideWidth).fillMaxHeight(),
                                 adjustmentTab, { adjustmentTab = it }, sidePanel = true,
@@ -272,9 +290,17 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // chip row + focal row + fixed focal/shutter gap + 92dp shutter row.
                         // Reserve it up front; on short screens the 3:4 picture shrinks a
                         // touch instead of clipping.
-                        val clusterMinHeight = 218.dp
-                        val framedWidth = minOf(maxWidth, (maxHeight - nameplateHeight - clusterMinHeight) * 3f / 4f)
+                        // The bottom band owns the navigation-bar inset; reserve it here so
+                        // the 3:4 picture sizing matches the old safe-area layout.
+                        val clusterMinHeight = 218.dp + navigationBarBottom
+                        val framedWidth = minOf(maxWidth,
+                            (maxHeight - statusBarTop - nameplateHeight - clusterMinHeight) * 3f / 4f)
                         Column(Modifier.fillMaxSize().background(Color.Black)) {
+                            // Status-bar inset is consumed at the very top edge only: it
+                            // grows/shrinks this black strip instead of translating the
+                            // viewfinder and shutter as one block. windowInsetsTopHeight
+                            // also consumes the inset for the subtree below.
+                            Spacer(Modifier.fillMaxWidth().windowInsetsTopHeight(WindowInsets.statusBars))
                             // Second collector of the same StateFlow: the Viewfinder keeps
                             // its own for the landscape / hidden-nameplate floating path.
                             val nameplateLookCard by model.lookAdviceCard.collectAsStateWithLifecycle()
@@ -328,7 +354,7 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                                 onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
                                 nameplateHidden = hideNameplate)
                             ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
-                                Modifier.fillMaxWidth().weight(1f), framed = true,
+                                Modifier.fillMaxWidth().weight(1f).navigationBarsPadding(), framed = true,
                                 onTab = { adjustmentTab = it },
                                 latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
                         }
@@ -345,9 +371,10 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // shutter/focal controls float over its lower edge.
                         Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
                             Modifier.fillMaxSize(), onRetry = { retry++ },
-                            onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK })
+                            onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
+                            systemBarTop = statusBarTop)
                         ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
-                            Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+                            Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding(),
                             onTab = { adjustmentTab = it },
                             latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
                         if (adjustmentTab != null) {
@@ -361,7 +388,7 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                     }
                 }
             }
-            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).padding(12.dp))
+            SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(12.dp))
         }
     }
     if (showCapabilities) CapabilitiesDialog(state.capabilities, state.error, { showCapabilities = false })
@@ -404,6 +431,11 @@ private fun Viewfinder(
      * out-of-frame row to live in, so they fall back to floating over the top-end corner.
      */
     nameplateHidden: Boolean = false,
+    // Raw system-bar insets read once at the root and forwarded explicitly. Passing dp
+    // instead of statusBarsPadding() keeps sibling panels from receiving already-consumed
+    // insets and avoids any whole-surface translation on transient inset changes (T116).
+    systemBarTop: Dp = 0.dp,
+    systemBarBottom: Dp = 0.dp,
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -714,14 +746,16 @@ private fun Viewfinder(
             }
             if (activeTrial != null) {
                 Text("试取景 · 松开还原",
-                    Modifier.align(Alignment.TopCenter).padding(top = 14.dp)
+                    Modifier.align(Alignment.TopCenter).padding(top = systemBarTop + 14.dp)
                         .background(Color.Black.copy(alpha = .62f), RoundedCornerShape(20.dp))
                         .padding(horizontal = 14.dp, vertical = 7.dp),
                     color = Color.White, fontSize = 12.sp)
             }
             // The top pill row would collide with the "试取景 · 松开还原" label; it is
             // transient anyway (finger still down), so hide the whole row during the trial.
-            if (activeTrial == null) Row(Modifier.align(Alignment.TopStart).fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            if (activeTrial == null) Row(Modifier.align(Alignment.TopStart).fillMaxWidth()
+                .padding(start = 10.dp, end = 10.dp, top = systemBarTop + 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically) {
                 // Single quiet corner entry: off -> histogram -> histogram + exposure readout -> off.
                 OsdCycleButton(osdMode, model::cycleViewfinderOsd)
                 Spacer(Modifier.weight(1f))
@@ -759,16 +793,16 @@ private fun Viewfinder(
                         else -> "当前对焦模式"
                     })
             }
-            // Persistent HDF toggle, stacked under the OSD corner button; the right column
-            // hosts only the optional small histogram window.
+            // Persistent bloom toggle, stacked under the OSD corner button; the right
+            // column hosts only the optional small histogram window.
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
-                Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 52.dp))
+                Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = systemBarTop + 52.dp))
             // Clipped-highlight/shadow hint. In framed portrait it lives in the black control
             // band just above the shoulder strip (see ViewfinderOverlayBar) so it never covers
             // the viewfinder; only the floating landscape path keeps the in-frame anchor.
             if (!framed) exposureAdviceCard?.let { card ->
                 ExposureAdviceCardView(card, model::dismissExposureAdvice,
-                    Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = 100.dp))
+                    Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = systemBarTop + 100.dp))
             }
             // In framed portrait the film badge and look suggestion live in the nameplate
             // row (outside the picture), so they float in-frame only on landscape paths and
@@ -782,7 +816,7 @@ private fun Viewfinder(
                 val badgeLabel = settings.filmId?.let { FilmRegistry.find(it)?.displayName }
                     ?: badgePreset.displayName
                 FilmFrameBadge(settings.filmId, badgePreset, badgeLabel, onOpenLooks,
-                    Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop))
+                    Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = systemBarTop + badgeTop))
                 // Anchored to the film badge (T30): suggest only, tap to preview, × to dismiss.
                 lookAdviceCard?.let { card ->
                     LookAdviceCardView(card,
@@ -790,7 +824,8 @@ private fun Viewfinder(
                         onKeep = model::keepSuggestedLook,
                         onRevert = model::revertSuggestedLook,
                         onDismiss = model::dismissLookAdvice,
-                        Modifier.align(Alignment.TopEnd).padding(end = 10.dp, top = badgeTop + 56.dp))
+                        Modifier.align(Alignment.TopEnd)
+                            .padding(end = 10.dp, top = systemBarTop + badgeTop + 56.dp))
                 }
             }
             // The DSLR-style numeric readout (mode/aperture/shutter/ISO/EV) is now the
@@ -811,7 +846,8 @@ private fun Viewfinder(
                 val adviceBottom by animateDpAsState(
                     floatingClearance + if (poseCardVisible && !landscape) 168.dp else 0.dp,
                     animationSpec = tween(220, easing = FastOutSlowInEasing), label = "adviceCardBottom")
-                Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = adviceBottom)
+                Column(Modifier.align(Alignment.BottomStart)
+                    .padding(start = 10.dp, bottom = adviceBottom + systemBarBottom)
                     .graphicsLayer { alpha = adviceCardAlpha }
                     .widthIn(max = 208.dp)
                     .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp)
@@ -872,7 +908,8 @@ private fun Viewfinder(
                 focusPoint != null && state.focusResult == false -> "未合焦 · 可重试或直接拍摄"
                 else -> null
             }
-            focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter).padding(bottom = floatingClearance + 8.dp),
+            focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter)
+                .padding(bottom = floatingClearance + 8.dp + systemBarBottom),
                 color = Color.White, fontSize = 12.sp) }
             // Bottom-right movement arrow: a glanceable "which way do I nudge the camera"
             // cue derived from the same geometry/dead zones as the advice card sentence.
@@ -884,7 +921,8 @@ private fun Viewfinder(
                 animationSpec = tween(180, easing = FastOutSlowInEasing), label = "moveArrowAlpha")
             if (arrowAlpha > 0.01f) {
                 MoveGuideIndicator(moveGuide, arrowAlpha,
-                    Modifier.align(Alignment.BottomEnd).padding(end = 12.dp, bottom = floatingClearance))
+                    Modifier.align(Alignment.BottomEnd)
+                        .padding(end = 12.dp, bottom = floatingClearance + systemBarBottom))
             }
             // T72 pose assistant. Hidden during the long-press trial zoom like the pill row.
             if (settings.poseAssistantEnabled && activeTrial == null) {
@@ -1139,7 +1177,7 @@ private fun LookAdviceAction(
 }
 
 /**
- * Exposure hint card under the HDF button. Suggest-only: no button changes exposure,
+ * Exposure hint card under the 光晕 button. Suggest-only: no button changes exposure,
  * the × dismisses for the rest of the session (T31).
  */
 @Composable
@@ -1157,7 +1195,7 @@ private fun ExposureAdviceCardView(card: ExposureAdviceCard, onDismiss: () -> Un
     }
 }
 
-/** Always-on HDF toggle (Ricoh-style highlight diffusion) under the OSD corner button; quiet when off, primary-tinted while on. */
+/** Always-on 光晕 (bloom / Ricoh-style highlight diffusion) toggle under the OSD corner button; quiet when off, primary-tinted while on. */
 @Composable
 private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
     val tint = if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
@@ -1165,12 +1203,12 @@ private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifie
         .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
         .clickable(role = Role.Button, onClick = onToggle)
         .semantics {
-            contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
+            contentDescription = "光晕开关（高光柔化与外圈辉光）"
             stateDescription = if (on) "已开启" else "已关闭"
             this.selected = on
         },
         contentAlignment = Alignment.Center) {
-        Text("HDF", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+        Text("光晕", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
@@ -1325,7 +1363,7 @@ private fun ViewfinderOverlayBar(
             })
         }
         if (settings.hdfEnabled) add(ActiveOverride("柔光", AdjustmentTab.LOOK, "关闭柔光") { model.toggleHdf() })
-        if (settings.hdrEnabled) add(ActiveOverride("HDF", AdjustmentTab.LOOK, "关闭 HDF") { model.toggleHdr() })
+        if (settings.hdrEnabled) add(ActiveOverride("光晕", AdjustmentTab.LOOK, "关闭光晕") { model.toggleHdr() })
         if (state.settings.focusDistanceDiopters != null)
             add(ActiveOverride("MF", AdjustmentTab.SHOOTING, "恢复自动对焦") { model.autoFocus() })
         if (exposureMode != ExposureMode.PROGRAM) add(ActiveOverride(
@@ -1337,36 +1375,56 @@ private fun ViewfinderOverlayBar(
 
     val chrome = if (framed) Modifier.background(Color.Black)
         else Modifier.background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
-    Column(modifier.then(chrome)
-        .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 8.dp else 10.dp),
-        horizontalAlignment = Alignment.CenterHorizontally) {
-        // Hairline that separates the 3:4 screen from the camera-back control cluster.
-        if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
-        // Framed mode: the control group (chips, focal, shutter) is vertically centred as
-        // one block, so on tall 20:9 screens the slack splits above/below it instead of
-        // opening a void between the focal row and the shutter (T22).
-        if (framed) Spacer(Modifier.weight(1f))
-        // T74: the clipped-highlight/shadow hint belongs to the meter strip, so it sits
-        // directly above it in the black band — never over the 3:4 picture.
+    // T116: the focal row and shutter are anchored to the bottom of the band. The cluster
+    // used to vertically centre its whole content between two weighted spacers, so the
+    // moment an override chip appeared (柔光/光晕/non-auto WB/MF/S/M/EV) the shutter jumped
+    // down ~22dp — the reported "whole screen shifts down". Override chips and the
+    // transient exposure card now float over the black band instead of taking part in the
+    // Column, so nothing under the user's thumb ever reflows.
+    Box(modifier.then(chrome)
+        .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 8.dp else 10.dp)) {
         if (framed) exposureCard?.let { card ->
             ExposureAdviceCardView(card, model::dismissExposureAdvice,
-                Modifier.padding(bottom = 4.dp))
+                Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp))
         }
-        // Always-on DSLR shoulder strip: live P/S meter values, mode and EV popups.
-        ExposureShoulderStrip(state, model,
-            Modifier.padding(bottom = if (framed) 5.dp else 4.dp))
-        // Active manual overrides: visible tappable reminders that jump to the section.
-        if (overrides.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = if (framed) 3.dp else 4.dp)
-                .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
-                overrides.forEach { override ->
-                    OverlayPill(override.label, selected = true,
-                        onClick = { onTab(override.tab) }, description = "打开${override.label}调整",
-                        onLongClick = override.onReset, longClickDescription = override.resetDescription)
+        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+            // Hairline that separates the 3:4 screen from the camera-back control cluster.
+            if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
+            // All slack collects above the controls; the shutter group is bottom-anchored.
+            if (framed) Spacer(Modifier.weight(1f))
+            // Always-on DSLR shoulder strip: live P/S meter values, mode and EV popups.
+            ExposureShoulderStrip(state, model,
+                Modifier.padding(bottom = if (framed) 5.dp else 4.dp))
+            // Active manual overrides. Framed portrait keeps a constant-height slot so
+            // chips fade in/out instead of pushing the shutter down; landscape keeps the
+            // inline conditional row (its bar floats over the picture, no band slack).
+            val chipAlpha by animateFloatAsState(if (overrides.isEmpty()) 0f else 1f,
+                tween(160, easing = FastOutSlowInEasing), label = "overrideChipAlpha")
+            if (framed) {
+                Box(Modifier.fillMaxWidth().height(36.dp), contentAlignment = Alignment.Center) {
+                    if (chipAlpha > 0.01f) {
+                        Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp)
+                                .horizontalScroll(rememberScrollState()).graphicsLayer { alpha = chipAlpha },
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                            overrides.forEach { override ->
+                                OverlayPill(override.label, selected = true,
+                                    onClick = { onTab(override.tab) }, description = "打开${override.label}调整",
+                                    onLongClick = override.onReset, longClickDescription = override.resetDescription)
+                            }
+                        }
+                    }
+                }
+            } else if (overrides.isNotEmpty()) {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp)
+                    .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+                    overrides.forEach { override ->
+                        OverlayPill(override.label, selected = true,
+                            onClick = { onTab(override.tab) }, description = "打开${override.label}调整",
+                            onLongClick = override.onReset, longClickDescription = override.resetDescription)
+                    }
                 }
             }
-        }
         // Focal lengths: the one pro control worth keeping on the capture screen.
         // In framed mode it belongs to the shutter group with a fixed, deliberate gap.
         Row(Modifier.padding(bottom = if (framed) 14.dp else 6.dp).clip(RoundedCornerShape(22.dp))
@@ -1417,8 +1475,7 @@ private fun ViewfinderOverlayBar(
                 Text("参数", fontSize = 10.sp, color = Color.White.copy(alpha = .72f), maxLines = 1)
             }
         }
-        // Counterweight to the leading spacer: keeps the whole control group centred.
-        if (framed) Spacer(Modifier.weight(1f))
+        }
     }
 }
 
@@ -1605,7 +1662,8 @@ private fun ControlBottomSheet(
         contentWindowInsets = { androidx.compose.foundation.layout.WindowInsets(0) }) {
         AdjustmentPanel(state, settings, importing, model, tab, onTab = onTab, importLut,
             openMascotPicker, compositionState,
-            Modifier.fillMaxWidth().height(500.dp).padding(horizontal = 10.dp).padding(bottom = 10.dp))
+            Modifier.fillMaxWidth().height(500.dp).navigationBarsPadding()
+                .padding(horizontal = 10.dp).padding(bottom = 10.dp))
     }
 }
 
@@ -1640,7 +1698,11 @@ private fun ShootingControls(
         focalLengths.any { it !in supportedFocalLengths } -> "灰色视角暂不可用"
         else -> null
     }
-    Column(modifier.background(MaterialTheme.colorScheme.surface).padding(horizontal = 12.dp),
+    // The rail is an opaque camera-back surface: paint edge to edge under the system
+    // bars, then inset the controls themselves. In portrait framed mode the status-bar
+    // inset is already consumed upstream by the black top strip.
+    Column(modifier.background(MaterialTheme.colorScheme.surface).windowInsetsPadding(WindowInsets.systemBars)
+        .padding(horizontal = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally) {
         Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
             BoxWithConstraints(Modifier.weight(1f)) {
@@ -1675,24 +1737,27 @@ private fun ShootingControls(
                     color = if (adjustmentTab == AdjustmentTab.WHITE_BALANCE) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant)
             }
+            // 柔光 = global soft diffusion (Black Pro-Mist style); 光晕 = highlight bloom.
+            // The two optical layers used to share one "HDF" label despite driving
+            // different settings — they now read as distinct, deliberately ordered switches.
             Box(Modifier.width(56.dp).height(48.dp).clip(RoundedCornerShape(10.dp))
                 .background(if (settings.hdfEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
                 .toggleable(value = settings.hdfEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdf() }
                 .semantics {
-                    contentDescription = "柔光开关"
+                    contentDescription = "柔光开关（全局柔化，黑柔滤镜风格）"
                     stateDescription = if (settings.hdfEnabled) "开启" else "关闭"
                 }, contentAlignment = Alignment.Center) {
-                Text("HDF", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                Text("柔光", fontWeight = FontWeight.Bold, fontSize = 12.sp,
                     color = if (settings.hdfEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Box(Modifier.width(56.dp).height(48.dp).clip(RoundedCornerShape(10.dp))
                 .background(if (settings.hdrEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
                 .toggleable(value = settings.hdrEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdr() }
                 .semantics {
-                    contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
+                    contentDescription = "光晕开关（高光柔化与外圈辉光）"
                     stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
                 }, contentAlignment = Alignment.Center) {
-                Text("HDF", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                Text("光晕", fontWeight = FontWeight.Bold, fontSize = 12.sp,
                     color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -1703,7 +1768,9 @@ private fun ShootingControls(
         if (adjustmentTab != AdjustmentTab.LOOK) {
             Row(Modifier.fillMaxWidth().height(48.dp).horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(2.dp), verticalAlignment = Alignment.CenterVertically) {
-                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "影调", settings.filmId != null,
+                // This chip opens the FILM section, so its empty-state label must say 胶片 —
+                // it used to read 影调 while opening the film list.
+                ControlButton(FilmRegistry.find(settings.filmId)?.displayName ?: "胶片", settings.filmId != null,
                     enabled = loaded, onClick = { onTab(AdjustmentTab.FILM) })
                 // Keep the collapsed surface camera-like: a few high-frequency choices
                 // are visible, while the complete recipe catalog remains in the panel.
@@ -1883,11 +1950,16 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
             ControlButton(item.label, item == parameter, onClick = { parameter = item })
         }
     }
+    if (parameter == LookParameter.DIFFUSION) {
+        // The optical layers are global (not per-look color parameters), so the chip
+        // opens a dedicated two-layer section instead of the single generic slider.
+        DiffusionAdjustments(settings, model)
+        return
+    }
     val range = if (parameter.signed) -1f..1f else 0f..1f
     val valueLabel = if (parameter.signed) "%+d".format((value * 4).roundToInt()) else "${(value * 100).roundToInt()}%"
     Row(Modifier.fillMaxWidth().heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(if (parameter == LookParameter.DIFFUSION) "柔光 · 软件模拟" else parameter.label,
-            style = MaterialTheme.typography.bodyMedium)
+        Text(parameter.label, style = MaterialTheme.typography.bodyMedium)
         Spacer(Modifier.weight(1f))
         Text(valueLabel, fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary,
             style = MaterialTheme.typography.bodyMedium)
@@ -1901,38 +1973,97 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
         StepButton("+", "提高${parameter.label}", value < range.endInclusive) { setValue((value + step).coerceIn(range)) }
     }
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp), verticalAlignment = Alignment.CenterVertically) {
-        if (parameter == LookParameter.DIFFUSION) {
-            Text(if (settings.hdfEnabled) "全局柔光已开启" else "高光柔化 · 外层光晕",
-                Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            TextButton(onClick = model::toggleHdr, enabled = true,
-                modifier = Modifier.heightIn(min = 48.dp).semantics {
-                    contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
-                    stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
-                }) {
-                Text(if (settings.hdrEnabled) "HDF · 关" else "HDF", fontSize = 12.sp,
-                    color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            TextButton(onClick = model::toggleHdf, modifier = Modifier.heightIn(min = 48.dp)
-                .semantics { contentDescription = "柔光开关" }) {
-                Text(if (settings.hdfEnabled) "柔光 · 关" else "柔光", fontSize = 12.sp)
-            }
-        } else {
-            TextButton(onClick = importLut, enabled = !importing, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text(if (importing) "导入中…" else "导入 LUT", fontSize = 12.sp)
-            }
-            Spacer(Modifier.weight(1f))
-            TextButton(onClick = model::resetCurrentLook, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text("重置当前影调", fontSize = 12.sp)
-            }
+        TextButton(onClick = importLut, enabled = !importing, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text(if (importing) "导入中…" else "导入 LUT", fontSize = 12.sp)
+        }
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = model::resetCurrentLook, modifier = Modifier.heightIn(min = 48.dp)) {
+            Text("重置当前影调", fontSize = 12.sp)
         }
     }
-    Text(if (parameter == LookParameter.DIFFUSION) "柔光与白平衡对所有预设生效。"
-        else if (settings.filmId != null) "胶片 · ${FilmRegistry.find(settings.filmId)?.displayName.orEmpty()} · 独立记忆参数"
+    Text(if (settings.filmId != null) "胶片 · ${FilmRegistry.find(settings.filmId)?.displayName.orEmpty()} · 独立记忆参数"
         else if (settings.preset == ColorPreset.CUSTOM.name && settings.lutName != null) "LUT · ${settings.lutName}"
         else "每套影调单独记忆参数。",
         Modifier.padding(bottom = 10.dp), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+}
+
+/**
+ * The two software-simulated optical diffusion layers, both global across looks/films:
+ * 柔光 (hdf) softens the whole frame like a Black Pro-Mist; 光晕 (hdr) blooms only the
+ * near-clipping highlights with an outer halo. They used to share the "HDF" label in
+ * four scattered places and the halo strength had no control at all (T116).
+ */
+@Composable
+private fun DiffusionAdjustments(settings: AppSettings, model: CameraViewModel) {
+    DiffusionStrengthRow(
+        title = "柔光", hint = "全局柔化 · 黑柔滤镜风格，对整张画面生效",
+        enabled = settings.hdfEnabled, strength = settings.hdfStrength,
+        toggleDescription = "柔光开关（全局柔化，黑柔滤镜风格）",
+        sliderDescription = "柔光强度",
+        onToggle = model::toggleHdf, onStrength = model::setHdfStrength)
+    DiffusionStrengthRow(
+        title = "光晕", hint = "高光柔化 · 只在接近过曝的高光上扩散并形成外圈辉光",
+        enabled = settings.hdrEnabled, strength = settings.hdrStrength,
+        toggleDescription = "光晕开关（高光柔化与外圈辉光）",
+        sliderDescription = "光晕强度",
+        onToggle = model::toggleHdr, onStrength = model::setHdrStrength)
+    Text("柔光与光晕对所有影调 / 胶片生效，强度各自独立记忆；拖动强度会自动开启。",
+        Modifier.padding(top = 2.dp, bottom = 10.dp), style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun DiffusionStrengthRow(
+    title: String,
+    hint: String,
+    enabled: Boolean,
+    strength: Float,
+    toggleDescription: String,
+    sliderDescription: String,
+    onToggle: () -> Unit,
+    onStrength: (Float) -> Unit,
+) {
+    val range = 0f..1f
+    val step = .1f
+    // Adjusting strength while the layer is off is an implicit enable.
+    val adjust: (Float) -> Unit = { amount ->
+        onStrength(amount.coerceIn(range))
+        if (!enabled) onToggle()
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        Row(Modifier.fillMaxWidth().heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(title, style = MaterialTheme.typography.bodyMedium,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = .62f))
+            Spacer(Modifier.weight(1f))
+            Box(Modifier.height(30.dp).clip(RoundedCornerShape(9.dp))
+                .background(if (enabled) MaterialTheme.colorScheme.primary.copy(alpha = .16f)
+                else MaterialTheme.colorScheme.onSurface.copy(alpha = .08f))
+                .toggleable(value = enabled, role = Role.Switch) { onToggle() }
+                .semantics {
+                    contentDescription = toggleDescription
+                    stateDescription = if (enabled) "已开启" else "已关闭"
+                }
+                .padding(horizontal = 10.dp), contentAlignment = Alignment.Center) {
+                Text(if (enabled) "已开启" else "已关闭", fontSize = 12.sp,
+                    color = if (enabled) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Text("${(strength * 100).roundToInt()}%", Modifier.width(46.dp).padding(start = 8.dp),
+                fontFamily = FontFamily.Monospace, color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.End)
+        }
+        Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+            StepButton("−", "降低$sliderDescription", strength > range.start) { adjust(strength - step) }
+            Slider(value = strength.coerceIn(range), onValueChange = adjust, valueRange = range,
+                steps = 9, modifier = Modifier.weight(1f).graphicsLayer { alpha = if (enabled) 1f else .45f }
+                    .semantics { contentDescription = sliderDescription })
+            StepButton("+", "提高$sliderDescription", strength < range.endInclusive) { adjust(strength + step) }
+        }
+        Text(hint, Modifier.padding(bottom = 2.dp), style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
 }
 
 @Composable
@@ -2150,7 +2281,7 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     Text("根据取景画面的光线与色彩，偶尔推荐合适的胶片或影调；只建议，不会自动更改。点取景器卡片可试用，也能一键还原。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     ToggleRow("曝光提示", settings.exposureAdviceEnabled) { model.setExposureAdviceEnabled(it) }
-    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示开启 HDF；只建议，不会自动改曝光。",
+    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示开启光晕；只建议，不会自动改曝光。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)
