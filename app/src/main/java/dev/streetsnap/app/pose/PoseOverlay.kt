@@ -3,6 +3,11 @@ package dev.streetsnap.app.pose
 import android.os.VibrationEffect
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -30,6 +35,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -88,34 +94,70 @@ private fun LivePoseLayer(
     val targetColor by animateColorAsState(
         if (ready) Color(0xFF54C97E) else Color(0xFFFFB36B),
         animationSpec = tween(220, easing = FastOutSlowInEasing), label = "poseTargetColor")
+    // T115: a slow breathing ring on every target joint the observed joint is still far
+    // from, so the glanceable cue is "which joint goes where" rather than two overlapping
+    // figures the eye has to diff.
+    val pulseTransition = rememberInfiniteTransition(label = "posePulse")
+    val pulse by pulseTransition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(1_100, easing = LinearEasing), RepeatMode.Restart),
+        label = "posePulsePhase")
     Box(modifier) {
         Canvas(Modifier.fillMaxSize()) {
             val sample = guide?.sample
-            // Only draw once a person is actually detected: the white figure hugs the real
-            // body and the amber target is projected onto that same body (it follows the
-            // moving person). With nobody in frame nothing is rendered — the bottom card
-            // carries the instruction; a fixed centre figure would pretend the person is
-            // already placed where the overlay is.
+            // Only draw once a person is actually detected. T115 separates the two figures
+            // that T109 deliberately co-located: the observed body is a faint dashed ghost
+            // (it reads as "you now"), the target stays a bold solid figure with ring joints
+            // and a soft glow ("go here"), and mismatched joints pulse. On ready the ghost
+            // fades almost completely and the target settles to green.
             if (sample != null && guide.personVisible) {
                 drawSkeleton(
                     points = sample.points.mapIndexed { index, point -> index to point }.toMap(),
                     normalised = true,
                     visible = { index -> sample.points.getOrNull(index)?.isVisible == true },
-                    color = Color.White.copy(alpha = .72f),
-                    jointRadius = 3.2.dp.toPx(),
-                    strokeWidth = 2.dp.toPx(),
-                    dashed = false,
+                    color = Color.White.copy(alpha = if (ready) .18f else .50f),
+                    jointRadius = 2.4.dp.toPx(),
+                    strokeWidth = 1.5.dp.toPx(),
+                    dashed = true,
                 )
-                definition.template.projectTo(sample)?.let { projected ->
+                val projected = definition.template.projectTo(sample)
+                if (projected != null) {
+                    // Soft outer glow first, so the bold target stays legible over bright scenes.
+                    drawSkeleton(
+                        points = projected,
+                        normalised = true,
+                        visible = { true },
+                        color = targetColor.copy(alpha = .14f),
+                        jointRadius = 0f,
+                        strokeWidth = 9.dp.toPx(),
+                        dashed = false,
+                    )
                     drawSkeleton(
                         points = projected,
                         normalised = true,
                         visible = { true },
                         color = targetColor,
-                        jointRadius = 4.dp.toPx(),
-                        strokeWidth = 2.5.dp.toPx(),
+                        jointRadius = 4.2.dp.toPx(),
+                        strokeWidth = 3.5.dp.toPx(),
                         dashed = false,
+                        jointRing = true,
                     )
+                    if (!ready) {
+                        JOINT_GUIDE_INDICES.forEach { index ->
+                            val observed = sample.points.getOrNull(index)?.takeIf { it.isVisible }
+                                ?: return@forEach
+                            val goal = projected[index] ?: return@forEach
+                            if (dist(observed, goal) >= JOINT_GUIDE_THRESHOLD) {
+                                val center = placePoint(goal, normalised = true)
+                                drawCircle(
+                                    color = targetColor.copy(alpha = .55f * (1f - pulse)),
+                                    radius = (7f + 7f * pulse).dp.toPx(),
+                                    center = center,
+                                    style = Stroke(width = 2.dp.toPx()),
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -141,6 +183,11 @@ private fun LivePoseLayer(
                 color = Color.White.copy(alpha = .82f), fontSize = 11.sp,
                 maxLines = 2)
             if (!ready) {
+                // One-line legend: T115 made the observed figure a dashed ghost and the
+                // target a bold ringed figure, so first-time users need the mapping.
+                Text("白色虚线＝你的动作　圆圈＝目标关节",
+                    Modifier.padding(top = 4.dp),
+                    color = Color.White.copy(alpha = .45f), fontSize = 9.sp, maxLines = 1)
                 val score = (guide?.score ?: 0f).coerceIn(0f, 1f)
                 Box(Modifier.padding(top = 6.dp).fillMaxWidth().height(3.dp)
                     .clip(RoundedCornerShape(1.5.dp))
@@ -182,9 +229,10 @@ private fun DemoPoseLayer(
                     normalised = false,
                     visible = { true },
                     color = Color(0xFFFFB36B),
-                    jointRadius = 4.dp.toPx(),
-                    strokeWidth = 2.5.dp.toPx(),
+                    jointRadius = 4.2.dp.toPx(),
+                    strokeWidth = 3.5.dp.toPx(),
                     dashed = false,
+                    jointRing = true,
                 )
             }
             Text(definition.title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
@@ -194,7 +242,7 @@ private fun DemoPoseLayer(
             Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 PoseCatalog.poses.forEach { pose ->
                     val active = pose.id == definition.id
-                    Box(Modifier.padding(horizontal = 4.dp).size(8.dp)
+                    Box(Modifier.padding(horizontal = 3.dp).size(7.dp)
                         .clip(CircleShape)
                         .background(if (active) Color(0xFFFFB36B) else Color.White.copy(alpha = .30f)))
                 }
@@ -228,9 +276,33 @@ private val DRAWN_JOINTS = setOf(
     PoseJoint.LEFT_ANKLE, PoseJoint.RIGHT_ANKLE,
 )
 
+// Limb joints that carry a pulsing target ring while far from the observed position.
+private val JOINT_GUIDE_INDICES = intArrayOf(
+    PoseJoint.LEFT_ELBOW, PoseJoint.RIGHT_ELBOW,
+    PoseJoint.LEFT_WRIST, PoseJoint.RIGHT_WRIST,
+    PoseJoint.LEFT_KNEE, PoseJoint.RIGHT_KNEE,
+    PoseJoint.LEFT_ANKLE, PoseJoint.RIGHT_ANKLE,
+)
+
+// Normalised-image distance above which a target joint pulses. x/y are fractions of frame
+// width/height respectively, so the Euclidean value is aspect-ratio dependent; the 0.06
+// default is a first guess awaiting real-subject calibration in the T90 device pass.
+private const val JOINT_GUIDE_THRESHOLD = .06f
+
+/** Normalised points multiply the canvas size (with a small bleed margin); demo points are pixel space. */
+private fun DrawScope.placePoint(point: PosePoint, normalised: Boolean): Offset =
+    if (normalised) {
+        Offset(point.x.coerceIn(-.1f, 1.1f) * size.width,
+            point.y.coerceIn(-.1f, 1.1f) * size.height)
+    } else {
+        Offset(point.x, point.y)
+    }
+
 /**
  * Draws the MediaPipe edge subset plus a nose-to-shoulder-mid head line. [normalised]
  * observed/projected points multiply the canvas size; demo projections are pixel space.
+ * Ring joints ([jointRing]) belong to the target figure: a dark outline keeps the amber
+ * ring readable on any background.
  */
 private fun DrawScope.drawSkeleton(
     points: Map<Int, PosePoint>,
@@ -240,12 +312,9 @@ private fun DrawScope.drawSkeleton(
     jointRadius: Float,
     strokeWidth: Float,
     dashed: Boolean,
+    jointRing: Boolean = false,
 ) {
-    fun place(point: PosePoint): Offset = if (normalised) {
-        Offset(point.x.coerceIn(-.1f, 1.1f) * size.width, point.y.coerceIn(-.1f, 1.1f) * size.height)
-    } else {
-        Offset(point.x, point.y)
-    }
+    fun place(point: PosePoint): Offset = placePoint(point, normalised)
     fun at(index: Int): PosePoint? = points[index]?.takeIf { visible(index) }
     val effect = if (dashed) PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f) else null
     fun edge(first: Int, second: Int) {
@@ -264,6 +333,13 @@ private fun DrawScope.drawSkeleton(
     }
     DRAWN_JOINTS.forEach { index ->
         val point = at(index) ?: return@forEach
-        drawCircle(color, jointRadius, place(point))
+        if (jointRing) {
+            drawCircle(Color.Black.copy(alpha = .38f), jointRadius * 1.85f, place(point),
+                style = Stroke(width = 3.5.dp.toPx()))
+            drawCircle(color, jointRadius * 1.35f, place(point),
+                style = Stroke(width = 2.dp.toPx()))
+        } else {
+            drawCircle(color, jointRadius, place(point))
+        }
     }
 }
