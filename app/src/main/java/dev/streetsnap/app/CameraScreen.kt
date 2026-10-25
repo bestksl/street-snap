@@ -799,7 +799,17 @@ private fun Viewfinder(
             // Compact by design: capped width, tight padding, single-line supporting rows so
             // it never covers more than a corner of the frame (user feedback, 2026-10-19).
             if (settings.compositionEnabled) {
-                Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = floatingClearance)
+                // T115: the live pose card sits bottom-centre and runs up to ~100dp tall after
+                // its legend row was added; on a portrait phone it otherwise slides under this
+                // start-anchored card (user feedback: pose and composition hints overlap).
+                // Lift the composition card above it. Landscape keeps separate horizontal
+                // slots (corner vs centre), so no lift there. The gap stays constant in the
+                // ready phase even though the pose card shrinks, to avoid visible reflow.
+                val poseCardVisible = settings.poseAssistantEnabled && poseState.live && activeTrial == null
+                val adviceBottom by animateDpAsState(
+                    floatingClearance + if (poseCardVisible && maxHeight > maxWidth) 112.dp else 0.dp,
+                    animationSpec = tween(220, easing = FastOutSlowInEasing), label = "adviceCardBottom")
+                Column(Modifier.align(Alignment.BottomStart).padding(start = 10.dp, bottom = adviceBottom)
                     .graphicsLayer { alpha = adviceCardAlpha }
                     .widthIn(max = 208.dp)
                     .background(Color.Black.copy(alpha = .68f), RoundedCornerShape(8.dp)).padding(horizontal = 8.dp, vertical = 6.dp)
