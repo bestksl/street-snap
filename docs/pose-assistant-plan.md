@@ -125,7 +125,7 @@ ImageAnalysis 帧 ──► PoseSource 接口
 - not-verified 真机遗留不变：帧率发热（lite/full）、暗光逆光、骨架贴合与投影对齐、
   引导有效率、姿势库覆盖度。
 
-### 2026-10-21 补（T78）：混淆包 live 模式被 R8 打回演示的真坑
+### 2026-10-21 补（T78）：混淆包 live 模式被 R8 打回演示的问题
 
 首版 preview APK 在模拟器与真机上都表现为"模型已安装却永远演示模式"，debug 构建从不复现，
 根因是 **R8 fullMode 对 MediaPipe 传递依赖优化过度**，且两道坎串行暴露：
