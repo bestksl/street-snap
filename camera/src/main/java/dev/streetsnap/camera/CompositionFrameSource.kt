@@ -37,7 +37,13 @@ class CompositionFrameSource(
     private val maximumEdge: Int = 384,
     sceneIntervalMs: Long = 500L,
     onError: (Throwable) -> Unit = {},
-    private val onSceneChanged: () -> Unit = {},
+    /**
+     * Scene observations diverged, or the source was invalidated. [hard] distinguishes a
+     * rebind/rotation/invalidation (true: the old frame is dead, advice must not survive)
+     * from an ordinary content change observed by the scene watcher (false: the picture
+     * simply changed — a live guide clears and repaints, a one-shot request may persist).
+     */
+    private val onSceneChanged: (hard: Boolean) -> Unit = {},
     /** Read-only, thread-safe demand check on the camera executor, before copying a full RGB frame. */
     private val shouldCaptureFrame: () -> Boolean = { true },
     onFrame: suspend (CompositionFrame) -> Unit,
@@ -86,7 +92,7 @@ class CompositionFrameSource(
             active = false; generation++; frameEpoch++; sampling.reset(); sceneSampling.reset(); sceneTracker.reset()
         }
         gate.dropPending()
-        runCatching(onSceneChanged)
+        runCatching { onSceneChanged(true) }
     }
 
     /** Called after detachment. A live source can be rebound after a rotation or preview resize. */
@@ -112,7 +118,7 @@ class CompositionFrameSource(
             previous
         }
         gate.dropPending()
-        if (wasActive) runCatching(onSceneChanged)
+        if (wasActive) runCatching { onSceneChanged(true) }
     }
 
     internal fun resume() = synchronized(lock) {
@@ -137,7 +143,7 @@ class CompositionFrameSource(
         synchronized(lock) { frameEpoch++; sampling.reset(); sceneSampling.reset(); sceneTracker.reset() }
         gate.dropPending()
         // Rotation/zoom invalidates a displayed rectangle as well as in-flight work.
-        runCatching(onSceneChanged)
+        runCatching { onSceneChanged(true) }
     }
 
     internal fun analyze(image: ImageProxy, session: Long) {
@@ -160,7 +166,7 @@ class CompositionFrameSource(
                 val changed = sceneTracker.observe(signature, now)
                 changed to if (reserved) sceneTracker.capture() else null
             }
-            if (sceneChanged) runCatching(onSceneChanged)
+            if (sceneChanged) runCatching { onSceneChanged(false) }
             if (!reserved) return
             val frame = copyFrame(image, now / 1_000_000L,
                 current = {

@@ -1,6 +1,15 @@
 # 界面截图
 
-> **2026-10-26 更新（T116 批次）：** 配合取景页菜单梳理（「柔光 / 光晕」定名、扩散专区）与快门位移修复，五张主图全部重拍：`viewfinder.png`、`pose-live-guide.png`、`pose-ready.png`、`pose-demo.png`、`compose-panel.png`。本批次人物画面统一使用 COCO 183391（CC BY-SA 2.0）单一来源，演示模式图改用纯灰场景、不再注入任何照片。2026-10-25 批次的方法记录与署名保留在后文。
+> **2026-10-27 更新（T118 批次）：** 配合取景页回归修复（HDF 命名回正、测光肩屏与建议卡重叠、单次构图建议自消失），重拍四张主图：`viewfinder.png`、`pose-live-guide.png`、`pose-ready.png`、`pose-demo.png`。人物画面仍为 COCO 183391（CC BY-SA 2.0）单一来源、纯灰演示图不注入照片。T116 批次的 `compose-panel.png` 与方法记录保留在后文。
+>
+> **2026-10-26（T116 批次）：** 配合取景页菜单梳理（「柔光 / HDF」区分、扩散专区）与快门位移修复，五张主图全部重拍：`viewfinder.png`、`pose-live-guide.png`、`pose-ready.png`、`pose-demo.png`、`compose-panel.png`（前四者 T118 已再次重拍）。
+
+## 截图环境（2026-10-27，T118 批次）
+
+- JDK / Android SDK / AVD 同 T116（Temurin 17.0.21+9，JAVA_HOME 必须指到 bundle 内的 `Contents/Home`；emulator 无头 `-no-window -gpu host -grpc 8554`）。
+- **APK**：`./gradlew :app:assembleDebug` 本机构建安装，包名 `dev.streetsnap.app`，代码基线为分支 **`fix/t118-hdf-layout-regressions`**（HDF 命名回正 + 取景页布局与构图保活修复，随本 PR 提交）。
+- **场景切换改回冷启**：T116 记录的 gRPC 热切（`vsctl2.py`）在本机当前 emulator 版本上异常——返回约 6 KB 浮点数组样式二进制而非 `0801` protobuf 响应、场景不切换。本批一律改 `environment.ini` 后 `adb emu kill` 冷启（mesh3d↔imagefile 切换本就要求冷启）。
+- **定帧**：人物录屏 `rt118.mp4`（screenrecord 12 Mbps、45 s）按 0.2 s 抽帧 + 像素扫描定位绿窗（f0039–f0049），逐张目检定稿；演示图为 `screencap` 直截。
 
 ## 截图环境（2026-10-26，T116 批次）
 
@@ -14,7 +23,7 @@
 
 ## 出图方法
 
-- **虚拟场景 imagefile 模式**：AVD `environment.ini` 写 `version = 1` + `scene.mode = imagefile:<主机绝对路径>`。运行中经 gRPC 热切：服务 `android.emulation.control.incubating.VirtualSceneService/reloadEnvironment`（明文 gRPC，本机自写 HTTP/2 客户端 `/tmp/lwl-emulator-ctl/vsctl2.py`，不进仓），payload 为 protobuf 字符串帧（field 1 直接放 ini 文本，无空格），成功响应 `0801`；**同路径文件替换内容不生效，每次热切必须换新文件名**。
+- **虚拟场景 imagefile 模式**：AVD `environment.ini` 写 `version = 1` + `scene.mode = imagefile:<主机绝对路径>`。运行中经 gRPC 热切：服务 `android.emulation.control.incubating.VirtualSceneService/reloadEnvironment`（明文 gRPC，本机自写 HTTP/2 客户端 `/tmp/lwl-emulator-ctl/vsctl2.py`，不进仓），payload 为 protobuf 字符串帧（field 1 直接放 ini 文本，无空格），成功响应 `0801`；**同路径文件替换内容不生效，每次热切必须换新文件名**。（2026-10-27 T118 时该通道在本机当前 emulator 上失效，返回非 protobuf 二进制，已改回改 ini + 冷启。）
 - **冷启隐私指示器规避**：Android 15 相机会话建立后，systemui 的 `ScreenDecorOverlay` 会在右上角弹约 15 秒的绿色隐私胶囊（已用 `dumpsys window windows` 确认归属，非 App 控件），冷启即拍会截入画面。本批流程：先热切到纯灰 imagefile → 冷启 App（灰场无人，姿势永不达标、不轮换）→ 等 19 秒确认胶囊消失 → 再热切人物图。
 - **姿势索引与绿帧**：冷启重置为第 1 个姿势「单手举高」；该测试照在热切后约 1.3–2.6 秒真实达标（PoseCoach：`SCORE_READY=0.75`、连续 4 帧确认），ready 绿窗约 2.1 秒，2200ms 后自动轮换到「双手举起」。用 `screenrecord --time-limit` 录屏后 AVFoundation 按 0.05 秒抽帧（`extractframes.swift`），自写像素扫描按绿（`#54C97E`）/ 琥珀计数定位帧号，再逐张目检定稿——不是手工摆造或后期改色。
 - **演示模式**：`adb run-as dev.streetsnap.app` 把 `files/pose-models/pose_landmarker_lite/model.task` 临时改名为 `.hold`，App 回落到演示模式；截后已改回并重新启动确认识别恢复。
@@ -23,10 +32,10 @@
 
 ## 本批图片
 
-- `viewfinder.png`（720×1560）：竖屏相机背式布局，**原色**影调、光晕角钮可见。两卡同屏：左侧画面分析建议卡（动作句 + 三分构图书签行 +「画面分析建议 · 画面分析 172 ms」时序）与底部居中绿色达标姿势卡「姿势到位 · 保持 / 很好，下一个姿势马上来」，上下分离互不遮挡；蓝色推荐取景框为该次点「构图」的真实规则分析结果。场景：imagefile COCO 183391（画布参数②，录屏 rec3 帧 f0080）。
-- `pose-live-guide.png`（720×1560）：实时引导态（自动轮换后的第 2 个姿势「双手举起」）。**白色虚线** ghost 骨架贴合真实人体，**琥珀色**目标骨架与关节圆环（未达标关节呼吸脉冲）；卡片含动作提示「左手再抬高一些，举过肩膀」、图例与进度条。场景：imagefile COCO 183391（画布参数①，录屏帧 f0150）。
-- `pose-ready.png`（720×1560）：**真实达标保持态**（同一录屏序列，绿帧窗口 f0054–f0094，定版 f0070）。骨架与关节环全部转绿（`#54C97E`），ghost 淡出，卡片为「姿势到位 · 保持 / 很好，下一个姿势马上来」，图例与进度条按设计隐藏。场景：imagefile COCO 183391（画布参数①）。
-- `pose-demo.png`（720×1560）：演示模式（临时移走姿态模型）。纯灰 imagefile 场景（不注入任何照片），卡内静态琥珀色小人示范「单手举高」，下方 12 个分页圆点（第 1 个高亮）与「换个姿势」按钮；无模型时仍可浏览全部 12 个姿势。
+- `viewfinder.png`（720×1560，T118 定版）：竖屏相机背式布局，**原色**影调、**HDF** 角钮可见（T118 已把 T116 误改的「光晕」回正为 HDF）。三卡同屏且全部落在 3:4 取景框内部、上下分离：曝光建议卡「暗部太黑，建议 EV+0.5」（HDF 角钮下方）、画面分析建议卡（三分构图动作句 +「画面分析建议 · 画面分析 9 ms」）、底部居中绿色达标姿势卡「姿势到位 · 保持」；测光肩屏「P 1/100 s ISO 200 · EV」在取景框外独立成行，与任何卡片不重叠（T118 修复点）。场景：imagefile COCO 183391（画布参数①，录屏 rt118 帧 f0047）。
+- `pose-live-guide.png`（720×1560，T118 定版）：实时引导态（自动轮换后的第 2 个姿势「双手举起」）。**白色虚线** ghost 骨架贴合真实人体，**琥珀色**目标骨架与关节圆环（未达标关节呼吸脉冲）；卡片含动作提示「左手再抬高一些，举过肩膀」、图例与进度条；画面分析建议卡同屏且不压肩屏。场景：imagefile COCO 183391（画布参数①，录屏 rt118 帧 f0070）。
+- `pose-ready.png`（720×1560，T118 定版）：**真实达标保持态**（同一录屏序列，绿帧窗口 f0039–f0049，定版 f0039）。骨架与关节环全部转绿（`#54C97E`），ghost 淡出，卡片为「姿势到位 · 保持 / 很好，下一个姿势马上来」，图例与进度条按设计隐藏。场景：imagefile COCO 183391（画布参数①）。
+- `pose-demo.png`（720×1560，T118 定版）：演示模式（临时移走姿态模型，截后已改回）。纯灰 imagefile 场景（不注入任何照片），卡内静态琥珀色小人示范「单手举高」，下方 12 个分页圆点（第 1 个高亮）与「换个姿势」按钮；左下角为真实常驻提示「点"构图"分析当前画面」（截图时实时构图已关）。无模型时仍可浏览全部 12 个姿势。
 - `compose-panel.png`（720×1560）：「调整 → 拍摄」面板。「姿势助手 · 实验性」开关开启，副文案「实时识别已就绪 · 白骨架贴合人体，琥珀色小人示范目标姿势」、「实时识别模型已安装 · 5.5 MB」、「删除本地模型」、「模型来自 Google MediaPipe（Apache-2.0），所有计算都在手机本地完成，画面不上传、不保存」；上方可见「AI 推理：安装模型后显示实测耗时」（d1 未安装的真实状态）。背景相机实时引导仍在运行（imagefile COCO 183391，画布参数②）。**2026-10-26 产品页精简后不再展示于根 README，文件保留作记录。**
 
 ## 第三方照片署名
@@ -50,7 +59,7 @@
 ## 证据边界
 
 - 全部截图来自 qemu 模拟器（无头、`-gpu host`），**不代表荣耀 Vs3 真机**的成像、骨架贴合度、帧率、温升或功耗；姿态识别在平面照片上运行，只验证识别与引导链路本身。
-- `pose-ready.png` 的转绿是该测试照片上 PoseCoach 的真实判定（录屏全量抽帧所得），不是真机命中率证据。
+- `pose-ready.png` 的转绿是该测试照片上 PoseCoach 的真实判定（录屏全量抽帧所得，T118 绿窗 f0039–f0049），不是真机命中率证据。
 - `compose-panel.png` 中 d1 未安装、姿态模型 5.5 MB 已安装均为截图时设备真实状态。
 - 模拟器 HAL 不报告数字变焦，焦段条呈灰态；真机行为可能不同。
 
