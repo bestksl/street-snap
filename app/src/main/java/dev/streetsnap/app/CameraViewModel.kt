@@ -114,7 +114,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         val nextEv = (capture.exposureCompensationIndex + advice.issue.evDirection) * step
         _exposureAdviceCard.value = ExposureAdviceCard(
             when (advice.issue) {
-                ExposureIssue.WIDE_DYNAMIC_RANGE -> "明暗光比大，可开「光晕」柔化高光或避开强光"
+                ExposureIssue.WIDE_DYNAMIC_RANGE -> "明暗光比大，可开「HDF」柔化高光或避开强光"
                 ExposureIssue.HIGHLIGHTS_CLIPPED -> "高光过亮，建议 EV %+.1f".format(nextEv)
                 ExposureIssue.SHADOWS_CLIPPED -> "暗部太黑，建议 EV %+.1f".format(nextEv)
             },

@@ -691,14 +691,19 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                             shouldCaptureFrame = {
                                 isCurrentSession() && (manualRequestPending || config.realtime || config.lookAdvice)
                             },
-                            onSceneChanged = {
+                            onSceneChanged = { hard ->
                                 scope.launch(Dispatchers.Main.immediate) {
                                     // T76: the AF/AE hunt right after a focus tap is not a real
                                     // scene change — keep the rectangle, arrow and look card.
-                                    if (isCurrentSession() && !focusGate.isDisturbing()) {
-                                        requestGracefulClear()
-                                        sceneChangeListener?.invoke()
-                                    }
+                                    if (!isCurrentSession() || focusGate.isDisturbing()) return@launch
+                                    // Hard invalidation (camera rebind/rotation/model switch) always
+                                    // invalidates shown advice. A mere content change only clears a
+                                    // LIVE guide: realtime repaints on the next frame within the grace
+                                    // window, while a one-shot request must survive ordinary motion
+                                    // (handheld shake, AE, a moving subject) — otherwise the requested
+                                    // rectangle vanished a few seconds after tapping 构图 (T118).
+                                    if (hard || config.realtime) requestGracefulClear()
+                                    sceneChangeListener?.invoke()
                                 }
                             }, onError = { error ->
                                 scope.launch(Dispatchers.Main.immediate) {
@@ -715,7 +720,11 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                                 val frameMode = withContext(Dispatchers.Main.immediate) {
                                     if (!isCurrentSession() || !frame.isCurrent ||
                                         !resultGate.isFreshForInference(ticket, SystemClock.elapsedRealtime())) return@withContext null
-                                    if (visibleScene?.invoke() == false && !focusGate.isDisturbing())
+                                    // Age-out applies to the live guide only: a realtime stream
+                                    // repaints within the grace window, whereas a one-shot request
+                                    // must outlast look-only frames arriving after it (T118).
+                                    if (config.realtime && visibleScene?.invoke() == false &&
+                                        !focusGate.isDisturbing())
                                         requestGracefulClear()
                                     val requested = manualRequestPending
                                     if (!requested && !config.realtime && !config.lookAdvice) return@withContext null

@@ -286,13 +286,16 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // Tall enough for the body card to read as a camera plate rather than
                         // a flattened strip (T22: 48dp crowded the 74x40 artwork).
                         val nameplateHeight = if (hideNameplate) 0.dp else 80.dp
-                        // Worst case the cluster can show: divider + paddings + one override
-                        // chip row + focal row + fixed focal/shutter gap + 92dp shutter row.
-                        // Reserve it up front; on short screens the 3:4 picture shrinks a
-                        // touch instead of clipping.
+                        // Fixed content the cluster can show: divider + paddings + the
+                        // constant 36dp override-chip slot + shoulder strip + focal row +
+                        // fixed focal/shutter gap + 92dp shutter row = 254dp. The chip slot
+                        // is always reserved (T116) so it must be counted here; when the
+                        // reservation was still 218dp the weighted slack spacer measured
+                        // zero and the whole cluster top-aligned (T118). On short screens
+                        // the 3:4 picture shrinks a touch instead of clipping.
                         // The bottom band owns the navigation-bar inset; reserve it here so
                         // the 3:4 picture sizing matches the old safe-area layout.
-                        val clusterMinHeight = 218.dp + navigationBarBottom
+                        val clusterMinHeight = 254.dp + navigationBarBottom
                         val framedWidth = minOf(maxWidth,
                             (maxHeight - statusBarTop - nameplateHeight - clusterMinHeight) * 3f / 4f)
                         Column(Modifier.fillMaxSize().background(Color.Black)) {
@@ -797,10 +800,11 @@ private fun Viewfinder(
             // column hosts only the optional small histogram window.
             HdrToggleButton(settings.hdrEnabled, model::toggleHdr,
                 Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = systemBarTop + 52.dp))
-            // Clipped-highlight/shadow hint. In framed portrait it lives in the black control
-            // band just above the shoulder strip (see ViewfinderOverlayBar) so it never covers
-            // the viewfinder; only the floating landscape path keeps the in-frame anchor.
-            if (!framed) exposureAdviceCard?.let { card ->
+            // Clipped-highlight/shadow hint, in-frame under the HDF corner button on every
+            // layout. It used to share the black control band with the shoulder strip in
+            // framed mode, but the band has no slack once the fixed override-chip slot is
+            // reserved, so the card collided with the meter readout (T118).
+            exposureAdviceCard?.let { card ->
                 ExposureAdviceCardView(card, model::dismissExposureAdvice,
                     Modifier.align(Alignment.TopStart).padding(start = 10.dp, top = systemBarTop + 100.dp))
             }
@@ -1177,7 +1181,7 @@ private fun LookAdviceAction(
 }
 
 /**
- * Exposure hint card under the 光晕 button. Suggest-only: no button changes exposure,
+ * Exposure hint card under the HDF button. Suggest-only: no button changes exposure,
  * the × dismisses for the rest of the session (T31).
  */
 @Composable
@@ -1195,7 +1199,7 @@ private fun ExposureAdviceCardView(card: ExposureAdviceCard, onDismiss: () -> Un
     }
 }
 
-/** Always-on 光晕 (bloom / Ricoh-style highlight diffusion) toggle under the OSD corner button; quiet when off, primary-tinted while on. */
+/** Always-on HDF toggle (Ricoh-style highlight diffusion) under the OSD corner button; quiet when off, primary-tinted while on. */
 @Composable
 private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
     val tint = if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = .78f)
@@ -1203,12 +1207,12 @@ private fun HdrToggleButton(on: Boolean, onToggle: () -> Unit, modifier: Modifie
         .background(if (on) MaterialTheme.colorScheme.primary.copy(alpha = .20f) else Color.Black.copy(alpha = .32f))
         .clickable(role = Role.Button, onClick = onToggle)
         .semantics {
-            contentDescription = "光晕开关（高光柔化与外圈辉光）"
+            contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
             stateDescription = if (on) "已开启" else "已关闭"
             this.selected = on
         },
         contentAlignment = Alignment.Center) {
-        Text("光晕", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+        Text("HDF", color = tint, fontSize = 10.sp, fontFamily = FontFamily.Monospace,
             fontWeight = FontWeight.Bold, maxLines = 1)
     }
 }
@@ -1347,10 +1351,6 @@ private fun ViewfinderOverlayBar(
     val exposureMode = state.settings.exposureMode
     val ev = state.settings.exposureCompensationIndex * (state.capabilities?.exposureCompensationStepEv ?: 0.0)
     val wbName = state.settings.whiteBalance.takeIf { it != WhiteBalanceMode.AUTO }?.displayName
-    // T74: in framed portrait the exposure hint shares the black band with the shoulder strip
-    // (second collector of the same StateFlow); the landscape floating path renders it in-frame.
-    val exposureCard by model.exposureAdviceCard.collectAsStateWithLifecycle()
-
     // Only *manual overrides that can ruin a shot* get a persistent chip (Halide Mark III
     // pattern): non-auto WB, diffusion, MF, S/M exposure, EV. Tap jumps to the section,
     // long-press resets just that override. The creative look/film choice is WYSIWYG, so
@@ -1363,7 +1363,7 @@ private fun ViewfinderOverlayBar(
             })
         }
         if (settings.hdfEnabled) add(ActiveOverride("柔光", AdjustmentTab.LOOK, "关闭柔光") { model.toggleHdf() })
-        if (settings.hdrEnabled) add(ActiveOverride("光晕", AdjustmentTab.LOOK, "关闭光晕") { model.toggleHdr() })
+        if (settings.hdrEnabled) add(ActiveOverride("HDF", AdjustmentTab.LOOK, "关闭 HDF") { model.toggleHdr() })
         if (state.settings.focusDistanceDiopters != null)
             add(ActiveOverride("MF", AdjustmentTab.SHOOTING, "恢复自动对焦") { model.autoFocus() })
         if (exposureMode != ExposureMode.PROGRAM) add(ActiveOverride(
@@ -1377,17 +1377,17 @@ private fun ViewfinderOverlayBar(
         else Modifier.background(Brush.verticalGradient(listOf(Color.Transparent, Color.Black.copy(alpha = .58f))))
     // T116: the focal row and shutter are anchored to the bottom of the band. The cluster
     // used to vertically centre its whole content between two weighted spacers, so the
-    // moment an override chip appeared (柔光/光晕/non-auto WB/MF/S/M/EV) the shutter jumped
-    // down ~22dp — the reported "whole screen shifts down". Override chips and the
-    // transient exposure card now float over the black band instead of taking part in the
-    // Column, so nothing under the user's thumb ever reflows.
+    // moment an override chip appeared (柔光/HDF/non-auto WB/MF/S/M/EV) the shutter jumped
+    // down ~22dp — the reported "whole screen shifts down". Override chips keep a
+    // constant-height slot (its height is reserved in clusterMinHeight) and the transient
+    // exposure card floats inside the 3:4 viewfinder, so nothing under the user's thumb
+    // ever reflows. The inner Column MUST fill the band: without that the weighted spacer
+    // measures zero and the whole cluster top-aligns against the divider (T118 regression:
+    // shoulder strip touched the frame edge and crowded the cards).
     Box(modifier.then(chrome)
         .padding(top = if (framed) 8.dp else 46.dp, bottom = if (framed) 8.dp else 10.dp)) {
-        if (framed) exposureCard?.let { card ->
-            ExposureAdviceCardView(card, model::dismissExposureAdvice,
-                Modifier.align(Alignment.TopCenter).padding(horizontal = 12.dp))
-        }
-        Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxWidth().then(if (framed) Modifier.fillMaxHeight() else Modifier),
+            horizontalAlignment = Alignment.CenterHorizontally) {
             // Hairline that separates the 3:4 screen from the camera-back control cluster.
             if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
             // All slack collects above the controls; the shutter group is bottom-anchored.
@@ -1737,9 +1737,9 @@ private fun ShootingControls(
                     color = if (adjustmentTab == AdjustmentTab.WHITE_BALANCE) MaterialTheme.colorScheme.primary
                     else MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            // 柔光 = global soft diffusion (Black Pro-Mist style); 光晕 = highlight bloom.
-            // The two optical layers used to share one "HDF" label despite driving
-            // different settings — they now read as distinct, deliberately ordered switches.
+            // Two independent optical diffusion layers with deliberately distinct names:
+            // 柔光 = global soft diffusion (Black Pro-Mist style, hdfEnabled);
+            // HDF = Ricoh-style highlight diffusion with outer halo (hdrEnabled).
             Box(Modifier.width(56.dp).height(48.dp).clip(RoundedCornerShape(10.dp))
                 .background(if (settings.hdfEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
                 .toggleable(value = settings.hdfEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdf() }
@@ -1754,10 +1754,10 @@ private fun ShootingControls(
                 .background(if (settings.hdrEnabled) MaterialTheme.colorScheme.primary.copy(alpha = .12f) else Color.Transparent)
                 .toggleable(value = settings.hdrEnabled, enabled = loaded, role = Role.Switch) { model.toggleHdr() }
                 .semantics {
-                    contentDescription = "光晕开关（高光柔化与外圈辉光）"
+                    contentDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）"
                     stateDescription = if (settings.hdrEnabled) "开启" else "关闭"
                 }, contentAlignment = Alignment.Center) {
-                Text("光晕", fontWeight = FontWeight.Bold, fontSize = 12.sp,
+                Text("HDF", fontWeight = FontWeight.Bold, fontSize = 12.sp,
                     color = if (settings.hdrEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -1990,9 +1990,11 @@ private fun LookAdjustments(settings: AppSettings, importing: Boolean, model: Ca
 
 /**
  * The two software-simulated optical diffusion layers, both global across looks/films:
- * 柔光 (hdf) softens the whole frame like a Black Pro-Mist; 光晕 (hdr) blooms only the
- * near-clipping highlights with an outer halo. They used to share the "HDF" label in
- * four scattered places and the halo strength had no control at all (T116).
+ * Two independent software-simulated optical diffusion layers, both global across
+ * looks/films: 柔光 (hdfEnabled) softens the whole frame like a Black Pro-Mist; HDF
+ * (hdrEnabled, Ricoh Highlight Diffusion Filter style) blooms only the near-clipping
+ * highlights with an outer halo. Both carry strength sliders (T116); the halo layer keeps
+ * its original HDF name — the T116 rename to 光晕 was reverted in T118.
  */
 @Composable
 private fun DiffusionAdjustments(settings: AppSettings, model: CameraViewModel) {
@@ -2003,12 +2005,12 @@ private fun DiffusionAdjustments(settings: AppSettings, model: CameraViewModel) 
         sliderDescription = "柔光强度",
         onToggle = model::toggleHdf, onStrength = model::setHdfStrength)
     DiffusionStrengthRow(
-        title = "光晕", hint = "高光柔化 · 只在接近过曝的高光上扩散并形成外圈辉光",
+        title = "HDF", hint = "理光高光扩散 · 只在接近过曝的高光上柔化并形成外圈辉光",
         enabled = settings.hdrEnabled, strength = settings.hdrStrength,
-        toggleDescription = "光晕开关（高光柔化与外圈辉光）",
-        sliderDescription = "光晕强度",
+        toggleDescription = "HDF 高光扩散开关（理光风格高光柔化与光晕）",
+        sliderDescription = "HDF 强度",
         onToggle = model::toggleHdr, onStrength = model::setHdrStrength)
-    Text("柔光与光晕对所有影调 / 胶片生效，强度各自独立记忆；拖动强度会自动开启。",
+    Text("柔光与 HDF 对所有影调 / 胶片生效，强度各自独立记忆；拖动强度会自动开启。",
         Modifier.padding(top = 2.dp, bottom = 10.dp), style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant)
 }
@@ -2281,7 +2283,7 @@ private fun ShootingAdjustments(state: CameraState, settings: AppSettings, model
     Text("根据取景画面的光线与色彩，偶尔推荐合适的胶片或影调；只建议，不会自动更改。点取景器卡片可试用，也能一键还原。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     ToggleRow("曝光提示", settings.exposureAdviceEnabled) { model.setExposureAdviceEnabled(it) }
-    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示开启光晕；只建议，不会自动改曝光。",
+    Text("高光大面积过亮或暗部太黑时给出 EV 调整方向，明暗反差都大时提示开启 HDF；只建议，不会自动改曝光。",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     TextButton(onClick = openMascotPicker, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
         Text("相机设置", fontSize = 12.sp)

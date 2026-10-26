@@ -43,6 +43,26 @@ class CompositionFrameSourceLifecycleTest {
     }
 
     @Test
+    fun invalidationAndRebindReportHardSceneChanges() {
+        val hardFlags = mutableListOf<Boolean>()
+        val source = CompositionFrameSource(onSceneChanged = { hard -> hardFlags.add(hard) }, onFrame = {})
+        try {
+            source.activate()
+            source.invalidateFrames()
+            assertTrue(hardFlags.isNotEmpty())
+            assertTrue("frame invalidation is a hard change", hardFlags.all { it })
+
+            hardFlags.clear()
+            source.deactivate()
+            assertTrue(hardFlags.isNotEmpty())
+            assertTrue("camera rebind is a hard change", hardFlags.all { it })
+        } finally {
+            source.close()
+            source.shutdownExecutor()
+        }
+    }
+
+    @Test
     fun disposalKeepsTheExecutorAliveUntilCameraXDetachesItsAnalyzer() {
         val source = CompositionFrameSource(onFrame = {})
         try {
