@@ -24,7 +24,12 @@
 
 - 权重 **不随 APK 分发、不入 git**：用户显式下载，逐文件 SHA-256（LFS）/git-SHA1（小文件）校验、`.part` 校验后原子改名、`install.json` 就绪标记，可随时删除；INTERNET 权限仅用于此显式下载，无遥测。**2026-10-27 起下载源匿名免鉴权、国内优先**：`https://hf-mirror.com/<repo>/resolve/...` 先试，`https://huggingface.co` 兜底，逐源失败自动切换；每个文件支持 HTTP Range 断点续传（中断后 `.part` 从偏移继续，大小/哈希不符自动删残换源重下）。
 - **pinned 清单随 APK 内置**（`app/src/main/assets/edge-model-manifests/<id>-<revision>.json`，约 2 KB，可入 git；区别于普通构建会清空、被 gitignore 的 `assets/edge-models/` 权重暂存区）：`EdgeModelStore.prepare()` 优先读内置清单，**零网络**返回下载计划，HF 实时 tree API 仅在 APK 缺清单时回退——HuggingFace 被墙不再阻断「查看安装信息」。已装模型识别纯走本地 filesDir 扫描（`installed()`，不触网），同签名覆盖安装后模型不丢，面板不会再把已装模型误显为需重下（`prepareInstall()` 先本地后网络）。
-- 姿势模型（MediaPipe .task，5.5 MB）下载同样改造为多源 + Range 续传框架（`PoseModelEntry.mirrorUrls`；SHA-256 pin 使任何匿名源都可信），国内镜像 URL 经实测后补入 `PoseModelCatalog`。
+- 姿势模型（MediaPipe .task，5.5 MB）同样多源 + Range 续传：Google Storage 主源，`PoseModelEntry.mirrorUrls` 已补入魔搭社区匿名镜像（`modelscope.cn/api/v1/models/Composable/pose_landmarker_lite/repo?Revision=<commit>&FilePath=…`，固定到上传该文件的 commit 而非 master，302 跳阿里云国内 CDN）；SHA-256 pin 使任何匿名源只能提供这一个文件。
+
+**2026-10-28 凌晨国内直连实测（合肥联通家庭宽带；Clash TUN 关、系统代理被 `--noproxy` 绕过，同机直连 google.com/huggingface.co 超时确认未走代理）**：
+- d1 全 11 文件经 hf-mirror.com 全量拉取 **417.7 MiB / 69.5 s，均速 6.01 MiB/s**，逐文件 pin（5×git-SHA1 + 6×SHA-256）全部通过；小文件走镜像站内 resolve-cache，LFS 302 跳 `cas-bridge.xethub.hf.co`（HF xet CloudFront，该网络直连可达，大文件 9.6–13.3 MiB/s），Range 206 + Content-Range 正确；App 内 `HttpURLConnection` 跟随该跨域 302 下载、安装、ONNX 建图推理全链路通过（清数据后真实下载，非模拟）。
+- 断网冷启面板本地识别：d1「已安装 · 417.7 MB」、pose「已安装 · 5.5 MB」，App 无任何网络错误；断网状态下 `adb install -r` 覆盖安装后两模型仍在、面板仍显已安装（更新保留实证）。
+- 备选源排查：ModelScope 搜索虽能命中 `onnx-community/d1-omni-600M-ONNX`，但仓库实体未同步（tree/文件直链均 404），不可用；Gitee AI `hf-models` 与 wisemodel 对该模型均 404。hf-mirror + huggingface.co 两源即足够，后续若 xet CDN 在某运营商被封，再补自建国内镜像。
 - ONNX Runtime 仅随 ARM64 构建提供：仓库内 `app/libs/onnxruntime-android-1.22.0-arm64.aar` 是从官方 Maven AAR（完整四 ABI 28.5MB）按固定 ETag 与逐成员 SHA-256 提取重打包的 arm64 单 ABI 切片（约 6.7MB），复现脚本 `scripts/prepare_onnxruntime.py`，许可与第三方声明在 `third_party/onnxruntime/`。
 - 默认 Preview/CI 包不带权重；普通构建只清空 assets 权重暂存（`assets/edge-models/`，不触碰 `edge-model-manifests/`），只有显式 `-PedgeModelDir=… -PedgeModelManifest=…` 才把外部校验过的模型目录 stage 进 debug 包。
 - 模型下载与安装状态、三段分段计时、session 建图耗时、采纳统计与进程内存在「构图助手 → 开发者诊断」面板可见（T80，数值为真机打点预留，模拟器 QEMU 值不外推）。
