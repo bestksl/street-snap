@@ -15,8 +15,10 @@ internal object BloomStyle {
     // with low luma are still extracted. Only near-clipping light enters a bloom sheet.
     const val KNEE_HDF_LO = 0.72f
     const val KNEE_HDF_HI = 0.90f
-    const val KNEE_HDR_LO = 0.74f
-    const val KNEE_HDR_HI = 0.92f
+    // The HDF button keys much closer to clipping: a halo belongs to bulbs and neon tubes
+    // (a channel at or near 1.0), not to normally lit walls and skin (max channel ~0.8).
+    const val KNEE_HDR_LO = 0.80f
+    const val KNEE_HDR_HI = 0.97f
 
     // Long-edge cap (px) of each downsampled bloom sheet.
     const val CORE_SHEET_EDGE = 384
@@ -36,14 +38,19 @@ internal object BloomStyle {
     const val HDF_WIDE_GAIN = 0.55f
     const val HDF_WIDE_SAT = 0.85f        // broad halo keeps 85% of its tint
 
-    // Actual HDF button (legacy uHdr name): tuned a touch tighter and more restrained.
+    // Actual HDF button (legacy uHdr name). Its look is a halo RING around point lights
+    // only (bulbs, night neon): the broad wide layer — which spreads bright windows, skies
+    // and walls across the frame and read as a white wash — is nearly silenced, while the
+    // point-light sheet (local-contrast masked) carries the glow. The tight core stays only
+    // as the brightest inner ring. Dark and normally lit areas must read essentially
+    // unchanged (scatterGap already gives shadows zero lift).
     // amount maps strength [0,1] onto a mixing gain of [HDR_AMOUNT_LO, HDR_AMOUNT_HI].
     const val HDR_AMOUNT_LO = 0.22f
     const val HDR_AMOUNT_HI = 0.68f
     const val HDR_CORE_SAT = 0.60f
-    const val HDR_CORE_GAIN = 0.70f
+    const val HDR_CORE_GAIN = 0.50f
     const val HDR_WIDE_SAT = 0.75f
-    const val HDR_WIDE_GAIN = 0.45f
+    const val HDR_WIDE_GAIN = 0.12f
 
     // Experimental point-light layer. A third, tiny sheet is keyed from the ALREADY
     // extracted highlight sheet by local contrast (centre vs box neighbourhood): a small
@@ -54,11 +61,14 @@ internal object BloomStyle {
     const val POINT_SHEET_EDGE = 96
     const val POINT_NEIGHBOUR = 0.05f     // box radius in point-sheet UV
     const val POINT_CONTRAST_LO = 0.15f
-    const val POINT_CONTRAST_HI = 0.55f
+    // Reaching full contrast a little sooner closes the halo into a complete ring around
+    // thin neon tubes and small bulbs instead of leaving a broken arc.
+    const val POINT_CONTRAST_HI = 0.45f
     val POINT_BLUR = floatArrayOf(0.05f, 0.09f)
     const val POINT_SAT = 0.6f
     const val HDF_POINT_GAIN = 0.35f
-    const val HDR_POINT_GAIN = 0.30f
+    // HDF button: the point sheet is the primary carrier of the bulb/neon halo.
+    const val HDR_POINT_GAIN = 0.55f
 
     // Per-frame preview easing once a look is switched on; switching off snaps to zero so
     // no stale bloom texture lingers. Stills (fresh renderer) settle on the first frame.

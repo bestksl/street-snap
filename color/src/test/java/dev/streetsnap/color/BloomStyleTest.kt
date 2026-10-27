@@ -49,6 +49,10 @@ class BloomStyleTest {
             assertTrue(it.isFinite() && it >= 0f)
         }
         assertTrue(BloomStyle.HDR_AMOUNT_LO < BloomStyle.HDR_AMOUNT_HI)
+        // HDF essence: the point-light (bulb/neon) halo dominates; the broad wide layer
+        // that washes bright surfaces across the whole frame stays near-silent.
+        assertTrue(BloomStyle.HDR_POINT_GAIN > BloomStyle.HDR_CORE_GAIN)
+        assertTrue(BloomStyle.HDR_POINT_GAIN > BloomStyle.HDR_WIDE_GAIN * 3f)
         // Saturation mixes stay in the valid mix() range.
         assertTrue(BloomStyle.HDF_WIDE_SAT in 0f..1f)
         assertTrue(BloomStyle.HDR_CORE_SAT in 0f..1f)
@@ -71,7 +75,7 @@ class BloomStyleTest {
         val fs = ColorShaders.fragment(external = true)
         // Float rendering must stay GLSL-valid decimal (no scientific notation surprises).
         assertTrue(fs.contains("const float B_KNEE_HDF_LO = 0.72;"))
-        assertTrue(fs.contains("const float B_KNEE_HDR_HI = 0.92;"))
+        assertTrue(fs.contains("const float B_KNEE_HDR_HI = 0.97;"))
         assertTrue(fs.contains("mix(B_HDR_AMOUNT_LO, B_HDR_AMOUNT_HI, uHdr)"))
         // Point-light layer is wired (sampler + mask pass + both compositing branches).
         assertTrue(fs.contains("uniform sampler2D uBloomPoint;"))
