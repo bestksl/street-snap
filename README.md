@@ -73,7 +73,7 @@
 
 我们对它的能力保持诚实：端侧复核目前是 **loaded-only** 状态——链路在模拟器真版权重上跑通，但 70+ 站位扫测中门闸极少稳定采纳，一次 prompt 改版经隔离评测被否决并回退锁定；「能返回 A/B/C」不构成审美证据，真机（荣耀 Vs3）命中率与速度同样待验。
 
-> 极客向：规则层特征、A/B/C 对照图、ONNX Runtime 集成、门闸阈值与全部失败记录见 [构图 SOP](docs/composition-pipeline-sop.md)；模型选型、量化与 provenance 见 [端侧模型附录](docs/edge-model-plan.md)。当前唯一复核模型是 d1-omni-600M（417.7MB，q4，LFM Open License v1.0），权重不随 APK 分发、SHA-256 校验、可随时删除；早期 SmolVLM 256M/500M 已下架，仅留在评测文档里作对照。
+> 极客向：规则层特征、A/B/C 对照图、ONNX Runtime 集成、门闸阈值与全部失败记录见 [构图 SOP](docs/composition-pipeline-sop.md)；模型选型、量化与 provenance 见 [端侧模型附录](docs/edge-model-plan.md)。当前唯一复核模型是 d1-omni-600M（417.7MB，q4，LFM Open License v1.0），权重不随 APK 分发、用户显式下载（国内免鉴权镜像优先、支持断点续传）、SHA-256 校验、可随时删除，覆盖安装同渠道版本后已下载模型保留；早期 SmolVLM 256M/500M 已下架，仅留在评测文档里作对照。
 
 ## 安装与发布
 

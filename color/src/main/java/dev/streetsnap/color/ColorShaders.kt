@@ -222,12 +222,15 @@ internal object ColorShaders {
                         point * B_HDF_POINT_GAIN) * uHdf;
                 }
                 if (uHdr > 0.0) {
-                    // The actual HDF button (legacy uniform name): same two-layer optical
-                    // model as the soft diffusion, tuned a touch tighter. A tinted tight
-                    // core plus the INDEPENDENT broad halo is what makes point lamps and
-                    // street lights read with a visible glow at the default strength — the
-                    // old tight-only, heavily desaturated single halo was the "HDF not
-                    // obvious" report. scatterGap still guarantees zero shadow lift.
+                    // The actual HDF button (legacy uniform name): a halo RING around point
+                    // lights only — bulbs, night neon. The point sheet, keyed by local
+                    // contrast against its box neighbourhood, is the main carrier, so broad
+                    // bright surfaces (walls, skies, windows) contribute almost nothing and
+                    // the frame never washes white. The tight core is just the brightest
+                    // inner ring at the lamp; the broad wide layer is nearly silenced
+                    // (B_HDR_WIDE_GAIN). Dark and normally lit areas stay unchanged: the key
+                    // knee is ~0.80-0.97 on the max channel and scatterGap gives shadows
+                    // zero lift.
                     float amount = mix(B_HDR_AMOUNT_LO, B_HDR_AMOUNT_HI, uHdr);
                     vec3 coreHalo = mix(vec3(luminance(glow)), glow, B_HDR_CORE_SAT);
                     vec3 wideTex = texture(uBloomWide, vUv).rgb;

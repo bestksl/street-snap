@@ -258,6 +258,22 @@ AVD VirtualScene 是静态房间、无路灯/灯泡等点光源，无法直接�
 
 这只证明管线连通、量级可见、暗部不被抬；棋盘格不是灯，qemu 软件 GL 的模糊/带宽与真机 GPU 不同。**真实路灯/点光源夜景的辉光目视效果仍 not-verified**，唯一下一步是荣耀 Vs3 夜景实拍人工核对（含与理光 HDF 样章的目视对标）；审美/氛围判断只认独立人工评估。
 
+### 5. 2026-10-27 retune：HDF 只在点光源周围成一圈光晕
+
+用户反馈（夜间实拍口径）：HDF 的精髓是灯泡、霓虹灯这类**点状高光边缘的一圈光晕**；没有光的位置与正常光照位置应几乎无变化；不能整个屏幕泛白。对照旧参数（uHdr 膝 .74/.92、core .70、wide .45、point .30）定位到两个泛白来源：① 膝阈值偏低，白墙/亮皮肤等正常亮部（max 通道约 0.8）也被提取；② wide 层从全屏亮部提取并大半径扩散，亮窗/天空把周边整片抬白。点光蒙版（uBloomPoint，中心对盒形邻域的局部对比）天然只在点光源边缘响应——亮面内部 centre≈around、对比为零、蒙版塌缩——正是该效果的正确载体。
+
+现行参数（`BloomStyle.kt`，仅 uHdr 路径；柔光 uHdf 不动）：
+
+| 参数 | 旧 | 新 | 作用 |
+| --- | --- | --- | --- |
+| KNEE_HDR_LO/HI | .74 / .92 | **.80 / .97** | 只有近 clip 的光入 bloom，正常亮部被挡 |
+| HDR_CORE_GAIN | .70 | **.50** | 紧核只作灯边最内一圈 |
+| HDR_WIDE_GAIN | .45 | **.12** | 宽层近乎静音，大面积亮面不再铺白 |
+| HDR_POINT_GAIN | .30 | **.55** | 点光层成为光晕主载体 |
+| POINT_CONTRAST_HI | .55 | **.45** | 对比更早饱和，细霓虹管周围成完整环而非断弧 |
+
+`scatterGap = 1−color` 与高膝共同保证暗部/中间调近零变化；`BloomStyleTest` 新增关系断言（point gain > core gain、point gain > 3×wide gain）。证据边界不变：qemu 点光代理只验量级，**真实霓虹/灯泡夜景仍待 Vs3 人工核对**。
+
 ## 七、主要参考
 
 - [LearnOpenGL Bloom](https://learnopengl.com/Advanced-Lighting/Bloom) / [Physically Based Bloom 2022](https://learnopengl.com/Guest-Articles/2022/Phys.-Based-Bloom) / [GPU Gems 21 Real-Time Glow](https://developer.nvidia.com/gpugems/gpugems/part-iv-image-processing/chapter-21-real-time-glow)

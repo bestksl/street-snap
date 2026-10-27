@@ -2406,7 +2406,7 @@ private fun CompositionAssistantControls(
         ModelInstallStatus.CHECKING -> Text("检查模型安装状态…", style = MaterialTheme.typography.labelSmall)
         ModelInstallStatus.ABSENT -> TextButton(onClick = model.composition::prepareInstall,
             modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("查看安装信息") }
-        ModelInstallStatus.PREPARING -> Text("读取官方模型清单…", style = MaterialTheme.typography.labelSmall)
+        ModelInstallStatus.PREPARING -> Text("读取模型清单…", style = MaterialTheme.typography.labelSmall)
         ModelInstallStatus.AVAILABLE -> {
             Text("下载量：${formatBytes(state.bytes ?: 0L)}", style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)

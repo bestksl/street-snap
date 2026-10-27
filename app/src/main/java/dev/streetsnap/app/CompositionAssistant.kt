@@ -323,7 +323,20 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         installJob = scope.launch {
             _state.update { it.copy(install = ModelInstallStatus.PREPARING, installError = null) }
             try {
-                val prepared = store.prepare(requireNotNull(EdgeModelCatalog.find(config.id)))
+                val model = requireNotNull(EdgeModelCatalog.find(config.id))
+                // A previously downloaded model lives in app-private storage and survives
+                // same-signature updates with no network. Recognise it before any metadata
+                // call, so a blocked mirror can never redisplay an installed model as
+                // missing / failed after an app update.
+                val local = withContext(Dispatchers.IO) { store.installed(model) }
+                if (configuration?.id != config.id) return@launch
+                if (local != null) {
+                    plan = null
+                    _state.update { it.copy(install = ModelInstallStatus.INSTALLED,
+                        bytes = local.plan.totalBytes, installError = null) }
+                    return@launch
+                }
+                val prepared = store.prepare(model)
                 if (configuration?.id != config.id) return@launch
                 plan = prepared
                 _state.update { it.copy(install = ModelInstallStatus.AVAILABLE, bytes = prepared.totalBytes) }
