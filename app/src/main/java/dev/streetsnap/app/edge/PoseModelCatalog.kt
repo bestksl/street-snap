@@ -16,7 +16,11 @@ data class PoseModelEntry(
     val url: String,
     val bytes: Long,
     val sha256: String,
-)
+    /** Extra anonymous, no-auth mirrors tried after [url]. The pinned SHA-256 makes any source safe. */
+    val mirrorUrls: List<String> = emptyList(),
+) {
+    val downloadUrls: List<String> get() = listOf(url) + mirrorUrls
+}
 
 object PoseModelCatalog {
     const val DEFAULT_ID = "pose_landmarker_lite"

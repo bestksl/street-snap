@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.StatFs
 import android.content.res.AssetManager
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -19,13 +20,47 @@ class EdgeModelStore(context: Context) {
     private val root = File(context.filesDir, "edge-models")
     private val assets: AssetManager = context.assets
 
+    /**
+     * Anonymous, no-auth download sources in priority order. hf-mirror.com is a domestic
+     * reverse proxy of huggingface.co that serves LFS bytes directly on China networks;
+     * the official origin stays last for overseas networks. The URL shape is identical on
+     * both hosts, and every file is still verified by its pinned SHA-256 / git SHA-1, so a
+     * mirror can never serve altered weights.
+     */
+    private val bases = listOf("https://hf-mirror.com", "https://huggingface.co")
+
+    /**
+     * Metadata only; never downloads weights. A release ships the pinned file manifest as
+     * an APK asset (a few KB), so this returns offline and survives HuggingFace being
+     * unreachable. The live API is only a fallback for an APK built without that asset.
+     */
     suspend fun prepare(model: EdgeModelEntry): ModelDownloadPlan = withContext(Dispatchers.IO) {
         require(EdgeModelCatalog.models.contains(model)) { "未知模型来源" }
-        val info = JSONObject(readSmall("https://huggingface.co/api/models/${model.repository}"))
-        val revision = info.getString("sha")
-        require(revision.matches(Regex("[a-f0-9]{40}"))) { "模型版本号无效" }
-        require(revision == model.revision) { "模型仓库版本已变化，请更新应用内目录" }
-        val tree = JSONArray(readSmall("https://huggingface.co/api/models/${model.repository}/tree/$revision?recursive=true&limit=1000"))
+        bundledPlan(model)?.let { return@withContext it }
+        fetchPlan(model)
+    }
+
+    private suspend fun fetchPlan(model: EdgeModelEntry): ModelDownloadPlan {
+        var lastError: Exception? = null
+        for (base in bases) {
+            try {
+                val info = JSONObject(readSmall("$base/api/models/${model.repository}"))
+                val revision = info.getString("sha")
+                require(revision.matches(Regex("[a-f0-9]{40}"))) { "模型版本号无效" }
+                require(revision == model.revision) { "模型仓库版本已变化，请更新应用内目录" }
+                val tree = JSONArray(readSmall(
+                    "$base/api/models/${model.repository}/tree/$revision?recursive=true&limit=1000"))
+                return parseTree(model, revision, tree)
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                lastError = error
+            }
+        }
+        throw (lastError ?: IOException("无法读取模型目录"))
+    }
+
+    private fun parseTree(model: EdgeModelEntry, revision: String, tree: JSONArray): ModelDownloadPlan {
         val all = buildList {
             for (i in 0 until tree.length()) {
                 val item = tree.getJSONObject(i)
@@ -62,7 +97,7 @@ class EdgeModelStore(context: Context) {
         } }
         require(files.all { it.bytes in 1..MAX_FILE_BYTES }) { "模型文件大小超出支持范围" }
         require(files.sumOf { it.bytes } in 1..MAX_TOTAL_BYTES) { "模型包过大" }
-        ModelDownloadPlan(model, revision, files, vision, embedding, decoder)
+        return ModelDownloadPlan(model, revision, files, vision, embedding, decoder)
     }
 
     /** Caller must invoke this only in response to the user's explicit download action. */
@@ -82,40 +117,11 @@ class EdgeModelStore(context: Context) {
                     continue
                 }
                 destination.parentFile?.mkdirs()
-                val partial = File(destination.path + ".part")
-                val address = "https://huggingface.co/${plan.model.repository}/resolve/${plan.revision}/${spec.path}"
-                val connection = connection(address)
-                try {
-                    require(connection.responseCode == HttpURLConnection.HTTP_OK) { "下载失败（${connection.responseCode}）" }
-                    val length = connection.contentLengthLong
-                    require(length < 0 || length == spec.bytes) { "模型文件大小与版本信息不符" }
-                    var copied = 0L
-                    var lastProgress = 0L
-                    connection.inputStream.use { input ->
-                        partial.outputStream().buffered().use { output ->
-                            val buffer = ByteArray(64 * 1024)
-                            while (true) {
-                                currentCoroutineContext().ensureActive()
-                                val count = input.read(buffer)
-                                if (count < 0) break
-                                copied += count
-                                require(copied <= spec.bytes) { "模型响应超出声明大小" }
-                                output.write(buffer, 0, count)
-                                if (copied - lastProgress >= 512 * 1024 || copied == spec.bytes) {
-                                    onProgress(ModelDownloadProgress(complete + copied, plan.totalBytes, spec.path))
-                                    lastProgress = copied
-                                }
-                            }
-                        }
-                    }
-                    require(copied == spec.bytes && verify(partial, spec)) { "模型校验失败，请重新下载" }
-                    destination.delete()
-                    require(partial.renameTo(destination)) { "无法保存模型文件" }
-                    complete += copied
-                } finally {
-                    connection.disconnect()
-                    partial.delete()
+                downloadFile(plan, spec, destination) { copied ->
+                    onProgress(ModelDownloadProgress(complete + copied, plan.totalBytes, spec.path))
                 }
+                complete += spec.bytes
+                onProgress(ModelDownloadProgress(complete, plan.totalBytes, spec.path))
             }
             // A complete manifest is the readiness marker. Interrupted installs are never offered.
             val manifest = File(folder, "install.json.part")
@@ -125,22 +131,98 @@ class EdgeModelStore(context: Context) {
         }
 
     /**
+     * Download one file through every anonymous source in order, with HTTP range resume.
+     * A network failure keeps the .part file so the next source (or a later retry) can
+     * continue from the received offset; a size/hash mismatch discards it and restarts,
+     * because the bytes on disk cannot belong to this file.
+     */
+    private suspend fun downloadFile(
+        plan: ModelDownloadPlan,
+        spec: ModelFile,
+        destination: File,
+        onProgress: (Long) -> Unit,
+    ) {
+        val partial = File(destination.path + ".part")
+        var lastError: Exception? = null
+        for ((index, base) in bases.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            val resume = if (partial.isFile) partial.length().coerceAtMost(spec.bytes) else 0L
+            val address = "$base/${plan.model.repository}/resolve/${plan.revision}/${spec.path}"
+            val connection = connection(address)
+            try {
+                if (resume in 1 until spec.bytes) {
+                    connection.setRequestProperty("Range", "bytes=$resume-")
+                }
+                val startAt: Long
+                when (val code = connection.responseCode) {
+                    HttpURLConnection.HTTP_OK -> startAt = 0L
+                    HttpURLConnection.HTTP_PARTIAL -> {
+                        val range = connection.getHeaderField("Content-Range").orEmpty().lowercase()
+                        require(range.startsWith("bytes $resume-")) { "下载源不支持从断点继续" }
+                        startAt = resume
+                    }
+                    else -> throw IOException("下载失败（$code）")
+                }
+                java.io.FileOutputStream(partial, startAt > 0).buffered().use { output ->
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var copied = startAt
+                        var lastProgress = startAt
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            copied += count
+                            require(copied <= spec.bytes) { "模型响应超出声明大小" }
+                            output.write(buffer, 0, count)
+                            if (copied - lastProgress >= 512 * 1024 || copied == spec.bytes) {
+                                onProgress(copied)
+                                lastProgress = copied
+                            }
+                        }
+                        require(copied == spec.bytes) { "模型下载不完整" }
+                    }
+                }
+                require(verify(partial, spec)) { "模型校验失败，请重新下载" }
+                destination.delete()
+                require(partial.renameTo(destination)) { "无法保存模型文件" }
+                return
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                lastError = error
+                // A full-but-wrong or over-long .part cannot be resumed on the next source.
+                if (partial.isFile && (partial.length() >= spec.bytes) && index < bases.lastIndex) {
+                    partial.delete()
+                }
+            } finally {
+                connection.disconnect()
+            }
+        }
+        throw (lastError ?: IOException("所有下载源均不可用"))
+    }
+
+    /**
      * Import a model that was deliberately staged in app assets at build time.
      *
      * Assets are copied into the private model store. Different graph variants at the
      * same revision have separate directories, preserving a previously installed model.
      * The manifest is validated before copying and every file is checked by its hash.
-     * Missing assets simply mean this APK has no bundled model; normal downloads remain
+     * A manifest-only asset (the shipped pinned manifest, without weights) is not a
+     * bundled model: this returns null so normal downloads and existing installs remain
      * available. A valid install with the same graph configuration is reused.
      */
     suspend fun installBundled(model: EdgeModelEntry): InstalledEdgeModel? = withContext(Dispatchers.IO) {
         require(model in EdgeModelCatalog.models) { "未知模型来源" }
         val bundledPlan = bundledPlan(model) ?: return@withContext null
+        val assetRoot = "edge-models/${model.id}-${model.revision}"
+        // A release ships the manifest only (weights are an explicit download), so the
+        // weight assets are absent and this quietly yields to normal downloads / installs.
+        if (!bundledPlan.files.all { assetExists("$assetRoot/${it.path}") }) return@withContext null
         installedModels(model).firstOrNull { sameVariant(it.plan, bundledPlan) }
             ?.let { return@withContext it }
-        val assetRoot = "edge-models/${model.id}-${model.revision}"
-        val manifestPath = "$assetRoot/install.json"
-        val manifestText = readAssetSmall(manifestPath)
+        val manifestPath = bundledManifestPath(model)
+        val manifestText = readAssetSmall(requireNotNull(manifestPath))
 
         root.mkdirs()
         require(StatFs(root.absolutePath).availableBytes > bundledPlan.totalBytes + 64L * 1024 * 1024) { "可用空间不足" }
@@ -224,9 +306,19 @@ class EdgeModelStore(context: Context) {
         InstalledEdgeModel(plan, folder)
     }.getOrNull()
 
+    /**
+     * Manifest asset locations, in order: a fully bundled weight build stages
+     * edge-models/<id>-<rev>/install.json (also carrying the weight files, never in source
+     * control); an ordinary release ships only edge-model-manifests/<id>-<rev>.json so
+     * prepare() needs no network without any weights entering the APK or git.
+     */
+    private fun bundledManifestPath(model: EdgeModelEntry): String? = listOf(
+        "edge-models/${model.id}-${model.revision}/install.json",
+        "edge-model-manifests/${model.id}-${model.revision}.json",
+    ).firstOrNull { assetExists(it) }
+
     private fun bundledPlan(model: EdgeModelEntry): ModelDownloadPlan? {
-        val manifestPath = "edge-models/${model.id}-${model.revision}/install.json"
-        if (!assetExists(manifestPath)) return null
+        val manifestPath = bundledManifestPath(model) ?: return null
         val plan = try {
             decode(JSONObject(readAssetSmall(manifestPath)))
         } catch (error: Exception) {

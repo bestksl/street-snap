@@ -22,9 +22,11 @@
 
 ## 下载、校验与打包
 
-- 权重 **不随 APK 分发、不入 git**：首次在前台启用构图助手时从 HuggingFace 按固定 revision 显式下载，逐文件 SHA-256/SHA-1 校验、`.part` 原子改名、`install.json` 就绪标记，可随时删除；INTERNET 权限仅用于此显式下载，无遥测。
+- 权重 **不随 APK 分发、不入 git**：用户显式下载，逐文件 SHA-256（LFS）/git-SHA1（小文件）校验、`.part` 校验后原子改名、`install.json` 就绪标记，可随时删除；INTERNET 权限仅用于此显式下载，无遥测。**2026-10-27 起下载源匿名免鉴权、国内优先**：`https://hf-mirror.com/<repo>/resolve/...` 先试，`https://huggingface.co` 兜底，逐源失败自动切换；每个文件支持 HTTP Range 断点续传（中断后 `.part` 从偏移继续，大小/哈希不符自动删残换源重下）。
+- **pinned 清单随 APK 内置**（`app/src/main/assets/edge-model-manifests/<id>-<revision>.json`，约 2 KB，可入 git；区别于普通构建会清空、被 gitignore 的 `assets/edge-models/` 权重暂存区）：`EdgeModelStore.prepare()` 优先读内置清单，**零网络**返回下载计划，HF 实时 tree API 仅在 APK 缺清单时回退——HuggingFace 被墙不再阻断「查看安装信息」。已装模型识别纯走本地 filesDir 扫描（`installed()`，不触网），同签名覆盖安装后模型不丢，面板不会再把已装模型误显为需重下（`prepareInstall()` 先本地后网络）。
+- 姿势模型（MediaPipe .task，5.5 MB）下载同样改造为多源 + Range 续传框架（`PoseModelEntry.mirrorUrls`；SHA-256 pin 使任何匿名源都可信），国内镜像 URL 经实测后补入 `PoseModelCatalog`。
 - ONNX Runtime 仅随 ARM64 构建提供：仓库内 `app/libs/onnxruntime-android-1.22.0-arm64.aar` 是从官方 Maven AAR（完整四 ABI 28.5MB）按固定 ETag 与逐成员 SHA-256 提取重打包的 arm64 单 ABI 切片（约 6.7MB），复现脚本 `scripts/prepare_onnxruntime.py`，许可与第三方声明在 `third_party/onnxruntime/`。
-- 默认 Preview/CI 包不带权重；构建期普通构建会清空 assets 模型暂存，只有显式 `-PedgeModelDir=… -PedgeModelManifest=…` 才把外部校验过的模型目录 stage 进 debug 包。
+- 默认 Preview/CI 包不带权重；普通构建只清空 assets 权重暂存（`assets/edge-models/`，不触碰 `edge-model-manifests/`），只有显式 `-PedgeModelDir=… -PedgeModelManifest=…` 才把外部校验过的模型目录 stage 进 debug 包。
 - 模型下载与安装状态、三段分段计时、session 建图耗时、采纳统计与进程内存在「构图助手 → 开发者诊断」面板可见（T80，数值为真机打点预留，模拟器 QEMU 值不外推）。
 
 ## 当前验证状态

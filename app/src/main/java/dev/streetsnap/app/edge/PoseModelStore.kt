@@ -3,6 +3,7 @@ package dev.streetsnap.app.edge
 import android.content.Context
 import android.os.StatFs
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -30,7 +31,11 @@ class PoseModelStore(context: Context) {
         file
     }.getOrNull()
 
-    /** Explicit user action only. */
+    /**
+     * Explicit user action only. Every pinned anonymous source is tried in order and the
+     * transfer resumes from the .part offset via HTTP Range, so a flaky network does not
+     * restart the file. A size/hash mismatch discards the .part and tries the next source.
+     */
     suspend fun download(
         entry: PoseModelEntry,
         onProgress: (Long, Long) -> Unit = { _, _ -> },
@@ -41,45 +46,66 @@ class PoseModelStore(context: Context) {
         val target = modelFile(entry)
         target.parentFile?.mkdirs()
         val partial = File(target.path + ".part")
-        val connection = (URL(entry.url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 30_000
-            instanceFollowRedirects = true
-            setRequestProperty("User-Agent", "street-snap/pose-model-download")
-            setRequestProperty("Accept-Encoding", "identity")
-        }
-        try {
-            require(connection.responseCode == HttpURLConnection.HTTP_OK) { "下载失败（${connection.responseCode}）" }
-            val length = connection.contentLengthLong
-            require(length < 0 || length == entry.bytes) { "姿势模型大小与目录不符" }
-            var copied = 0L
-            var lastProgress = 0L
-            connection.inputStream.use { input ->
-                partial.outputStream().buffered().use { output ->
-                    val buffer = ByteArray(64 * 1024)
-                    while (true) {
-                        currentCoroutineContext().ensureActive()
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        copied += count
-                        require(copied <= entry.bytes) { "姿势模型响应超出声明大小" }
-                        output.write(buffer, 0, count)
-                        if (copied - lastProgress >= 512 * 1024 || copied == entry.bytes) {
-                            onProgress(copied, entry.bytes)
-                            lastProgress = copied
+        var lastError: Exception? = null
+        for ((index, address) in entry.downloadUrls.withIndex()) {
+            currentCoroutineContext().ensureActive()
+            val resume = if (partial.isFile) partial.length().coerceAtMost(entry.bytes) else 0L
+            val connection = (URL(address).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 15_000
+                readTimeout = 30_000
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "street-snap/pose-model-download")
+                setRequestProperty("Accept-Encoding", "identity")
+            }
+            try {
+                if (resume in 1 until entry.bytes) connection.setRequestProperty("Range", "bytes=$resume-")
+                val startAt: Long
+                when (val code = connection.responseCode) {
+                    HttpURLConnection.HTTP_OK -> startAt = 0L
+                    HttpURLConnection.HTTP_PARTIAL -> {
+                        val range = connection.getHeaderField("Content-Range").orEmpty().lowercase()
+                        require(range.startsWith("bytes $resume-")) { "下载源不支持从断点继续" }
+                        startAt = resume
+                    }
+                    else -> throw IOException("下载失败（$code）")
+                }
+                var copied = startAt
+                var lastProgress = startAt
+                connection.inputStream.use { input ->
+                    java.io.FileOutputStream(partial, startAt > 0).buffered().use { output ->
+                        val buffer = ByteArray(64 * 1024)
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val count = input.read(buffer)
+                            if (count < 0) break
+                            copied += count
+                            require(copied <= entry.bytes) { "姿势模型响应超出声明大小" }
+                            output.write(buffer, 0, count)
+                            if (copied - lastProgress >= 512 * 1024 || copied == entry.bytes) {
+                                onProgress(copied, entry.bytes)
+                                lastProgress = copied
+                            }
                         }
                     }
                 }
+                require(copied == entry.bytes) { "姿势模型下载不完整" }
+                require(sha256(partial) == entry.sha256) { "姿势模型校验失败，请重新下载" }
+                target.delete()
+                require(partial.renameTo(target)) { "无法保存姿势模型" }
+                return@withContext target
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                lastError = error
+                if (partial.isFile && partial.length() >= entry.bytes && index < entry.downloadUrls.lastIndex) {
+                    partial.delete()
+                }
+            } finally {
+                connection.disconnect()
             }
-            require(copied == entry.bytes) { "姿势模型下载不完整" }
-            require(sha256(partial) == entry.sha256) { "姿势模型校验失败，请重新下载" }
-            target.delete()
-            require(partial.renameTo(target)) { "无法保存姿势模型" }
-            target
-        } finally {
-            connection.disconnect()
-            partial.delete()
         }
+        partial.delete()
+        throw (lastError ?: IOException("所有下载源均不可用"))
     }
 
     suspend fun remove(entry: PoseModelEntry) = withContext(Dispatchers.IO) {

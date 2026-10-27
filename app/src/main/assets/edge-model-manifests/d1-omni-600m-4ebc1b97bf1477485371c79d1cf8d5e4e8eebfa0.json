@@ -1,0 +1,75 @@
+{
+  "model": "d1-omni-600m",
+  "revision": "4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0",
+  "vision": "onnx/vision_encoder_fp16.onnx",
+  "embedding": "onnx/embed_tokens_quantized.onnx",
+  "decoder": "onnx/decision_q4.onnx",
+  "files": [
+    {
+      "path": "config.json",
+      "bytes": 2433,
+      "digest": "70a423810f380de69dba4ca15ef15dfa5d345226",
+      "sha256": false
+    },
+    {
+      "path": "tokenizer.json",
+      "bytes": 4733371,
+      "digest": "53d5df363b01234edae97ee6e05139d2c067b31a",
+      "sha256": false
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 259,
+      "digest": "35217dbb96b3356b37ab820ec7feef483c8c12dc",
+      "sha256": false
+    },
+    {
+      "path": "preprocessor_config.json",
+      "bytes": 728,
+      "digest": "9be6964230aa0f4e165d484d9041d6a34ae5f962",
+      "sha256": false
+    },
+    {
+      "path": "LICENSE",
+      "bytes": 10572,
+      "digest": "272d23491019471e6776d23ae995f41b164ea34c",
+      "sha256": false
+    },
+    {
+      "path": "onnx/vision_encoder_fp16.onnx",
+      "bytes": 154620,
+      "digest": "4f1ba67f47556db899965b5220abd16fa3751b5ad5175493c30b706fe5f1c8fd",
+      "sha256": true
+    },
+    {
+      "path": "onnx/vision_encoder_fp16.onnx_data",
+      "bytes": 188469760,
+      "digest": "26ba7cadd518c82272eee4a9606dfd0f56baf43e9da86298e3b893dbdc46101b",
+      "sha256": true
+    },
+    {
+      "path": "onnx/embed_tokens_quantized.onnx",
+      "bytes": 705,
+      "digest": "526651db3c7bd6d7af7264b627887ce72feec824e598f1ed61781ae49348ec86",
+      "sha256": true
+    },
+    {
+      "path": "onnx/embed_tokens_quantized.onnx_data",
+      "bytes": 42991616,
+      "digest": "87c53bcdb9ce92ec2ebc596402be66f5b070a87d6bb552d83bd320c970748ec9",
+      "sha256": true
+    },
+    {
+      "path": "onnx/decision_q4.onnx",
+      "bytes": 380921,
+      "digest": "7382f36321d163fc53b86ca8dba791642986bb1bca68a2e39ea03f7164954678",
+      "sha256": true
+    },
+    {
+      "path": "onnx/decision_q4.onnx_data",
+      "bytes": 201240576,
+      "digest": "d205a38f1364e55ec8ed10e75e45dd2bee9275879d6d131edbf970596a33858a",
+      "sha256": true
+    }
+  ]
+}
