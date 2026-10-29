@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "39c4e9b9-37b0-404f-ae7d-a31fbed15972",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "/Users/haoxuanli/Documents/GitHub/street-snap/.archify/architecture-viewfinder-inference-20261029-171449/candidate.json",
+  "output": "/Users/haoxuanli/Documents/GitHub/street-snap/docs/viewfinder-inference-architecture.html",
+  "specification": {
+    "sha256": "d1643173d7ac7078d8aedfadd791eaaaf7d909abebc1ca99af8f118838c2dec7",
+    "bytes": 19982
+  },
+  "artifact": {
+    "sha256": "aecccc3eb25630eac3a2a2c7ad2e99e0f005fc489b34cc36fae07039baba5495",
+    "bytes": 892563
+  }
+}
