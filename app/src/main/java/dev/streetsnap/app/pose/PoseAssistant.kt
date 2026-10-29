@@ -3,8 +3,8 @@ package dev.streetsnap.app.pose
 import android.content.Context
 import android.os.SystemClock
 import android.util.Log
-import dev.streetsnap.app.edge.PoseModelCatalog
-import dev.streetsnap.app.edge.PoseModelStore
+import dev.streetsnap.app.model.PoseModelCatalog
+import dev.streetsnap.app.model.ModelStore
 import dev.streetsnap.camera.PoseFrameSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +45,7 @@ internal class PoseAssistant(
     private val scope: CoroutineScope,
 ) : AutoCloseable {
     private val appContext = context.applicationContext
-    private val store = PoseModelStore(appContext)
+    private val store = ModelStore(appContext)
     private val model = PoseModelCatalog.lite
     private val coach = PoseCoach()
     // T108: landmark jitter filter; guarded by coachLock together with the coach state.
@@ -94,7 +94,7 @@ internal class PoseAssistant(
                 if (closed) return@withLock
                 val config = configuration
                 val active = config?.enabled == true && config.foreground
-                val installedFile = withContext(Dispatchers.IO) { store.installed(model) }
+                val installedFile = withContext(Dispatchers.IO) { store.installedPose(model) }
                 if (closed) return@withLock
                 val liveReady = if (active && installedFile != null) {
                     startLive(installedFile)
@@ -114,7 +114,7 @@ internal class PoseAssistant(
         }
     }
 
-    private suspend fun checkInstalled() = withContext(Dispatchers.IO) { store.installed(model) }
+    private suspend fun checkInstalled() = withContext(Dispatchers.IO) { store.installedPose(model) }
 
     /** Returns true when the live source is bound; false falls back to demo mode. */
     private suspend fun startLive(modelFile: java.io.File): Boolean {
@@ -225,7 +225,7 @@ internal class PoseAssistant(
             _state.update { it.copy(modelStatus = PoseModelStatus.DOWNLOADING, installError = null,
                 downloadedBytes = 0L) }
             try {
-                val file = store.download(model) { downloaded, total ->
+                val file = store.downloadPose(model) { downloaded, total ->
                     _state.update { it.copy(downloadedBytes = downloaded, totalBytes = total) }
                 }
                 _state.update { it.copy(modelStatus = PoseModelStatus.INSTALLED, installError = null) }
@@ -244,7 +244,7 @@ internal class PoseAssistant(
         installJob?.cancel()
         installJob = null
         scope.launch {
-            val installed = withContext(Dispatchers.IO) { store.installed(model) }
+            val installed = withContext(Dispatchers.IO) { store.installedPose(model) }
             _state.update {
                 it.copy(
                     modelStatus = if (installed != null) PoseModelStatus.INSTALLED else PoseModelStatus.ABSENT,
@@ -257,7 +257,7 @@ internal class PoseAssistant(
     fun removeModel() {
         installJob?.cancel()
         scope.launch {
-            withContext(Dispatchers.IO) { store.remove(model) }
+            withContext(Dispatchers.IO) { store.removePose(model) }
             _state.update { it.copy(modelStatus = PoseModelStatus.ABSENT) }
             // Reconfigure observes the missing file: stops live and falls back to demo.
             reconfigure()

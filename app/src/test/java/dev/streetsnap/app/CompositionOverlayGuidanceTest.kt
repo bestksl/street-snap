@@ -1,7 +1,10 @@
 package dev.streetsnap.app
 
+import dev.streetsnap.app.composition.AdviceOrigin
 import dev.streetsnap.app.composition.CompositionCandidate
-import dev.streetsnap.app.edge.CompositionSuggestion
+import dev.streetsnap.app.composition.carriesSameGuidance
+import dev.streetsnap.app.composition.CompositionOverlay
+import dev.streetsnap.app.composition.CompositionSuggestion
 import dev.streetsnap.camera.NormalizedBoundingBox
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue

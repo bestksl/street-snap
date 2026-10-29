@@ -1,6 +1,6 @@
 package dev.streetsnap.app
 
-import dev.streetsnap.app.edge.CompositionSuggestion
+import dev.streetsnap.app.composition.CompositionSuggestion
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test

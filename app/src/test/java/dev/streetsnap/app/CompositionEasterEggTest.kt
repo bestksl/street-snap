@@ -1,5 +1,8 @@
 package dev.streetsnap.app
 
+import dev.streetsnap.app.composition.AdviceOrigin
+import dev.streetsnap.app.composition.CompositionEasterEgg
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull

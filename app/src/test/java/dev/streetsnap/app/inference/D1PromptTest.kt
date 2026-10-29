@@ -1,4 +1,4 @@
-package dev.streetsnap.app.edge
+package dev.streetsnap.app.inference
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows

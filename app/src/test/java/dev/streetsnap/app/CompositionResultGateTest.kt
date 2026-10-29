@@ -1,5 +1,7 @@
 package dev.streetsnap.app
 
+import dev.streetsnap.app.composition.CompositionResultGate
+
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue

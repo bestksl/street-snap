@@ -1,4 +1,4 @@
-package dev.streetsnap.app.edge
+package dev.streetsnap.app.inference
 
 /**
  * SigLIP2 NaFlex patch layout for d1's vision graph, ported from the official `vision.py`.

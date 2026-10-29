@@ -1,4 +1,4 @@
-package dev.streetsnap.app
+package dev.streetsnap.app.composition
 
 /** A model answer may describe an old view. Only fresh answers from the current view can be drawn. */
 internal class CompositionResultGate(private val maximumAgeMs: Long = 5_000L) {

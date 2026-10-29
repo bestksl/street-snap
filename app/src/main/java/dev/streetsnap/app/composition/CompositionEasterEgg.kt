@@ -1,4 +1,4 @@
-package dev.streetsnap.app
+package dev.streetsnap.app.composition
 
 /**
  * The rare wide-angle nudge, isolated as pure logic so its gating is unit-testable.

@@ -146,8 +146,8 @@ import dev.streetsnap.app.composition.MoveGuide
 import dev.streetsnap.app.composition.MoveGuides
 import dev.streetsnap.app.composition.arrowAngleDeg
 import dev.streetsnap.app.composition.arrowLabel
-import dev.streetsnap.app.edge.InferenceStats
-import dev.streetsnap.app.edge.PoseModelCatalog
+import dev.streetsnap.app.inference.InferenceStats
+import dev.streetsnap.app.model.PoseModelCatalog
 import dev.streetsnap.app.pose.PoseModelStatus
 import dev.streetsnap.app.pose.PoseOverlayLayer
 import dev.streetsnap.app.pose.PoseUiState
@@ -170,6 +170,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import dev.streetsnap.app.composition.AdviceOrigin
+import dev.streetsnap.app.composition.AssistStatus
+import dev.streetsnap.app.composition.CompositionOutcome
+import dev.streetsnap.app.composition.CompositionOverlay
+import dev.streetsnap.app.composition.CompositionUiState
+import dev.streetsnap.app.composition.ModelInstallStatus
 
 @Composable
 fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
@@ -2394,8 +2400,8 @@ private fun CompositionAssistantControls(
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     // Only one ranker ships now; show its real name instead of a picker (legacy SmolVLM
     // selections migrate to it automatically).
-    val modelEntry = dev.streetsnap.app.edge.EdgeModelCatalog.find(settings.compositionModel)
-        ?: dev.streetsnap.app.edge.EdgeModelCatalog.find(dev.streetsnap.app.edge.EdgeModelCatalog.DEFAULT_MODEL_ID)
+    val modelEntry = dev.streetsnap.app.model.D1ModelCatalog.find(settings.compositionModel)
+        ?: dev.streetsnap.app.model.D1ModelCatalog.find(dev.streetsnap.app.model.D1ModelCatalog.DEFAULT_MODEL_ID)
     Text("模型：${modelEntry?.title ?: settings.compositionModel}",
         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     // Inference performance stays visible without opening the developer section: users
@@ -2487,7 +2493,7 @@ private fun InferencePerformanceSummary(state: CompositionUiState, installed: Bo
 private fun DeveloperDiagnostics(
     state: CompositionUiState,
     cameraState: CameraState,
-    modelEntry: dev.streetsnap.app.edge.EdgeModelEntry?,
+    modelEntry: dev.streetsnap.app.model.D1ModelEntry?,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Row(Modifier.fillMaxWidth().heightIn(min = 48.dp)

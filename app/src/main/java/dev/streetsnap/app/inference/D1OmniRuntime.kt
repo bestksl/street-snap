@@ -1,4 +1,6 @@
-package dev.streetsnap.app.edge
+package dev.streetsnap.app.inference
+
+import dev.streetsnap.app.model.InstalledD1Model
 
 import ai.onnxruntime.OnnxJavaType
 import ai.onnxruntime.OnnxTensor
@@ -34,7 +36,7 @@ import org.json.JSONObject
  * decision pass. There is no token-generation loop: the answer is a softmax over three
  * option markers. Mirrors SmolVlmRuntime's worker/cancel/close contract.
  */
-class D1OmniRuntime(private val installed: InstalledEdgeModel) : CandidateRanker {
+class D1OmniRuntime(private val installed: InstalledD1Model) : CandidateRanker {
     private val environment: OrtEnvironment
     private val vision: OrtSession
     private val embeddings: OrtSession
