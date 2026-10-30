@@ -29,7 +29,7 @@ FastCompositionAdvisor → 3 个合法候选框 + 统计分 + 构图风格 + 中
 同一帧、统一样式的 A/B/C 候选裁切图
                  │
                  ▼
-SmolVLM rankCandidates：每个排列一次视觉编码 + 一次 decoder prefill
+d1-omni 决策模型：每个排列一次视觉编码 + 一次决策头 prefill（零输出 token）
                  │
                  ▼
 A/B/C 支持度、差距、循环换序一致性、场景/会话检查
@@ -241,7 +241,7 @@ T28 §2.2 标准 4 的落地。纯逻辑在 `composition/CropTrial.kt`：`CropTr
 
 一个 SmolVLM 256M 模型由视觉编码器、文本嵌入、decoder 三张 ONNX 图及四个配置/tokenizer 文件组成。固定 revision 为 `7e3e67edbbed1bf9888184d9df282b700a323964`。本轮选择已有本地 `cpu-int8` 配置，7 个运行文件共 263,439,781 bytes（251.24 MiB）；`compact` 为 173.9 MiB 的可选小包。来源、版本、大小和 SHA-256 随清单保留；许可参见官方模型卡，模型许可独立于项目代码许可。
 
-d1-omni-600M 为第二个可选 ranker，`EdgeModelCatalog` 固定 `onnx-community/d1-omni-600M-ONNX` revision `4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0`；图像栈三张图均带 `.onnx_data` 外部权重（vision_encoder_fp16 约 180 MiB、embed_tokens_quantized 约 41 MiB、decision_q4 约 192 MiB，11 个文件合计 `437,985,561` bytes / 417.7 MiB），另含 config/tokenizer×2/preprocessor 与仓库根 `LICENSE`（LFM Open License v1.0，含年收入门槛条款，`EdgeModelStore` 将 LICENSE 列为必需文件）。决策图固定 `decision_q4.onnx`：官方 8-bit `decision_quantized.onnx` 的 MatMulNBits 节点缺 `accuracy_level=4`，ORT 1.22 在 macOS x86_64 与 Android arm64 均报 `Only 4b quantization is supported for unpacked compute`；q4 已在两端实测跑通。2026-10-20 SmolVLM 下架后，`EdgeModelStore.prepare` 固定取 d1 三张图，不做图名猜测或回退。权重在独立的 edge-model-solutions 仓库入库；street-snap 不提交权重、不把权重打进默认 APK。2026-10-27 起：pinned 文件清单（约 2 KB）随 APK 内置在 `assets/edge-model-manifests/`，prepare 零网络；下载匿名免鉴权、国内 hf-mirror 优先、HF 兜底、逐源切换 + Range 断点续传。
+d1-omni-600M 是当前唯一在线 ranker，`D1ModelCatalog`（`app/model/`）固定 `onnx-community/d1-omni-600M-ONNX` revision `4ebc1b97bf1477485371c79d1cf8d5e4e8eebfa0`；图像栈三张图均带 `.onnx_data` 外部权重（vision_encoder_fp16 约 180 MiB、embed_tokens_quantized 约 41 MiB、decision_q4 约 192 MiB，11 个文件合计 `437,985,561` bytes / 417.7 MiB），另含 config/tokenizer×2/preprocessor 与仓库根 `LICENSE`（LFM Open License v1.0，含年收入门槛条款，`ModelStore` 将 LICENSE 列为必需文件）。决策图固定 `decision_q4.onnx`：官方 8-bit `decision_quantized.onnx` 的 MatMulNBits 节点缺 `accuracy_level=4`，ORT 1.22 在 macOS x86_64 与 Android arm64 均报 `Only 4b quantization is supported for unpacked compute`；q4 已在两端实测跑通。2026-10-20 SmolVLM 下架后，计划解析固定取 d1 三张图，不做图名猜测或回退。权重在独立的 edge-model-solutions 仓库入库；street-snap 不提交权重、不把权重打进默认 APK。pinned 文件清单（约 2 KB）随 APK 内置在 `assets/edge-model-manifests/`，prepare 零网络；2026-10-30（T120）起 d1 与 pose 共用唯一权重出口 `app/model/ModelStore`，下载匿名免鉴权、魔搭 ModelScope 国内 CDN 首选、hf-mirror/HF（pose 为 Google）兜底、逐源切换 + Range 断点续传。
 
 默认 Preview/CI 不内置权重。显式内置调试包使用项目外模型目录，首次在前台启用构图辅助时导入应用私有目录；普通构建清理残留 staging，避免意外带入模型。复现命令：
 

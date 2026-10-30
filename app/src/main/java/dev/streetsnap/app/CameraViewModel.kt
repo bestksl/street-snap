@@ -6,13 +6,14 @@ import android.provider.OpenableColumns
 import androidx.camera.core.MeteringPoint
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import dev.streetsnap.app.composition.CompositionAssistant
 import dev.streetsnap.app.composition.AdviceSessionBudget
 import dev.streetsnap.app.composition.ExposureAdviser
 import dev.streetsnap.app.composition.ExposureIssue
 import dev.streetsnap.app.composition.LookAdviser
 import dev.streetsnap.app.composition.LookTarget
-import dev.streetsnap.app.edge.EdgeModelCatalog
-import dev.streetsnap.app.edge.InferenceStats
+import dev.streetsnap.app.model.D1ModelCatalog
+import dev.streetsnap.app.inference.InferenceStats
 import dev.streetsnap.app.pose.PoseAssistant
 import dev.streetsnap.camera.CameraController
 import dev.streetsnap.camera.ExposureMode
@@ -513,7 +514,7 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         composition.requestAdvice()
     }
     fun setCompositionModel(id: String) {
-        if (EdgeModelCatalog.find(id) != null) update { it.copy(compositionModel = id) }
+        if (D1ModelCatalog.find(id) != null) update { it.copy(compositionModel = id) }
     }
     fun onForegroundChanged(active: Boolean) {
         foreground = active

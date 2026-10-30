@@ -1,4 +1,4 @@
-package dev.streetsnap.app
+package dev.streetsnap.app.composition
 
 /**
  * Runs one composition request at a time, with a rest measured from its completion.

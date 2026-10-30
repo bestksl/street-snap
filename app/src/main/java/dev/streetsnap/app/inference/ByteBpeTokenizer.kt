@@ -1,4 +1,4 @@
-package dev.streetsnap.app.edge
+package dev.streetsnap.app.inference
 
 import java.io.ByteArrayOutputStream
 import java.io.File

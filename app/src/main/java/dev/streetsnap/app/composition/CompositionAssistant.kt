@@ -1,28 +1,17 @@
-package dev.streetsnap.app
+package dev.streetsnap.app.composition
 
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
-import dev.streetsnap.app.composition.AlignmentEvent
-import dev.streetsnap.app.composition.AlignmentFeedback
-import dev.streetsnap.app.composition.AlignmentTracker
-import dev.streetsnap.app.composition.CandidateContactSheet
-import dev.streetsnap.app.composition.CandidateSelectionGate
-import dev.streetsnap.app.composition.CompositionCandidate
-import dev.streetsnap.app.composition.FastCompositionAdvisor
-import dev.streetsnap.app.composition.FocusDisturbanceGate
-import dev.streetsnap.app.composition.SceneReading
-import dev.streetsnap.app.composition.SceneReadings
-import dev.streetsnap.app.edge.CompositionSuggestion
-import dev.streetsnap.app.edge.CropRanking
-import dev.streetsnap.app.edge.CandidateRanker
-import dev.streetsnap.app.edge.D1OmniRuntime
-import dev.streetsnap.app.edge.EdgeModelEntry
-import dev.streetsnap.app.edge.EdgeModelCatalog
-import dev.streetsnap.app.edge.EdgeModelStore
-import dev.streetsnap.app.edge.InferenceStats
-import dev.streetsnap.app.edge.ModelDownloadPlan
+import dev.streetsnap.app.inference.CandidateRanker
+import dev.streetsnap.app.inference.CropRanking
+import dev.streetsnap.app.inference.D1OmniRuntime
+import dev.streetsnap.app.inference.InferenceStats
+import dev.streetsnap.app.model.D1ModelCatalog
+import dev.streetsnap.app.model.D1ModelEntry
+import dev.streetsnap.app.model.ModelDownloadPlan
+import dev.streetsnap.app.model.ModelStore
 import dev.streetsnap.camera.CompositionFrameSource
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -58,7 +47,7 @@ internal enum class AssistStatus { OFF, UNINSTALLED, PAUSED, LOADING, READY, FAI
 internal enum class CompositionOutcome { RETURNED, NO_RESULT, UNSTABLE_SELECTION, TIMED_OUT, SCENE_CHANGED, FAILED }
 internal enum class AdviceOrigin { IMAGE_ANALYSIS, MODEL_SELECTION }
 internal data class CompositionUiState(
-    val modelId: String = EdgeModelCatalog.DEFAULT_MODEL_ID,
+    val modelId: String = D1ModelCatalog.DEFAULT_MODEL_ID,
     val install: ModelInstallStatus = ModelInstallStatus.CHECKING,
     val bytes: Long? = null,
     val downloadedBytes: Long = 0,
@@ -127,7 +116,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
     @Volatile private var focalLengthMm: Int = 28
     @Volatile private var adviceCount: Int = 0
     @Volatile private var lastEasterEggAtMs: Long = 0L
-    private val store = EdgeModelStore(context)
+    private val store = ModelStore(context)
     private val modelPreferences = context.getSharedPreferences("composition-models", Context.MODE_PRIVATE)
     private val _state = MutableStateFlow(CompositionUiState())
     val state = _state.asStateFlow()
@@ -194,7 +183,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         if (closed) return
         this.focalLengthMm = focalLengthMm.takeIf { it > 0 } ?: 28
         val next = Configuration(
-            EdgeModelCatalog.find(id)?.id ?: EdgeModelCatalog.DEFAULT_MODEL_ID,
+            D1ModelCatalog.find(id)?.id ?: D1ModelCatalog.DEFAULT_MODEL_ID,
             enabled, foreground, realtime, lookAdvice,
         )
         if (configuration == next) return
@@ -323,12 +312,12 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         installJob = scope.launch {
             _state.update { it.copy(install = ModelInstallStatus.PREPARING, installError = null) }
             try {
-                val model = requireNotNull(EdgeModelCatalog.find(config.id))
+                val model = requireNotNull(D1ModelCatalog.find(config.id))
                 // A previously downloaded model lives in app-private storage and survives
                 // same-signature updates with no network. Recognise it before any metadata
                 // call, so a blocked mirror can never redisplay an installed model as
                 // missing / failed after an app update.
-                val local = withContext(Dispatchers.IO) { store.installed(model) }
+                val local = withContext(Dispatchers.IO) { store.installedD1(model) }
                 if (configuration?.id != config.id) return@launch
                 if (local != null) {
                     plan = null
@@ -336,7 +325,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                         bytes = local.plan.totalBytes, installError = null) }
                     return@launch
                 }
-                val prepared = store.prepare(model)
+                val prepared = store.prepareD1Plan(model)
                 if (configuration?.id != config.id) return@launch
                 plan = prepared
                 _state.update { it.copy(install = ModelInstallStatus.AVAILABLE, bytes = prepared.totalBytes) }
@@ -358,7 +347,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         installJob = scope.launch {
             _state.update { it.copy(install = ModelInstallStatus.DOWNLOADING, downloadedBytes = 0, installError = null) }
             try {
-                store.download(prepared) { progress ->
+                store.downloadD1(prepared) { progress ->
                     if (configuration?.id == prepared.model.id) _state.update { it.copy(
                         downloadedBytes = progress.downloadedBytes, bytes = progress.totalBytes) }
                 }
@@ -402,7 +391,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
         installJob = scope.launch {
             try {
                 // Runtime cleanup holds this lock until native sessions and any active inference end.
-                sessionMutex.withLock { store.remove(requireNotNull(EdgeModelCatalog.find(config.id))) }
+                sessionMutex.withLock { store.removeD1(requireNotNull(D1ModelCatalog.find(config.id))) }
                 if (configuration?.id == config.id) {
                     plan = null
                     _state.update { it.copy(install = ModelInstallStatus.ABSENT, bytes = null, downloadedBytes = 0) }
@@ -628,14 +617,14 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 // CameraX binding and the first analysed frame instead of serialising behind
                 // them. The session still owns the published [runtime] and closes it exactly
                 // once in finally; a runtime built for a stale generation closes itself.
-                suspend fun ensureRuntimePublished(model: EdgeModelEntry) {
+                suspend fun ensureRuntimePublished(model: D1ModelEntry) {
                     var created: CandidateRanker? = null
                     try {
                         val installed = withContext(Dispatchers.IO) {
                             if (!modelPreferences.getBoolean("bundled-disabled-${model.id}", false)) {
-                                store.installBundled(model) ?: store.installed(model)
+                                store.installBundledD1(model) ?: store.installedD1(model)
                             } else {
-                                store.installed(model)
+                                store.installedD1(model)
                             }
                         }
                         if (!isCurrentSession()) {
@@ -681,7 +670,7 @@ internal class CompositionAssistant(context: Context, private val scope: Corouti
                 }
 
                 try {
-                    val model = requireNotNull(EdgeModelCatalog.find(config.id))
+                    val model = requireNotNull(D1ModelCatalog.find(config.id))
                     val analysisWanted = config.foreground && (config.enabled || config.lookAdvice)
                     // Start warming native sessions before the frame source is bound. An
                     // image-only restart (after model removal) has no model to load.

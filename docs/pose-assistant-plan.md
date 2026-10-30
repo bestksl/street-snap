@@ -25,7 +25,9 @@
 - `com.google.mediapipe:tasks-vision:1.1.1`（dl.google.com/dl/android/maven2，
   latest=1.1.1，含 arm64-v8a / armeabi-v7a / x86_64）。
 - `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_{lite,full,heavy}/float16/latest/pose_landmarker_{lite,full,heavy}.task`
-  5.8 / 9.4 / 30.7 MB。
+  5.8 / 9.4 / 30.7 MB。**App 内实际下载源以魔搭 ModelScope 匿名镜像为首选**
+  （`Composable/pose_landmarker_lite`，固定 commit，阿里云国内 CDN），Google Storage
+  仅作海外兜底；地址表统一在 `app/model/ModelSources.kt`，详见 [端侧模型附录](edge-model-plan.md)。
 
 **分发约束**：aar 是构建期依赖（与 CameraX 同类）；`.task` 模型 **不进 git、不进
 APK assets**，首次进入姿势助手时显式提示下载（仅 Wi-Fi 建议、可取消），存入
@@ -107,7 +109,8 @@ ImageAnalysis 帧 ──► PoseSource 接口
 
 - 实现：`app/pose/`（Pose/PoseCatalog/PoseCoach/PoseAssistant/MediaPipePoseSource）+
   `camera/PoseFrameSource`（共用单一分析流，借用 proxy 不 close，120ms 节流）+
-  `app/edge/PoseModel{Catalog,Store}`（显式下载、字节数+SHA-256 校验、可删除）+
+  `app/model/PoseModelCatalog` + 统一权重出口 `app/model/ModelStore`
+  （显式下载、字节数+SHA-256 校验、Range 续传、可删除；T120 起与 d1 共用同一下载器）+
   `PoseOverlayLayer`（白骨架贴合、琥珀目标人、底部关节引导卡、达成变绿保持 2.2s 自动
   换姿势、无人虚线目标、演示卡片轮播、设置内开关与模型管理）+ 顶部"姿势"pill。
 - 默认开启且为**演示模式**（不绑分析流、不下载，零隐私/耗电成本），装上 APK 点开即可见；

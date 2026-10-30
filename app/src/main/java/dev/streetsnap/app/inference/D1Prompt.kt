@@ -1,4 +1,4 @@
-package dev.streetsnap.app.edge
+package dev.streetsnap.app.inference
 
 /**
  * Direct port of Liquid d1's official `prompt.py` question encoding.

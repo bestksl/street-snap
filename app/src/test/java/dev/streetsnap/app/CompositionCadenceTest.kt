@@ -1,5 +1,7 @@
 package dev.streetsnap.app
 
+import dev.streetsnap.app.composition.CompositionCadence
+
 import org.junit.Assert.assertEquals
 import org.junit.Test
 

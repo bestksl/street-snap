@@ -1,6 +1,6 @@
 package dev.streetsnap.app
 
-import dev.streetsnap.app.edge.EdgeModelCatalog
+import dev.streetsnap.app.model.D1ModelCatalog
 import dev.streetsnap.color.ColorPreset
 import dev.streetsnap.color.FilmRegistry
 import org.json.JSONObject
@@ -295,17 +295,17 @@ class SettingsJsonTest {
     }
 
     @Test fun freshInstallSelectsTheRecommendedD1RankerAndUnknownIdsFallBack() {
-        assertEquals("d1-omni-600m", EdgeModelCatalog.DEFAULT_MODEL_ID)
-        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)
+        assertEquals("d1-omni-600m", D1ModelCatalog.DEFAULT_MODEL_ID)
+        assertEquals(D1ModelCatalog.DEFAULT_MODEL_ID, AppSettings().compositionModel)
         // A document without the field (upgrades), a removed/unknown id, and a retired
         // SmolVLM selection all recover to the shipped default (d1-omni-600m).
-        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+        assertEquals(D1ModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"preset":"MONO"}""").compositionModel)
-        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+        assertEquals(D1ModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"compositionModel":"removed-model"}""").compositionModel)
-        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+        assertEquals(D1ModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"compositionModel":"smolvlm-256m"}""").compositionModel)
-        assertEquals(EdgeModelCatalog.DEFAULT_MODEL_ID,
+        assertEquals(D1ModelCatalog.DEFAULT_MODEL_ID,
             SettingsJson.decode("""{"version":4,"compositionModel":"smolvlm-500m"}""").compositionModel)
         // The shipped selection is preserved rather than migrated.
         assertEquals("d1-omni-600m",

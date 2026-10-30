@@ -1,4 +1,4 @@
-package dev.streetsnap.app.edge
+package dev.streetsnap.app.inference
 
 import java.io.File
 import org.json.JSONArray
