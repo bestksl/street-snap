@@ -1,17 +1,25 @@
 {
   "schemaVersion": 1,
   "receiptId": "39c4e9b9-37b0-404f-ae7d-a31fbed15972",
-  "status": "current",
+  "status": "amended",
   "command": "deliver",
   "type": "architecture",
   "input": "/Users/haoxuanli/Documents/GitHub/street-snap/.archify/architecture-viewfinder-inference-20261029-171449/candidate.json",
-  "output": "/Users/haoxuanli/Documents/GitHub/street-snap/docs/viewfinder-inference-architecture.html",
+  "output": "/Users/jmzx/Documents/GitHub/street-snap/docs/viewfinder-inference-architecture.html",
   "specification": {
     "sha256": "d1643173d7ac7078d8aedfadd791eaaaf7d909abebc1ca99af8f118838c2dec7",
     "bytes": 19982
   },
   "artifact": {
-    "sha256": "aecccc3eb25630eac3a2a2c7ad2e99e0f005fc489b34cc36fae07039baba5495",
-    "bytes": 892563
-  }
+    "sha256": "5f362096063e21381b31a617b42332514642de832cde3423d28bf1c09f540170",
+    "bytes": 894010
+  },
+  "amendments": [
+    {
+      "date": "2026-10-30",
+      "task": "T120",
+      "commit": "fba2fe4169af0ca52614550c0819d2a71b429e5e",
+      "note": "人工手术式更新（本机无 Archify，非重新生成）：模型供给层改为 app/model 唯一权重出口（ModelStore + ModelSources）、魔搭 ModelScope 优先叙事；全部源码溯源链接由 app/edge 旧路径重钉到 model/inference/composition 新包并校正行段；pose 体积 5.8MB 订正为 5.5 MB。布局与样式未改，仅节点文案与溯源 JSON。"
+    }
+  ]
 }
