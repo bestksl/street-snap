@@ -38,3 +38,6 @@ dist/
 .agents/
 queue.md
 queue_shturl.md
+
+# Archify local working files (candidates, receipts, screenshots)
+.archify/
