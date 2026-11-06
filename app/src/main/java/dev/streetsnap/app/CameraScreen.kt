@@ -148,6 +148,7 @@ import dev.streetsnap.app.composition.arrowAngleDeg
 import dev.streetsnap.app.composition.arrowLabel
 import dev.streetsnap.app.inference.InferenceStats
 import dev.streetsnap.app.model.PoseModelCatalog
+import dev.streetsnap.app.pose.PoseCatalog
 import dev.streetsnap.app.pose.PoseModelStatus
 import dev.streetsnap.app.pose.PoseOverlayLayer
 import dev.streetsnap.app.pose.PoseUiState
@@ -192,6 +193,9 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
     val compositionState by model.composition.state.collectAsStateWithLifecycle()
     val compositionSource by model.composition.source.collectAsStateWithLifecycle()
     val compositionOverlay by model.composition.overlay.collectAsStateWithLifecycle()
+    // T123: read at this level so the bottom-cluster AI line can show the green phase.
+    val alignmentConfirmed by model.composition.alignmentConfirmed.collectAsStateWithLifecycle()
+    val poseState by model.pose.state.collectAsStateWithLifecycle()
     var permitted by remember { mutableStateOf(activity.hasCameraPermission()) }
     var denied by remember { mutableStateOf(false) }
     var adjustmentTab by remember { mutableStateOf<AdjustmentTab?>(null) }
@@ -205,6 +209,9 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
         }
     }
     var retry by remember { mutableIntStateOf(0) }
+    // T123: the long-press framing trial is triggered from the AI guidance line in the
+    // bottom cluster (framed portrait), so its state lives here, above both siblings.
+    var trialCrop by remember { mutableStateOf<NormalizedBoundingBox?>(null) }
     val snackbar = remember { SnackbarHostState() }
     BackHandler(enabled = adjustmentTab != null && !showCapabilities && !showBodyPicker) { adjustmentTab = null }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
@@ -279,7 +286,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                             Viewfinder(model, state, settings, retry, true, compositionSource, compositionOverlay, compositionState,
                                 Modifier.weight(1f).fillMaxHeight(), onRetry = { retry++ },
                                 onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
-                                systemBarTop = statusBarTop)
+                                systemBarTop = statusBarTop, trialCrop = trialCrop,
+                                onTrialCropChange = { trialCrop = it })
                             ShootingControls(state, settings, inFlight, loaded, lutLoading, model,
                                 Modifier.width(sideWidth).fillMaxHeight(),
                                 adjustmentTab, { adjustmentTab = it }, sidePanel = true,
@@ -308,7 +316,9 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         // the 3:4 picture shrinks a touch instead of clipping.
                         // The bottom band owns the navigation-bar inset; reserve it here so
                         // the 3:4 picture sizing matches the old safe-area layout.
-                        val clusterMinHeight = 254.dp + navigationBarBottom
+                        // T123: +28dp for the AI guidance strip (divider + strip + the
+                        // previous 254dp of reserved chrome below).
+                        val clusterMinHeight = 282.dp + navigationBarBottom
                         val framedWidth = minOf(maxWidth,
                             (maxHeight - statusBarTop - nameplateHeight - clusterMinHeight) * 3f / 4f)
                         Column(Modifier.fillMaxSize().background(Color.Black)) {
@@ -364,11 +374,15 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                             Viewfinder(model, state, settings, retry, false, compositionSource, compositionOverlay, compositionState,
                                 Modifier.width(framedWidth).aspectRatio(3f / 4f), framed = true, onRetry = { retry++ },
                                 onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
-                                nameplateHidden = hideNameplate)
+                                nameplateHidden = hideNameplate,
+                                trialCrop = trialCrop, onTrialCropChange = { trialCrop = it })
                             ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
                                 Modifier.fillMaxWidth().weight(1f).navigationBarsPadding(), framed = true,
                                 onTab = { adjustmentTab = it },
-                                latestPhoto = latestPhoto, openPhoto = activity::openPhoto)
+                                latestPhoto = latestPhoto, openPhoto = activity::openPhoto,
+                                poseState = poseState, compositionOverlay = compositionOverlay,
+                                aligned = alignmentConfirmed,
+                                onTrialCropChange = { trialCrop = it })
                         }
                         if (adjustmentTab != null) {
                             ControlBottomSheet(adjustmentTab!!, onDismiss = { adjustmentTab = null },
@@ -384,7 +398,8 @@ fun CameraScreen(activity: MainActivity, model: CameraViewModel = viewModel()) {
                         Viewfinder(model, state, settings, retry, landscape, compositionSource, compositionOverlay, compositionState,
                             Modifier.fillMaxSize(), onRetry = { retry++ },
                             onOpenLooks = { adjustmentTab = AdjustmentTab.LOOK },
-                            systemBarTop = statusBarTop)
+                            systemBarTop = statusBarTop, trialCrop = trialCrop,
+                            onTrialCropChange = { trialCrop = it })
                         ViewfinderOverlayBar(state, settings, inFlight, loaded, model,
                             Modifier.align(Alignment.BottomCenter).fillMaxWidth().navigationBarsPadding(),
                             onTab = { adjustmentTab = it },
@@ -448,6 +463,8 @@ private fun Viewfinder(
     // insets and avoids any whole-surface translation on transient inset changes (T116).
     systemBarTop: Dp = 0.dp,
     systemBarBottom: Dp = 0.dp,
+    trialCrop: NormalizedBoundingBox? = null,
+    onTrialCropChange: (NormalizedBoundingBox?) -> Unit = {},
 ) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current
@@ -577,9 +594,9 @@ private fun Viewfinder(
         val previewAlignment = if (framed || maxWidth > maxHeight) Alignment.Center else Alignment.TopCenter
         // clipToBounds keeps the T35 long-press trial zoom from painting outside the 3:4 picture.
         Box(Modifier.size(previewWidth, previewHeight).align(previewAlignment).clipToBounds()) {
-            // T35: while the advice card is long-pressed, the preview zooms to the suggested
-            // crop. Display-only: ImageCapture is a separate use case, photos stay full frame.
-            var trialCrop by remember { mutableStateOf<NormalizedBoundingBox?>(null) }
+            // T35/T123: while the guidance line (bottom cluster) or advice card is
+            // long-pressed, the preview zooms to the suggested crop. Display-only:
+            // ImageCapture is a separate use case, photos stay full frame.
             val suggestedBox = compositionOverlay?.suggestion?.let {
                 NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
             }
@@ -847,12 +864,11 @@ private fun Viewfinder(
                             .padding(end = 10.dp, top = systemBarTop + badgeTop + 50.dp))
                 }
             }
-            // The DSLR-style numeric readout (mode/aperture/shutter/ISO/EV) is now the
-            // T121: composition hint is one 26dp single-line edge pill — never a multi-line
-            // card covering the frame. One line carries the executable move; the model text
-            // and timing stay available via semantics / long-press preview. Absent entirely
-            // in 快拍模式 (the analysis source is unbound there anyway).
-            if (!settings.quickShotMode && settings.compositionEnabled) {
+            // T123: in framed portrait the recognition line lives in the black control
+            // cluster (AiGuidanceLine strip), so no text floats over the 3:4 picture.
+            // Other layouts keep this 26dp single-line edge pill — never a multi-line
+            // card. Absent entirely in 快拍模式 (the analysis source is unbound there).
+            if (!framed && !settings.quickShotMode && settings.compositionEnabled) {
                 // Lift over the pose card (bottom-centre, ~168dp in portrait) and over the
                 // bottom-left quick/pro toggle (~58dp). Landscape keeps separate slots.
                 val poseCardVisible = settings.poseAssistantEnabled && poseState.live && activeTrial == null
@@ -882,12 +898,12 @@ private fun Viewfinder(
                                     NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
                                 }
                                 if (box != null && CropTrial.from(box) != null) {
-                                    trialCrop = box
+                                    onTrialCropChange(box)
                                     while (true) {
                                         val event = awaitPointerEvent()
                                         if (event.changes.none { it.pressed }) break
                                     }
-                                    trialCrop = null
+                                    onTrialCropChange(null)
                                 }
                             }
                         }
@@ -912,7 +928,8 @@ private fun Viewfinder(
                 focusPoint != null && state.focusResult == false -> "未合焦 · 可重试或直接拍摄"
                 else -> null
             }
-            focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter)
+            // T123: framed portrait shows focus feedback in the bottom-cluster strip.
+            if (!framed) focusHint?.let { Text(it, Modifier.align(Alignment.BottomCenter)
                 .padding(bottom = floatingClearance + 8.dp + systemBarBottom),
                 color = Color.White, fontSize = 12.sp) }
             // The quick/pro mode switch lives bottom-left in every layout: 快拍 (default)
@@ -935,8 +952,9 @@ private fun Viewfinder(
             }
             // T72 pose assistant. Hidden in 快拍模式 and during the trial zoom.
             if (!settings.quickShotMode && settings.poseAssistantEnabled && activeTrial == null) {
+                // Framed portrait: skeleton only — its text is the bottom-cluster strip.
                 PoseOverlayLayer(poseState, settings.alignmentHapticEnabled, model::nextPose,
-                    Modifier.fillMaxSize())
+                    Modifier.fillMaxSize(), showGuidanceCard = !framed)
             }
         }
         val error = bindingError ?: previewError ?: state.error
@@ -1345,6 +1363,12 @@ private fun ViewfinderOverlayBar(
     latestPhoto: Uri?,
     openPhoto: (Uri) -> Unit,
     framed: Boolean = false,
+    // T123: recognition text lives in this black cluster instead of floating over the
+    // 3:4 picture. Only meaningful on the framed portrait path.
+    poseState: PoseUiState? = null,
+    compositionOverlay: CompositionOverlay? = null,
+    aligned: Boolean = false,
+    onTrialCropChange: (NormalizedBoundingBox?) -> Unit = {},
 ) {
     // T121: the focal set belongs to the active body (GR 28/40, X100VI 35/50, Rollei 35
     // just 35…), intersected with what the phone's digital crop actually supports.
@@ -1394,6 +1418,66 @@ private fun ViewfinderOverlayBar(
             horizontalAlignment = Alignment.CenterHorizontally) {
             // Hairline that separates the 3:4 screen from the camera-back control cluster.
             if (framed) HorizontalDivider(thickness = .8.dp, color = Color.White.copy(alpha = .07f))
+            // T123: the one recognition line (focus / pose / composition) lives here,
+            // below the picture edge, so no AI text ever covers the 3:4 screen.
+            if (framed) {
+                val poseDefinition = poseState?.let { PoseCatalog.byId(it.currentPoseId) }
+                val guidance = AiGuidanceLine.select(
+                    isFocusing = state.isFocusing,
+                    isFocusLocked = state.isFocusLocked,
+                    focusFailed = state.focusResult == false,
+                    pose = poseState?.takeIf { settings.poseAssistantEnabled && !quickShot },
+                    poseTitle = poseDefinition?.title,
+                    poseInvite = poseDefinition?.invite,
+                    aligned = aligned,
+                    composition = compositionOverlay?.takeIf {
+                        !quickShot && settings.compositionEnabled
+                    })
+                Box(Modifier.fillMaxWidth().height(28.dp).padding(horizontal = 14.dp),
+                    contentAlignment = Alignment.Center) {
+                    if (guidance != null) {
+                        val lineColor = when (guidance.tone) {
+                            AiGuidanceTone.READY -> Color(0xFF54C97E)
+                            AiGuidanceTone.FOCUS -> Color(0xFFFFB36B)
+                            AiGuidanceTone.NORMAL -> Color.White.copy(alpha = .88f)
+                        }
+                        Text(guidance.text,
+                            Modifier.fillMaxWidth()
+                                // Long-press the line previews the suggested framing, the
+                                // same gesture the in-picture pill keeps on other layouts.
+                                .pointerInput(compositionOverlay) {
+                                    val overlay = compositionOverlay ?: return@pointerInput
+                                    awaitEachGesture {
+                                        val down = awaitFirstDown(requireUnconsumed = false)
+                                        down.consume()
+                                        val held = awaitLongPressOrCancellation(down.id)
+                                            ?: return@awaitEachGesture
+                                        val box = overlay.suggestion.let {
+                                            NormalizedBoundingBox(it.left, it.top, it.right, it.bottom)
+                                        }
+                                        if (CropTrial.from(box) != null) {
+                                            onTrialCropChange(box)
+                                            while (true) {
+                                                val event = awaitPointerEvent()
+                                                if (event.changes.none { it.pressed }) break
+                                            }
+                                            onTrialCropChange(null)
+                                        }
+                                    }
+                                }
+                                .semantics {
+                                    contentDescription = buildString {
+                                        append(guidance.text)
+                                        if (guidance.detail != null && guidance.detail != guidance.text)
+                                            append("；").append(guidance.detail)
+                                        if (compositionOverlay != null) append("；长按预览建议构图")
+                                    }
+                                },
+                            color = lineColor, fontSize = 11.sp, lineHeight = 14.sp,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
+                    }
+                }
+            }
             // All slack collects above the controls; the shutter group is bottom-anchored.
             if (framed) Spacer(Modifier.weight(1f))
             // 快拍模式 hides the DSLR readout for a plain camera-back; pro mode keeps it.

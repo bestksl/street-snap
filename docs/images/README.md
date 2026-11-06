@@ -1,5 +1,7 @@
 # 界面截图
 
+> **2026-11-07 更新（T123 批次）：** 配合"识别文字全部移出取景画面"，重拍三张主图：`viewfinder.png`、`pose-live-guide.png`、`pose-ready.png`。竖屏 3:4 取景画面内零文字——对焦/姿势/构图提示合并为画面下方黑色控制区的单行识别条，姿势层只保留骨架。人物画面仍为 COCO 183391（CC BY-SA 2.0）单一来源，4:3 画布补偿参数沿用 T118（pose 两图参数①、viewfinder 构图态用实时规则建议直截）。达标绿帧（pose-ready）由录屏严格绿色扫描定位（rt123e f0097–f0101），非摆造。`pose-demo.png` 仍为 T118 版本（演示卡布局未变）。
+>
 > **2026-10-27 更新（T118 批次）：** 配合取景页回归修复（HDF 命名回正、测光肩屏与建议卡重叠、单次构图建议自消失），重拍四张主图：`viewfinder.png`、`pose-live-guide.png`、`pose-ready.png`、`pose-demo.png`。人物画面仍为 COCO 183391（CC BY-SA 2.0）单一来源、纯灰演示图不注入照片。T116 批次的 `compose-panel.png` 与方法记录保留在后文。
 >
 > **2026-10-26（T116 批次）：** 配合取景页菜单梳理（「柔光 / HDF」区分、扩散专区）与快门位移修复，五张主图全部重拍：`viewfinder.png`、`pose-live-guide.png`、`pose-ready.png`、`pose-demo.png`、`compose-panel.png`（前四者 T118 已再次重拍）。
