@@ -57,10 +57,16 @@ internal fun PoseOverlayLayer(
     hapticEnabled: Boolean,
     onNextPose: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * T123: framed portrait renders the skeleton alone; the recognition text moved
+     * to the AI guidance line in the black control cluster, so it never covers the
+     * subject. Demo mode keeps its card regardless (it IS the demo content).
+     */
+    showGuidanceCard: Boolean = true,
 ) {
     val definition = PoseCatalog.byId(state.currentPoseId)
     when {
-        state.live -> LivePoseLayer(state, definition, hapticEnabled, onNextPose, modifier)
+        state.live -> LivePoseLayer(state, definition, hapticEnabled, onNextPose, modifier, showGuidanceCard)
         state.demo -> DemoPoseLayer(definition, onNextPose, modifier)
     }
 }
@@ -72,6 +78,7 @@ private fun LivePoseLayer(
     hapticEnabled: Boolean,
     onNextPose: () -> Unit,
     modifier: Modifier,
+    showGuidanceCard: Boolean,
 ) {
     val guide = state.guide
     val ready = guide?.ready == true
@@ -161,12 +168,18 @@ private fun LivePoseLayer(
                 }
             }
         }
-        Column(
-            Modifier.align(Alignment.BottomCenter).padding(bottom = 60.dp, start = 28.dp, end = 28.dp)
+        if (showGuidanceCard) Column(
+            Modifier.align(Alignment.BottomCenter).padding(bottom = 52.dp, start = 28.dp, end = 28.dp)
                 .widthIn(max = 300.dp)
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color.Black.copy(alpha = .68f))
-                .padding(horizontal = 12.dp, vertical = 9.dp),
+                .semantics {
+                    contentDescription = buildString {
+                        append(if (ready) "姿势到位 · 保持" else definition.title)
+                        append("；白色虚线＝你的动作，圆圈＝目标关节")
+                    }
+                }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         ) {
             Text(
                 if (ready) "姿势到位 · 保持" else definition.title,
